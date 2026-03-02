@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebRTC Viewer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+      padding: 20px;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      margin-bottom: 20px;
+      font-size: 28px;
+    }
+    
+    .controls {
+      background: #2a2a2a;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    
+    .control-group {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    
+    label {
+      font-weight: 500;
+      font-size: 14px;
+    }
+    
+    select, input, button {
+      padding: 10px 15px;
+      border: none;
+      border-radius: 5px;
+      font-size: 14px;
+    }
+    
+    select, input {
+      background: #3a3a3a;
+      color: #fff;
+      border: 1px solid #4a4a4a;
+    }
+    
+    button {
+      background: #0066cc;
+      color: white;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+    
+    button:hover {
+      background: #0052a3;
+    }
+    
+    button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    
+    button.disconnect {
+      background: #cc3300;
+    }
+    
+    button.disconnect:hover {
+      background: #a32900;
+    }
+    
+    .video-container {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    
+    video {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    
+    .status {
+      padding: 15px;
+      background: #2a2a2a;
+      border-radius: 8px;
+      margin-top: 20px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+    }
+    
+    .status-item {
+      margin: 5px 0;
+    }
+    
+    .status-label {
+      color: #888;
+      margin-right: 10px;
+    }
+    
+    .status-connected {
+      color: #00cc66;
+    }
+    
+    .status-disconnected {
+      color: #cc3300;
+    }
+    
+    .status-connecting {
+      color: #ff9900;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WebRTC Stream Viewer</h1>
+    
+    <div class="controls">
+      <div class="control-group">
+        <label for="device">Device:</label>
+        <input type="text" id="device" value="dev1" placeholder="Device ID">
+      </div>
+      
+      <div class="control-group">
+        <label for="mode">Stream:</label>
+        <select id="mode">
+          <option value="raw">Raw RTSP</option>
+          <option value="ai">AI Processed</option>
+        </select>
+      </div>
+      
+      <button id="connect">Connect</button>
+      <button id="disconnect" class="disconnect" disabled>Disconnect</button>
+    </div>
+    
+    <div class="video-container">
+      <video id="v" autoplay playsinline controls></video>
+    </div>
+    
+    <div class="status">
+      <div class="status-item">
+        <span class="status-label">WebSocket:</span>
+        <span id="ws-status" class="status-disconnected">Disconnected</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">WebRTC:</span>
+        <span id="rtc-status" class="status-disconnected">Disconnected</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Session:</span>
+        <span id="session-id">-</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">ICE State:</span>
+        <span id="ice-state">-</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Connection State:</span>
+        <span id="conn-state">-</span>
+      </div>
+    </div>
+  </div>
+
+<script>
+// Configuration - update this with your actual signaling server URL
+const SIGNAL_WSS = "wss://signal.example.com/ws/viewer";
+
+let pc = null;
+let ws = null;
+let sessionId = null;
+
+// DOM elements
+const video = document.getElementById("v");
+const deviceInput = document.getElementById("device");
+const modeSelect = document.getElementById("mode");
+const connectBtn = document.getElementById("connect");
+const disconnectBtn = document.getElementById("disconnect");
+const wsStatus = document.getElementById("ws-status");
+const rtcStatus = document.getElementById("rtc-status");
+const sessionIdSpan = document.getElementById("session-id");
+const iceStateSpan = document.getElementById("ice-state");
+const connStateSpan = document.getElementById("conn-state");
+
+function log(...args) {
+  console.log("[Viewer]", ...args);
+}
+
+function updateStatus(element, text, statusClass) {
+  element.textContent = text;
+  element.className = statusClass;
+}
+
+function updateWsStatus(text, statusClass) {
+  updateStatus(wsStatus, text, statusClass);
+}
+
+function updateRtcStatus(text, statusClass) {
+  updateStatus(rtcStatus, text, statusClass);
+}
+
+async function connect() {
+  const deviceId = deviceInput.value.trim();
+  const stream = modeSelect.value;
+  
+  if (!deviceId) {
+    alert("Please enter a device ID");
+    return;
+  }
+  
+  log("Connecting to", SIGNAL_WSS);
+  updateWsStatus("Connecting...", "status-connecting");
+  
+  try {
+    ws = new WebSocket(SIGNAL_WSS);
+    
+    ws.onopen = () => {
+      log("WebSocket connected");
+      updateWsStatus("Connected", "status-connected");
+      
+      // Request stream
+      const msg = {
+        type: "viewer_join",
+        device_id: deviceId,
+        stream: stream
+      };
+      log("Sending viewer_join:", msg);
+      ws.send(JSON.stringify(msg));
+    };
+    
+    ws.onmessage = async (event) => {
+      const msg = JSON.parse(event.data);
+      log("Received message:", msg);
+      await handleSignalingMessage(msg);
+    };
+    
+    ws.onerror = (error) => {
+      log("WebSocket error:", error);
+      updateWsStatus("Error", "status-disconnected");
+    };
+    
+    ws.onclose = () => {
+      log("WebSocket closed");
+      updateWsStatus("Disconnected", "status-disconnected");
+      cleanup();
+    };
+    
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = false;
+    
+  } catch (error) {
+    log("Connection error:", error);
+    updateWsStatus("Error", "status-disconnected");
+    alert("Failed to connect: " + error.message);
+  }
+}
+
+async function handleSignalingMessage(msg) {
+  switch (msg.type) {
+    case "session_created":
+      sessionId = msg.session_id;
+      sessionIdSpan.textContent = sessionId;
+      log("Session created:", sessionId);
+      
+      // Create peer connection
+      await createPeerConnection(msg.ice_servers);
+      break;
+      
+    case "offer":
+      log("Received offer");
+      if (!pc) {
+        log("Warning: No peer connection, ignoring offer");
+        return;
+      }
+      
+      await pc.setRemoteDescription({
+        type: "offer",
+        sdp: msg.sdp
+      });
+      
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      
+      // Send answer
+      ws.send(JSON.stringify({
+        type: "answer",
+        session_id: sessionId,
+        sdp: answer.sdp
+      }));
+      log("Sent answer");
+      break;
+      
+    case "ice_candidate":
+      log("Received ICE candidate");
+      if (pc && msg.candidate) {
+        try {
+          await pc.addIceCandidate(msg.candidate);
+        } catch (e) {
+          log("Error adding ICE candidate:", e);
+        }
+      }
+      break;
+      
+    case "error":
+      log("Server error:", msg.error);
+      alert("Error: " + msg.error);
+      updateRtcStatus("Error: " + msg.error, "status-disconnected");
+      break;
+      
+    default:
+      log("Unknown message type:", msg.type);
+  }
+}
+
+async function createPeerConnection(iceServers) {
+  log("Creating peer connection with ICE servers:", iceServers);
+  
+  const config = {
+    iceServers: iceServers || [
+      { urls: "stun:stun.l.google.com:19302" }
+    ]
+  };
+  
+  pc = new RTCPeerConnection(config);
+  
+  // Handle incoming tracks
+  pc.ontrack = (event) => {
+    log("Received remote track:", event.track.kind);
+    if (event.streams && event.streams[0]) {
+      video.srcObject = event.streams[0];
+      updateRtcStatus("Streaming", "status-connected");
+    }
+  };
+  
+  // Handle ICE candidates
+  pc.onicecandidate = (event) => {
+    if (event.candidate && ws) {
+      log("Sending ICE candidate");
+      ws.send(JSON.stringify({
+        type: "ice_candidate",
+        session_id: sessionId,
+        candidate: event.candidate
+      }));
+    }
+  };
+  
+  // Monitor connection state
+  pc.oniceconnectionstatechange = () => {
+    log("ICE state:", pc.iceConnectionState);
+    iceStateSpan.textContent = pc.iceConnectionState;
+    
+    if (pc.iceConnectionState === "failed") {
+      updateRtcStatus("Connection failed", "status-disconnected");
+    }
+  };
+  
+  pc.onconnectionstatechange = () => {
+    log("Connection state:", pc.connectionState);
+    connStateSpan.textContent = pc.connectionState;
+    
+    switch (pc.connectionState) {
+      case "connected":
+        updateRtcStatus("Connected", "status-connected");
+        break;
+      case "disconnected":
+      case "failed":
+        updateRtcStatus("Disconnected", "status-disconnected");
+        break;
+      case "connecting":
+        updateRtcStatus("Connecting...", "status-connecting");
+        break;
+    }
+  };
+  
+  updateRtcStatus("Waiting for offer...", "status-connecting");
+}
+
+function disconnect() {
+  log("Disconnecting");
+  
+  if (ws) {
+    if (sessionId) {
+      ws.send(JSON.stringify({
+        type: "hangup",
+        session_id: sessionId
+      }));
+    }
+    ws.close();
+  }
+  
+  cleanup();
+}
+
+function cleanup() {
+  if (pc) {
+    pc.close();
+    pc = null;
+  }
+  
+  if (video.srcObject) {
+    video.srcObject.getTracks().forEach(track => track.stop());
+    video.srcObject = null;
+  }
+  
+  sessionId = null;
+  sessionIdSpan.textContent = "-";
+  iceStateSpan.textContent = "-";
+  connStateSpan.textContent = "-";
+  
+  updateRtcStatus("Disconnected", "status-disconnected");
+  
+  connectBtn.disabled = false;
+  disconnectBtn.disabled = true;
+}
+
+// Event listeners
+connectBtn.addEventListener("click", connect);
+disconnectBtn.addEventListener("click", disconnect);
+
+// Cleanup on page unload
+window.addEventListener("beforeunload", () => {
+  disconnect();
+});
+
+log("Viewer ready. Click Connect to start.");
+</script>
+</body>
+</html>

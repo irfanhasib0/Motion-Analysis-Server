@@ -1,0 +1,36 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  signaling:
+    build: ./signaling
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - TURN_REALM=turn.example.com
+      - TURN_SHARED_SECRET=CHANGE_ME_LONG_RANDOM
+      - TURN_HOST=turn.example.com
+      - TURN_PORT=3478
+    depends_on:
+      - redis
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: "host"
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared
+    depends_on:
+      - signaling

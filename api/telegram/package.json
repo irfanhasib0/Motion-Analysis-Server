@@ -1,0 +1,14 @@
+{
+  "name": "telegram-receiver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal Telegram receiver using gramjs",
+  "main": "receiver.js",
+  "scripts": {
+    "start": "node receiver.js"
+  },
+  "dependencies": {
+    "input": "^1.0.1",
+    "telegram": "^2.22.2"
+  }
+}

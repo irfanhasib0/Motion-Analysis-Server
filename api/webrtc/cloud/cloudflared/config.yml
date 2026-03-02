@@ -1,0 +1,7 @@
+tunnel: <TUNNEL-UUID>
+credentials-file: /etc/cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: signal.example.com
+    service: http://signaling:8000
+  - service: http_status:404

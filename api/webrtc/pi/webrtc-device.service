@@ -1,0 +1,15 @@
+[Unit]
+Description=WebRTC Device Agent
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Motion-Analysis/webrtc/pi
+EnvironmentFile=/home/pi/Motion-Analysis/webrtc/pi/.env
+ExecStart=/usr/bin/python3 device_agent.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

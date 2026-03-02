@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>FCM Web Hello</title>
+</head>
+<body>
+  <h1>FCM Web Hello</h1>
+
+  <button id="btnEnable">1) Enable Notifications & Get Token</button>
+  <button id="btnRegister">2) Register Token to FastAPI</button>
+  <button id="btnSend">3) Send Hello Push</button>
+
+  <pre id="log"></pre>
+
+  <!-- Firebase v9 compat (easy copy/paste) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-messaging-compat.js"></script>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const log = (...args) => logEl.textContent += args.join(" ") + "\n";
+
+    // 1) Firebase config (Firebase Console -> Project settings -> Your apps -> Web app)
+    const firebaseConfig = {
+        apiKey: "AIzaSyD4RIGlIKB0MPqcRjJjPGBH3t18SaHMYXE",
+        authDomain: "nvr-101.firebaseapp.com",
+        projectId: "nvr-101",
+        storageBucket: "nvr-101.firebasestorage.app",
+        messagingSenderId: "185157179899",
+        appId: "1:185157179899:web:13936bc69aa75664b1935e",
+        measurementId: "G-DG9VES3DEL"
+        };
+
+    firebase.initializeApp(firebaseConfig);
+    const messaging = firebase.messaging();
+
+    const VAPID_KEY = "BBcS6OsSNXUFtqFZkryAIj0QS1IFe0dtaGiQGOxEITy1fX8ro4u9RimVWhMTauLBNrjXTsTGFJ3MTwH3Rftl__A";
+
+    let currentToken = null;
+    const userId = "user_123"; // demo
+
+    document.getElementById("btnEnable").onclick = async () => {
+      try {
+        // Register SW (must be accessible; for many setups keep it at site root)
+        const reg = await navigator.serviceWorker.register("./fbase.js");
+        log("SW registered:", reg.scope);
+
+        const permission = await Notification.requestPermission();
+        log("Notification permission:", permission);
+        if (permission !== "granted") return;
+
+        currentToken = await messaging.getToken({ vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+        log("FCM token:", currentToken);
+
+        // Optional: handle foreground messages
+        messaging.onMessage((payload) => {
+          log("Foreground message:", JSON.stringify(payload));
+        });
+      } catch (e) {
+        log("Error:", e);
+      }
+    };
+
+    document.getElementById("btnRegister").onclick = async () => {
+      if (!currentToken) return log("Get token first.");
+      const resp = await fetch("http://localhost:3001/register_token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, token: currentToken })
+      });
+      log("register_token:", resp.status, await resp.text());
+    };
+
+    document.getElementById("btnSend").onclick = async () => {
+      if (!currentToken) return log("Get token first.");
+      const resp = await fetch("http://localhost:3001/send_hello", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: currentToken, title: "Hello", body: "Hello from FastAPI!", data: { kind: "hello" } })
+      });
+      log("send_hello:", resp.status, await resp.text());
+    };
+  </script>
+</body>
+</html>
