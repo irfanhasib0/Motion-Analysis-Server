@@ -19,7 +19,7 @@ import './LiveView.css';
 const EventView = ({ recordings = [], cameras = [] }) => {
   // ===== Tunable interaction parameters =====
   const MOUSE_DRAG_SENSITIVITY = 2.2;
-  const TOUCH_DRAG_SENSITIVITY = 1.8;
+  const TOUCH_DRAG_SENSITIVITY = 3.0;
 
   // ===== Source data normalization =====
   const validRecordings = Array.isArray(recordings) ? recordings : [];
@@ -59,6 +59,7 @@ const EventView = ({ recordings = [], cameras = [] }) => {
     startScrollLeft: 0,
     horizontalLocked: false,
     moved: false,
+    lastDx: 0,
   });
   const suppressClickUntilRef = useRef(0);
 
@@ -467,6 +468,7 @@ const EventView = ({ recordings = [], cameras = [] }) => {
       startScrollLeft: rowElement.scrollLeft,
       horizontalLocked: false,
       moved: false,
+      lastDx: 0,
     };
   };
 
@@ -486,9 +488,9 @@ const EventView = ({ recordings = [], cameras = [] }) => {
     const dy = touch.clientY - dragState.startY;
 
     if (!dragState.horizontalLocked) {
-      if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) {
+      if (Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy)) {
         dragState.horizontalLocked = true;
-      } else if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(dx)) {
+      } else if (Math.abs(dy) > 6 && Math.abs(dy) >= Math.abs(dx)) {
         dragState.active = false;
         return;
       }
@@ -498,9 +500,11 @@ const EventView = ({ recordings = [], cameras = [] }) => {
       return;
     }
 
-    if (Math.abs(dx) > 4) {
+    if (Math.abs(dx) > 3) {
       dragState.moved = true;
     }
+
+    dragState.lastDx = dx;
 
     event.preventDefault();
     rowElement.scrollLeft = dragState.startScrollLeft - (dx * TOUCH_DRAG_SENSITIVITY);
@@ -508,6 +512,7 @@ const EventView = ({ recordings = [], cameras = [] }) => {
 
   const handleRowTouchEnd = (cameraId) => {
     const dragState = touchDragStateRef.current;
+    const rowElement = rowScrollRefs.current[cameraId];
     if (!dragState.active || dragState.cameraId !== cameraId) {
       touchDragStateRef.current = {
         active: false,
@@ -517,13 +522,26 @@ const EventView = ({ recordings = [], cameras = [] }) => {
         startScrollLeft: 0,
         horizontalLocked: false,
         moved: false,
+        lastDx: 0,
       };
       return;
     }
 
-    if (dragState.moved) {
+    if (dragState.moved && rowElement) {
       suppressClickUntilRef.current = Date.now() + 220;
-      snapRowToNearestCard(cameraId);
+
+      const firstCard = rowElement.querySelector('.reel-card');
+      const gap = parseFloat(window.getComputedStyle(rowElement).columnGap || '20') || 20;
+      const stepWidth = (firstCard ? firstCard.offsetWidth : 320) + gap;
+      const flickThreshold = 20;
+
+      if (Math.abs(dragState.lastDx) >= flickThreshold) {
+        const direction = dragState.lastDx < 0 ? 1 : -1;
+        const nextLeft = Math.max(0, dragState.startScrollLeft + (direction * stepWidth));
+        rowElement.scrollTo({ left: nextLeft, behavior: 'smooth' });
+      } else {
+        snapRowToNearestCard(cameraId);
+      }
     }
 
     touchDragStateRef.current = {
@@ -534,6 +552,7 @@ const EventView = ({ recordings = [], cameras = [] }) => {
       startScrollLeft: 0,
       horizontalLocked: false,
       moved: false,
+      lastDx: 0,
     };
   };
 
@@ -614,7 +633,7 @@ const EventView = ({ recordings = [], cameras = [] }) => {
             style={{ width: '170px' }}
           >
             <option value="play">File Playback</option>
-            <option value="stream">Legacy Stream</option>
+            <option value="stream">Legacy Stream (Video only)</option>
           </select>
           <span className="recordings-count">{completedRecordings.length} videos</span>
           <span className="page-indicator">{cameraRows.length} camera rows</span>
@@ -959,7 +978,6 @@ const EventView = ({ recordings = [], cameras = [] }) => {
                             ref={(el) => (expandedVideoRefs.current[expandedRecording.id] = el)}
                             className="reel-video"
                             src={api.getRecordingStreamUrl(expandedRecording.id, 'play')}
-                            muted
                             loop={false}
                             playsInline
                             controls

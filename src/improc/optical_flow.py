@@ -346,44 +346,92 @@ class OpticalFlowTracker:
             _ch += 1
             vel = 0.1*self.memory.get_traj_velocities(traj_id=_id)#[-200:]
             if len(vel) > 0:
-                points = np.array([[i + 300, self.viz_div_h*_ch + 3*v] for i, v in enumerate(vel)], dtype=np.int32)
-                points = points.reshape((-1, 1, 2))  # Reshape for cv2.polylines
-                points = points[-self.viz_div_w:]  # Keep only the last 'viz_div_w' points
-                points_dict[_id] = [points, np.mean(vel)]
+                points_dict[_id] = {
+                    'vel': np.asarray(vel, dtype=np.float32),
+                    'mean_vel': float(np.mean(vel)),
+                    'channel': int(_ch),
+                }
         
-        viz_frame   = self._draw_pts_flow(frame, self.prev_pts)
-        plot_array, res = self.plot_velocities(frame, points_dict)
+        viz_frame = self._draw_pts_flow(frame, self.prev_pts)
         
         if self.det_method == 'fast':
             self.prev_pts = self._detect_pts(gray, det_feat_pts=False)
-            return viz_frame, plot_array, res
+            return viz_frame, points_dict
         
         self._update_init_pts(gray)
         self.count += 1
-        return viz_frame, plot_array, res
+        return viz_frame, points_dict
     
     def plot_velocities(self, plot_array, points_dict):
-        plot_array = 0* plot_array
-        _ch = 0
+        plot_array = 0 * plot_array
+
+        h, w = plot_array.shape[:2]
+        top_margin = max(8, int(h * 0.20))
+        bottom_margin = max(6, int(h * 0.03))
+        usable_h = max(1, h - top_margin - bottom_margin)
+
+        row_count = max(1, min(len(points_dict), self.num_traj_viz))
+        row_h = max(10, usable_h // row_count)
+
+        scale = max(0.65, min(1.6, h / 720.0))
+        baseline_thickness = max(1, int(round(1.2 * scale)))
+        curve_thickness = max(1, int(round(2.0 * scale)))
+        font_scale = max(0.38, 0.60 * scale)
+        text_thickness = max(1, int(round(1.5 * scale)))
+        text_gap = max(10, int(round(15 * scale)))
+        left_pad = max(8, int(round(10 * scale)))
+        text_start_offset = max(8, int(round(10 * scale)))
+        graph_x0 = max(left_pad + 4, int(round(w * 0.18)))
+        max_pts = max(1, w - graph_x0 - left_pad)
+
+        points_items = list(points_dict.items())
+        bg_diff_int = int(self.bg_diff)
+        n_colors = self.n_colors
+        colors = self.colors
+
         res = {}
-        for _id, (points, mean_vel) in points_dict.items():
-            y_pos = self.viz_div_h*_ch
-            cv2.line(plot_array, 
-                    (0, y_pos), (plot_array.shape[1], y_pos),  
-                    (150, 150, 150), 1)
-            cv2.polylines(plot_array,
-                            pts=[points],
-                            isClosed=False,
-                            color=self.colors[_ch],
-                            thickness=2)
-            y_pos = y_pos - self.viz_div_h + 25
-            for elem in [f'id: {_id}', f'vel: {mean_vel:.2f} diff: {int(self.bg_diff)}']:
-                cv2.putText(plot_array, elem,
-                            (10, y_pos),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, self.colors[_ch], 2)
-                y_pos += 25
-            res[_id] = {'vel': round(mean_vel,2), 'bg_diff': int(self.bg_diff)}
-            _ch += 1
+        for idx, (_id, payload) in enumerate(points_items):
+            color = colors[idx % n_colors]
+            center_y = top_margin + idx * row_h + (row_h // 2)
+
+            cv2.line(
+                plot_array,
+                (0, center_y),
+                (w, center_y),
+                (150, 150, 150),
+                baseline_thickness,
+                cv2.LINE_AA,
+            )
+
+            vel = np.asarray(payload.get('vel', []), dtype=np.float32).reshape(-1)
+            mean_vel = float(payload.get('mean_vel', 0.0))
+            if vel.size > 0:
+                vel = vel[-max_pts:]
+                amp = max(float(np.max(np.abs(vel))), 1e-6)
+                y_amp = max(3.0, row_h * 0.25)
+
+                xs = np.arange(vel.size, dtype=np.float32) + graph_x0
+                ys = center_y - (vel / amp) * y_amp
+                points = np.stack([xs, ys], axis=1).astype(np.int32).reshape((-1, 1, 2))
+
+                cv2.polylines(
+                    plot_array,
+                    pts=[points],
+                    isClosed=False,
+                    color=color,
+                    thickness=curve_thickness,
+                    lineType=cv2.LINE_AA,
+                )
+
+            #y_pos = top_margin + idx * row_h + text_start_offset
+            #for elem in [f'id: {_id}', f'vel: {mean_vel:.2f} diff: {bg_diff_int}']:
+            #    cv2.putText(plot_array, elem,
+            #                (left_pad, y_pos),
+            #                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, text_thickness, cv2.LINE_AA)
+            #    y_pos += text_gap
+            res[_id] = {'vel': round(mean_vel,2), 'bg_diff': bg_diff_int}
+            if idx >= self.num_traj_viz - 1:
+                break
 
         return plot_array, res
         

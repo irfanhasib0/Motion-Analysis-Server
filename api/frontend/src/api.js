@@ -83,6 +83,17 @@ export const api = {
     const normalized = mode === 'stream' ? 'stream' : 'play';
     localStorage.setItem(RECORDING_PLAYBACK_MODE_KEY, normalized);
   },
+  getLiveStreamMode: async () => {
+    const response = await apiClient.get('/system/live-stream-mode');
+    const mode = response?.data?.live_stream_mode;
+    return mode === 'hls' ? 'hls' : 'mjpeg';
+  },
+  setLiveStreamMode: async (mode) => {
+    const normalized = mode === 'hls' ? 'hls' : 'mjpeg';
+    const response = await apiClient.post('/system/live-stream-mode', { mode: normalized });
+    const updatedMode = response?.data?.live_stream_mode;
+    return updatedMode === 'hls' ? 'hls' : 'mjpeg';
+  },
   appendQueryParams,
 
   // Camera endpoints
@@ -110,7 +121,30 @@ export const api = {
   },
   
   // Streaming endpoints
-  getCameraStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/stream`),
+  getCameraMjpegStreamUrl: (cameraId) =>
+    appendQueryParams(buildUrlWithToken(`/api/cameras/${cameraId}/stream`), { mode: 'mjpeg' }),
+  getCameraHlsManifestUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/hls/index.m3u8`),
+  getCameraStreamModeInfo: (cameraId, mode = 'mjpeg') =>
+    apiClient.get(`/cameras/${cameraId}/stream`, { params: { mode } }),
+  getCameraStreamUrl: (cameraId, mode = 'mjpeg') => {
+    return mode === 'hls'
+      ? buildUrlWithToken(`/api/cameras/${cameraId}/hls/index.m3u8`)
+      : appendQueryParams(buildUrlWithToken(`/api/cameras/${cameraId}/stream`), { mode: 'mjpeg' });
+  },
+  getCameraAudioStreamUrl: (cameraId, fmt = 'mp3', nonce = null) => {
+    const base = buildUrlWithToken(`/api/cameras/${cameraId}/audio_stream?fmt=${encodeURIComponent(fmt)}`);
+    return nonce ? appendQueryParams(base, { nonce }) : base;
+  },
+  startCameraAudioStream: (cameraId, fmt = 'wav') =>
+    apiClient.post(`/cameras/${cameraId}/audio_stream/start`, null, { params: { fmt } }),
+  getCameraAudioAnalysis: (cameraId) =>
+    apiClient.get(`/cameras/${cameraId}/audio_stream/analysis`),
+  getCameraSensitivity: (cameraId) =>
+    apiClient.get(`/cameras/${cameraId}/sensitivity`),
+  setCameraSensitivity: (cameraId, sensitivity) =>
+    apiClient.put(`/cameras/${cameraId}/sensitivity`, { sensitivity }),
+  stopCameraAudioStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/audio_stream/stop`),
+  stopCameraHlsStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/hls/stop`),
   closeCameraStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/stream/close`),
   getBlankStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/stream/blank`),
   getRecordingStreamUrl: (recordingId, mode = getStoredRecordingPlaybackMode()) => {

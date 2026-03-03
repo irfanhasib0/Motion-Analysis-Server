@@ -1,51 +1,430 @@
-import React, { useState } from 'react';
-import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../api';
 import './CameraList.css';
 
-const CameraList = ({ cameras, setCameras }) => {
-  console.log('CameraList component rendered with cameras:', cameras);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [editingCamera, setEditingCamera] = useState(null);
-  const [newCamera, setNewCamera] = useState({
-    name: '',
-    camera_type: 'rtsp',
-    source: '',
-    resolution: '1920x1080',
-    fps: 30,
-    enabled: true,
-    description: '',
-    location: ''
-  });
+const DEFAULT_CAMERA_FORM = {
+  name: '',
+  camera_type: 'rtsp',
+  source: '',
+  resolution: '1920x1080',
+  fps: 30,
+  enabled: true,
+  description: '',
+  location: '',
+  audio_enabled: false,
+  audio_source: 'default',
+  audio_input_format: 'pulse',
+  audio_sample_rate: 16000,
+  audio_chunk_size: 512,
+};
 
-  // Per-camera UI settings for supporting screen
-  const [cameraSettings, setCameraSettings] = useState({}); // { [id]: { sensitivity: 'low'|'medium'|'high', supportEnabled: boolean } }
+const COMPACT_BUTTON_STYLE = { padding: '6px 10px', fontSize: '12px', lineHeight: 1.1 };
 
-  // Derive aspect ratio from resolution (e.g., "1920x1080" -> "1920 / 1080"). Fallback to 16/9.
-  const parseAspect = (resolution) => {
-    const m = /^([0-9]+)x([0-9]+)$/i.exec(resolution || '');
-    if (m) {
-      const w = parseInt(m[1], 10) || 16;
-      const h = parseInt(m[2], 10) || 9;
-      return `${w} / ${h}`;
-    }
+const AUDIO_TOGGLE_STYLE = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '32px',
+  height: '32px',
+  borderRadius: '8px',
+  border: '1px solid #2f3743',
+  cursor: 'pointer',
+};
+
+const AUDIO_PANEL_STYLE = {
+  display: 'inline-flex',
+  flexDirection: 'column',
+  alignItems: 'stretch',
+  width: '280px',
+  flex: '0 0 auto',
+  padding: '4px 8px',
+  border: '1px solid rgba(148,163,184,0.25)',
+  borderRadius: '10px',
+  background: 'rgba(10,14,20,0.35)',
+};
+
+const AUDIO_PLAYER_STYLE = { width: '100%', maxWidth: '100%', height: '22px' };
+
+const AUDIO_SAMPLE_RATE_OPTIONS = [
+  { value: 16000, label: '16000 (Recommended balance)' },
+  { value: 22050, label: '22050 (Clearer voice)' },
+  { value: 32000, label: '32000 (Higher clarity)' },
+  { value: 44100, label: '44100 (High quality)' },
+  { value: 48000, label: '48000 (Studio / highest quality)' },
+  { value: 8000, label: '8000 (Very low bandwidth)' },
+];
+
+const AUDIO_CHUNK_SIZE_OPTIONS = [
+  { value: 256, label: '256 (Low latency, more CPU)' },
+  { value: 512, label: '512 (Recommended balance)' },
+  { value: 1024, label: '1024 (Stable, higher latency)' },
+  { value: 2048, label: '2048 (Very stable, high latency)' },
+  { value: 4096, label: '4096 (Maximum stability, highest latency)' },
+];
+
+const AUDIO_LATENCY_PROFILES = {
+  low: { audio_sample_rate: 16000, audio_chunk_size: 256 },
+  balanced: { audio_sample_rate: 16000, audio_chunk_size: 512 },
+  stable: { audio_sample_rate: 22050, audio_chunk_size: 1024 },
+};
+
+const SENSITIVITY_LEVEL = 5;
+const DEFAULT_SENSITIVITY = 2;
+
+const getCameraAspectRatio = (resolution) => {
+  const match = /^([0-9]+)x([0-9]+)$/i.exec(resolution || '');
+  if (!match) {
     return '16 / 9';
+  }
+  const width = parseInt(match[1], 10) || 16;
+  const height = parseInt(match[2], 10) || 9;
+  return `${width} / ${height}`;
+};
+
+const getAudioFormatPriority = () => {
+  if (typeof document === 'undefined') {
+    return ['mp3', 'aac', 'opus', 'wav'];
+  }
+
+  const probe = document.createElement('audio');
+  const supports = (mime) => {
+    try {
+      const result = probe.canPlayType ? probe.canPlayType(mime) : '';
+      return result === 'probably' || result === 'maybe';
+    } catch {
+      return false;
+    }
   };
 
-  const handleSensitivityChange = (cameraId, level) => {
+  const ordered = [];
+  if (supports('audio/mpeg')) ordered.push('mp3');
+  if (supports('audio/aac') || supports('audio/mp4; codecs="mp4a.40.2"')) ordered.push('aac');
+  if (supports('audio/ogg; codecs="opus"') || supports('audio/ogg')) ordered.push('opus');
+  if (supports('audio/wav')) ordered.push('wav');
+  return ordered.length ? ordered : ['mp3', 'aac', 'opus', 'wav'];
+};
+
+const CameraList = ({ cameras, setCameras }) => {
+  // -----------------------------
+  // Page-level state
+  // -----------------------------
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [editingCamera, setEditingCamera] = useState(null);
+  const [newCamera, setNewCamera] = useState({ ...DEFAULT_CAMERA_FORM });
+
+  // Per-camera UI settings for supporting screen
+  const [cameraSettings, setCameraSettings] = useState({}); // { [id]: { sensitivity: number(0..5), supportEnabled: boolean } }
+  const [hlsFailedByCamera, setHlsFailedByCamera] = useState({});
+  const [liveStreamMode, setLiveStreamMode] = useState('mjpeg');
+  const [isTogglingLiveMode, setIsTogglingLiveMode] = useState(false);
+
+  const isLiveHlsMode = liveStreamMode === 'hls';
+
+  const handleToggleLiveStreamMode = async () => {
+    const targetMode = liveStreamMode === 'hls' ? 'mjpeg' : 'hls';
+    setIsTogglingLiveMode(true);
+    try {
+      const mode = await api.setLiveStreamMode(targetMode);
+      setLiveStreamMode(mode);
+      if (mode === 'hls') {
+        setHlsFailedByCamera({});
+      }
+      toast.success(`Live mode switched to ${mode.toUpperCase()}`);
+    } catch (error) {
+      toast.error('Failed to switch live mode: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setIsTogglingLiveMode(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadLiveMode = async () => {
+      try {
+        const mode = await api.getLiveStreamMode();
+        if (!cancelled) {
+          setLiveStreamMode(mode);
+        }
+      } catch (error) {
+        console.error('Failed to load live stream mode from backend, defaulting to mjpeg:', error);
+        if (!cancelled) {
+          setLiveStreamMode('mjpeg');
+        }
+      }
+    };
+
+    loadLiveMode();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // -----------------------------
+  // Subcomponents
+  // -----------------------------
+  const CameraAudioPanel = ({ camera }) => {
+    const audioRef = useRef(null);
+    const isOnline = camera.status === 'online' || camera.status === 'recording';
+    const shouldRenderAudio = isOnline && Boolean(camera.audio_enabled);
+    const [audioPlaybackFormat, setAudioPlaybackFormat] = useState('mp3');
+    const [activeAudioUrl, setActiveAudioUrl] = useState('');
+
+    useEffect(() => {
+      // Pick best available browser codec for this camera panel.
+      setAudioPlaybackFormat(getAudioFormatPriority()[0]);
+      setActiveAudioUrl('');
+    }, [camera.id]);
+
+    useEffect(() => {
+      if (shouldRenderAudio) {
+        return;
+      }
+      setActiveAudioUrl('');
+      const audioEl = audioRef.current;
+      if (!audioEl) {
+        return;
+      }
+      try {
+        audioEl.pause();
+        audioEl.removeAttribute('src');
+        audioEl.load();
+      } catch {}
+    }, [shouldRenderAudio]);
+
+    useEffect(() => {
+      if (!shouldRenderAudio) {
+        return undefined;
+      }
+
+      let cancelled = false;
+
+      const startAudio = async () => {
+        try {
+          // Prewarm backend audio process first.
+          await api.startCameraAudioStream(camera.id, audioPlaybackFormat);
+          if (cancelled) {
+            return;
+          }
+
+          const streamUrl = api.getCameraAudioStreamUrl(camera.id, audioPlaybackFormat);
+          setActiveAudioUrl(streamUrl);
+
+          const audioEl = audioRef.current;
+          if (!audioEl || cancelled) {
+            return;
+          }
+
+          // Then attach URL to native player and attempt autoplay.
+          audioEl.autoplay = true;
+          audioEl.defaultMuted = true;
+          audioEl.muted = true;
+          audioEl.src = streamUrl;
+          audioEl.load();
+          try {
+            await audioEl.play();
+          } catch {
+            const retryPlay = () => {
+              if (cancelled) {
+                return;
+              }
+              audioEl.play().catch(() => {});
+            };
+            audioEl.addEventListener('canplay', retryPlay, { once: true });
+            audioEl.addEventListener('loadeddata', retryPlay, { once: true });
+          }
+        } catch {
+          if (!cancelled) {
+            setActiveAudioUrl('');
+          }
+        }
+      };
+
+      startAudio();
+
+      return () => {
+        cancelled = true;
+        const audioEl = audioRef.current;
+        if (audioEl) {
+          try {
+            audioEl.pause();
+            audioEl.removeAttribute('src');
+            audioEl.load();
+          } catch {}
+        }
+        api.stopCameraAudioStream(camera.id).catch(() => {});
+      };
+    }, [camera.id, shouldRenderAudio, audioPlaybackFormat]);
+
+    if (!shouldRenderAudio) {
+      return null;
+    }
+
+    return (
+      <div style={AUDIO_PANEL_STYLE}>
+        <audio
+          ref={audioRef}
+          key={`${camera.id}:controls:audio`}
+          src={activeAudioUrl}
+          autoPlay
+          muted
+          defaultMuted
+          controls
+          preload="auto"
+          playsInline
+          style={AUDIO_PLAYER_STYLE}
+        />
+      </div>
+    );
+  };
+
+  const CameraStreamMedia = ({ camera, variant = 'primary' }) => {
+    const videoRef = useRef(null);
+    const isOnline = camera.status === 'online' || camera.status === 'recording';
+    const isHlsStream = isLiveHlsMode && variant === 'primary' && !hlsFailedByCamera[camera.id];
+
+    useEffect(() => {
+      if (!isOnline || !isHlsStream || !videoRef.current) {
+        return undefined;
+      }
+
+      let destroyed = false;
+      let hlsInstance = null;
+      const videoEl = videoRef.current;
+      const sourceUrl = api.getCameraStreamUrl(camera.id, 'hls');
+
+      const attachStream = async () => {
+        if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+          videoEl.src = sourceUrl;
+          try { await videoEl.play(); } catch {}
+          return;
+        }
+
+        try {
+          const hlsModule = await import('hls.js');
+          const Hls = hlsModule.default;
+          if (destroyed || !videoRef.current) {
+            return;
+          }
+
+          if (Hls.isSupported()) {
+            hlsInstance = new Hls({
+              lowLatencyMode: true,
+              liveSyncDurationCount: 3,
+            });
+            hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
+              if (data?.fatal) {
+                setHlsFailedByCamera((prev) => ({ ...prev, [camera.id]: true }));
+              }
+            });
+            hlsInstance.loadSource(sourceUrl);
+            hlsInstance.attachMedia(videoRef.current);
+            hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+              if (!destroyed && videoRef.current) {
+                videoRef.current.play().catch(() => {});
+              }
+            });
+          } else {
+            videoRef.current.src = sourceUrl;
+            videoRef.current.play().catch(() => {});
+          }
+        } catch (error) {
+          console.error('Failed to initialize HLS stream:', error);
+          setHlsFailedByCamera((prev) => ({ ...prev, [camera.id]: true }));
+          if (!destroyed && videoRef.current) {
+            videoRef.current.src = sourceUrl;
+          }
+        }
+      };
+
+      attachStream();
+
+      return () => {
+        destroyed = true;
+        if (hlsInstance) {
+          hlsInstance.destroy();
+        }
+        if (videoEl) {
+          try {
+            videoEl.pause();
+            videoEl.removeAttribute('src');
+            videoEl.load();
+          } catch {}
+        }
+      };
+    }, [camera.id, isHlsStream, isOnline]);
+
+    const mediaStyle = {
+      width: '100%',
+      height: 'auto',
+      aspectRatio: getCameraAspectRatio(camera.resolution),
+      objectFit: 'contain',
+      background: '#000',
+    };
+
+    if (!isOnline) {
+      return (
+        <img
+          src={`${api.getBlankStreamUrl(camera.id)}`}
+          alt={`Camera ${camera.name}`}
+          className="camera-stream"
+          style={mediaStyle}
+        />
+      );
+    }
+
+    if (isHlsStream) {
+      return (
+        <video
+          ref={videoRef}
+          key={`${camera.id}:${variant}:hls`}
+          className="camera-stream"
+          style={mediaStyle}
+          autoPlay
+          muted
+          playsInline
+          controls={false}
+          onError={() => setHlsFailedByCamera((prev) => ({ ...prev, [camera.id]: true }))}
+        />
+      );
+    }
+
+    const streamUrl = variant === 'support'
+      ? api.appendQueryParams(api.getProcessingStreamUrl(camera.id), { view: 'support' })
+      : api.getCameraStreamUrl(camera.id, 'mjpeg');
+
+    return (
+      <img
+        key={`${camera.id}:${variant}:mjpeg`}
+        src={streamUrl}
+        alt={variant === 'support' ? `Support view for ${camera.name}` : `Camera ${camera.name}`}
+        className="camera-stream"
+        style={mediaStyle}
+      />
+    );
+  };
+
+  const handleSensitivityChange = async (cameraId, level) => {
+    const nextSensitivity = Math.max(0, Math.min(SENSITIVITY_LEVEL, Number(level) || 0));
     setCameraSettings(prev => ({
       ...prev,
       [cameraId]: {
-        ...(prev[cameraId] || { supportEnabled: false, sensitivity: 'medium' }),
-        sensitivity: level
+        ...(prev[cameraId] || { supportEnabled: false, sensitivity: DEFAULT_SENSITIVITY }),
+        sensitivity: nextSensitivity
       }
     }));
+
+    try {
+      await api.setCameraSensitivity(cameraId, nextSensitivity);
+    } catch (error) {
+      toast.error('Failed to update sensitivity: ' + (error.response?.data?.detail || error.message));
+    }
   };
 
   const handleSupportToggle = (cameraId) => {
     setCameraSettings(prev => {
-      const cur = prev[cameraId] || { sensitivity: 'medium', supportEnabled: false };
+      const cur = prev[cameraId] || { sensitivity: DEFAULT_SENSITIVITY, supportEnabled: false };
       return {
         ...prev,
         [cameraId]: { ...cur, supportEnabled: !cur.supportEnabled }
@@ -58,20 +437,16 @@ const CameraList = ({ cameras, setCameras }) => {
       const response = await api.createCamera(formData);
       setCameras(prev => [...prev, response.data]);
       setShowAddModal(false);
-      setNewCamera({
-        name: '',
-        camera_type: 'rtsp',
-        source: '',
-        resolution: '1920x1080',
-        fps: 30,
-        enabled: true,
-        description: '',
-        location: ''
-      });
+      setNewCamera({ ...DEFAULT_CAMERA_FORM });
       toast.success('Camera added successfully');
     } catch (error) {
       toast.error('Failed to add camera: ' + (error.response?.data?.detail || error.message));
     }
+  };
+
+  // Utility to update one camera entry in local list state.
+  const patchCameraInState = (cameraId, partial) => {
+    setCameras((prev) => prev.map((item) => (item.id === cameraId ? { ...item, ...partial } : item)));
   };
 
   const handleUpdateCamera = async (formData) => {
@@ -100,15 +475,9 @@ const CameraList = ({ cameras, setCameras }) => {
   };
   
   const handleStartCamera = async (cameraId) => {
-    console.log('handleStartCamera called for:', cameraId);
     try {
       await api.startCamera(cameraId);
-      // Update camera status in local state
-      setCameras(prev => prev.map(c => 
-        c.id === cameraId 
-          ? { ...c, status: 'online', last_seen: new Date().toISOString() }
-          : c
-      ));
+      patchCameraInState(cameraId, { status: 'online', last_seen: new Date().toISOString() });
       toast.success('Camera started');
     } catch (error) {
       console.error('Start camera error:', error);
@@ -117,17 +486,10 @@ const CameraList = ({ cameras, setCameras }) => {
   };
 
   const handleStopCamera = async (cameraId) => {
-    console.log('handleStopCamera called for:', cameraId);
     try {
       await api.stopCamera(cameraId);
-      // Also close any active stream generators on the server
       try { await api.closeCameraStream(cameraId); } catch {}
-      // Update camera status to offline
-      setCameras(prev => prev.map(c => 
-        c.id === cameraId 
-          ? { ...c, status: 'offline' }
-          : c
-      ));
+      patchCameraInState(cameraId, { status: 'offline' });
       toast.success('Camera stopped');
     } catch (error) {
       console.error('Stop camera error:', error);
@@ -136,17 +498,9 @@ const CameraList = ({ cameras, setCameras }) => {
   };
 
   const handleStartRecording = async (cameraId) => {
-    console.log('handleStartRecording called for:', cameraId);
     try {
-      console.log('Calling api.startRecording...');
-      const response = await api.startRecording(cameraId);
-      console.log('Recording API response:', response);
-      // Update camera status to recording
-      setCameras(prev => prev.map(c => 
-        c.id === cameraId 
-          ? { ...c, status: 'recording' }
-          : c
-      ));
+      await api.startRecording(cameraId);
+      patchCameraInState(cameraId, { status: 'recording' });
       toast.success('Recording started');
     } catch (error) {
       console.error('Start recording error:', error);
@@ -155,19 +509,30 @@ const CameraList = ({ cameras, setCameras }) => {
   };
 
   const handleStopRecording = async (cameraId) => {
-    console.log('handleStopRecording called for:', cameraId);
     try {
       await api.stopRecording(cameraId);
-      // Update camera status back to online
-      setCameras(prev => prev.map(c => 
-        c.id === cameraId 
-          ? { ...c, status: 'online' }
-          : c
-      ));
+      patchCameraInState(cameraId, { status: 'online' });
       toast.success('Recording stopped');
     } catch (error) {
       console.error('Stop recording error:', error);
       toast.error('Failed to stop recording: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
+  const handleToggleCameraAudioEnabled = async (camera, enabled) => {
+    const cameraType = String(camera?.camera_type || '').toLowerCase();
+    const updates = { audio_enabled: Boolean(enabled) };
+
+    if (enabled && (cameraType === 'rtsp' || cameraType === 'ip_camera')) {
+      updates.audio_input_format = 'rtsp';
+      updates.audio_source = camera?.source || 'rtsp';
+    }
+
+    try {
+      const response = await api.updateCamera(camera.id, updates);
+      setCameras((prev) => prev.map((item) => (item.id === camera.id ? response.data : item)));
+    } catch (error) {
+      toast.error('Failed to update audio setting: ' + (error.response?.data?.detail || error.message));
     }
   };
 
@@ -210,14 +575,10 @@ const CameraList = ({ cameras, setCameras }) => {
               
               <div className="form-group">
                 <label className="form-label">Camera Type</label>
-                {/* DEBUG: Updated with recorded option - version 1.0 */}
                 <select 
                   className="form-control form-select"
                   value={form.camera_type}
-                  onChange={(e) => {
-                    console.log('Camera type changed to:', e.target.value);
-                    setForm({...form, camera_type: e.target.value});
-                  }}
+                  onChange={(e) => setForm({...form, camera_type: e.target.value})}
                 >
                   <option value="recorded">Recorded Data</option>
                   <option value="rtsp">RTSP Stream</option>
@@ -298,23 +659,162 @@ const CameraList = ({ cameras, setCameras }) => {
                 <label className="form-label">
                   <input 
                     type="checkbox"
-                    checked={form.enabled}
+                    checked={form.enabled ?? true}
                     onChange={(e) => setForm({...form, enabled: e.target.checked})}
                     style={{ marginRight: '8px' }}
                   />
                   Enabled
                 </label>
               </div>
+
+              <div className="form-group">
+                <label className="form-label">
+                  <input
+                    type="checkbox"
+                    checked={form.audio_enabled ?? false}
+                    onChange={(e) => setForm({...form, audio_enabled: e.target.checked})}
+                    style={{ marginRight: '8px' }}
+                  />
+                  Enable Audio (record + live)
+                </label>
+              </div>
+
+              {form.audio_enabled && (
+                <div className="grid grid-2">
+                  {(String(form.camera_type || '').toLowerCase() === 'rtsp' || String(form.camera_type || '').toLowerCase() === 'ip_camera') ? (
+                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                      <label className="form-label">Audio Input</label>
+                      <div className="form-control" style={{ display: 'flex', alignItems: 'center' }}>
+                        RTSP stream audio (auto)
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="form-group">
+                        <label className="form-label">Audio Input Format</label>
+                        <select
+                          className="form-control form-select"
+                          value={form.audio_input_format || 'pulse'}
+                          onChange={(e) => setForm({...form, audio_input_format: e.target.value})}
+                        >
+                          <option value="pulse">pulse</option>
+                          <option value="alsa">alsa</option>
+                        </select>
+                      </div>
+
+                      <div className="form-group">
+                        <label className="form-label">Audio Source</label>
+                        <input
+                          type="text"
+                          className="form-control"
+                          value={form.audio_source || 'default'}
+                          onChange={(e) => setForm({...form, audio_source: e.target.value})}
+                          placeholder="default"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <div className="form-group">
+                    <label className="form-label">Audio Latency Profile</label>
+                    <select
+                      className="form-control form-select"
+                      defaultValue=""
+                      onChange={(e) => {
+                        const profile = AUDIO_LATENCY_PROFILES[e.target.value];
+                        if (!profile) {
+                          return;
+                        }
+                        setForm({ ...form, ...profile });
+                      }}
+                    >
+                      <option value="">Manual (keep current values)</option>
+                      <option value="low">Low Latency (16000 / 256)</option>
+                      <option value="balanced">Balanced (16000 / 512)</option>
+                      <option value="stable">Stable (22050 / 1024)</option>
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Audio Sample Rate</label>
+                    <select
+                      className="form-control form-select"
+                      value={AUDIO_SAMPLE_RATE_OPTIONS.some((item) => item.value === Number(form.audio_sample_rate)) ? Number(form.audio_sample_rate) : 'custom'}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value !== 'custom') {
+                          setForm({ ...form, audio_sample_rate: Number(value) });
+                        }
+                      }}
+                    >
+                      {AUDIO_SAMPLE_RATE_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
+                      <option value="custom">Custom</option>
+                    </select>
+                    {!AUDIO_SAMPLE_RATE_OPTIONS.some((item) => item.value === Number(form.audio_sample_rate)) && (
+                      <input
+                        type="number"
+                        className="form-control"
+                        value={form.audio_sample_rate ?? 16000}
+                        onChange={(e) => setForm({ ...form, audio_sample_rate: parseInt(e.target.value, 10) || 16000 })}
+                        min="8000"
+                        max="48000"
+                        step="1000"
+                        style={{ marginTop: '8px' }}
+                        placeholder="Custom sample rate"
+                      />
+                    )}
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Audio Chunk Size</label>
+                    <select
+                      className="form-control form-select"
+                      value={AUDIO_CHUNK_SIZE_OPTIONS.some((item) => item.value === Number(form.audio_chunk_size)) ? Number(form.audio_chunk_size) : 'custom'}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value !== 'custom') {
+                          setForm({ ...form, audio_chunk_size: Number(value) });
+                        }
+                      }}
+                    >
+                      {AUDIO_CHUNK_SIZE_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
+                      <option value="custom">Custom</option>
+                    </select>
+                    {!AUDIO_CHUNK_SIZE_OPTIONS.some((item) => item.value === Number(form.audio_chunk_size)) && (
+                      <input
+                        type="number"
+                        className="form-control"
+                        value={form.audio_chunk_size ?? 512}
+                        onChange={(e) => setForm({ ...form, audio_chunk_size: parseInt(e.target.value, 10) || 512 })}
+                        min="128"
+                        max="16384"
+                        step="128"
+                        style={{ marginTop: '8px' }}
+                        placeholder="Custom chunk size"
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             
             <div className="modal-footer">
-              <button type="button" className="btn btn-secondary" onClick={() => {
-                setShowAddModal(false);
-                setEditingCamera(null);
-              }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={COMPACT_BUTTON_STYLE}
+                onClick={() => {
+                  setShowAddModal(false);
+                  setEditingCamera(null);
+                }}
+              >
                 Cancel
               </button>
-              <button type="submit" className="btn btn-primary">
+              <button type="submit" className="btn btn-primary" style={COMPACT_BUTTON_STYLE}>
                 {submitText}
               </button>
             </div>
@@ -334,170 +834,163 @@ const CameraList = ({ cameras, setCameras }) => {
       <div className="content-section">
         <div className="section-header">
           <h2 className="section-title">Camera List ({cameras.length})</h2>
-          <button 
-            className="btn btn-primary"
-            onClick={() => setShowAddModal(true)}
-          >
-            <Plus size={16} />
-            Add Camera
-          </button>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleToggleLiveStreamMode}
+              disabled={isTogglingLiveMode}
+              title="Toggle live stream mode"
+              style={COMPACT_BUTTON_STYLE}
+            >
+              {isTogglingLiveMode
+                ? 'Switching...'
+                : `Mode: ${liveStreamMode.toUpperCase()} (Switch to ${isLiveHlsMode ? 'MJPEG' : 'HLS'})`}
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => setShowAddModal(true)}
+              style={COMPACT_BUTTON_STYLE}
+            >
+              <Plus size={16} />
+              Add Camera
+            </button>
+          </div>
         </div>
-        
+
         <div className="camera-grid">
-          {cameras.map(camera => {
-            console.log('Rendering camera:', camera.name, 'status:', camera.status, 'id:', camera.id);
-            return (
+          {cameras.map((camera) => (
             <div key={camera.id} className="camera-card">
               <div className="camera-header">
                 <div className="camera-title">{camera.name}</div>
                 <div className="camera-info">
-                  <span className={`status status-${camera.status}`}>
-                    {camera.status}
-                  </span>
+                  <span className={`status status-${camera.status}`}>{camera.status}</span>
                   <span>{camera.resolution}</span>
                   <span>{camera.camera_type}</span>
                 </div>
               </div>
 
-              <div className="camera-video" style={{ display: 'flex', gap: '16px' }}>
-                {/* LEFT COLUMN: Primary camera with operation controls */}
-                <div className="camera-column">
+              <div className="camera-video" style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+                <div className="camera-column primary-column">
                   <div className="camera-frame">
-                    {api.get_}
-                    {camera.status === 'online' || camera.status === 'recording' ? (
-                        <img
-                          key={`${camera.id}:primary`}
-                          src={api.getCameraStreamUrl(camera.id)}
-                          alt={`Camera ${camera.name}`}
-                          className="camera-stream"
-                          style={{ width: '100%', height: 'auto', aspectRatio: parseAspect(camera.resolution), objectFit: 'contain' }}
-                        />
-                    ) : (
-                      <img
-                          src={`${api.getBlankStreamUrl(camera.id)}`}
-                          alt={`Camera ${camera.name}`}
-                          className="camera-stream"
-                          style={{ width: '100%', height: 'auto', aspectRatio: parseAspect(camera.resolution), objectFit: 'contain' }}
-                        />
-                    )}
+                    <CameraStreamMedia camera={camera} variant="primary" />
                   </div>
 
-                  {/* Camera operation controls below left camera */}
                   <div className="camera-controls-card">
-                    <button 
-                      className="btn btn-warning"
-                      onClick={() => {
-                        console.log('Test button clicked for camera:', camera.id, camera.name);
-                        alert(`Camera: ${camera.name}, Status: ${camera.status}, ID: ${camera.id}`);
-                      }}
-                    >
-                      Test Click
-                    </button>
-                    
                     {camera.status === 'offline' || camera.status === 'error' ? (
-                      <button 
+                      <button
                         className="btn btn-success"
                         onClick={() => handleStartCamera(camera.id)}
+                        style={COMPACT_BUTTON_STYLE}
                       >
                         <Power size={14} />
                         Start
                       </button>
                     ) : (
-                      <button 
+                      <button
                         className="btn btn-secondary"
                         onClick={() => handleStopCamera(camera.id)}
                         disabled={camera.status === 'recording'}
+                        style={COMPACT_BUTTON_STYLE}
                       >
                         <PowerOff size={14} />
                         Stop
                       </button>
                     )}
-                    
+
                     {camera.status === 'recording' ? (
-                      <button 
+                      <button
                         className="btn btn-danger"
                         onClick={() => handleStopRecording(camera.id)}
+                        style={COMPACT_BUTTON_STYLE}
                       >
                         <Square size={14} />
                         Stop Rec
                       </button>
                     ) : (
-                      <button 
+                      <button
                         className="btn btn-success"
-                        onClick={() => {
-                          console.log('Record button clicked! Camera status:', camera.status, 'ID:', camera.id);
-                          handleStartRecording(camera.id);
-                        }}
+                        onClick={() => handleStartRecording(camera.id)}
                         disabled={camera.status !== 'online'}
                         title={camera.status !== 'online' ? `Camera must be online to record (current: ${camera.status})` : 'Start recording'}
+                        style={{
+                          ...COMPACT_BUTTON_STYLE,
+                          opacity: camera.status !== 'online' ? 0.92 : 1,
+                          filter: 'none',
+                          background: camera.status !== 'online' ? '#2f5f37' : undefined,
+                          borderColor: camera.status !== 'online' ? '#3d7d48' : undefined,
+                          color: camera.status !== 'online' ? '#e8f5eb' : undefined,
+                        }}
                       >
                         <Play size={14} />
-                        Record {camera.status !== 'online' ? '(Disabled)' : ''}
+                        Record
                       </button>
                     )}
-                    
-                    <button 
+
+                    <button
                       className="btn btn-primary"
                       onClick={() => setEditingCamera(camera)}
+                      style={COMPACT_BUTTON_STYLE}
                     >
                       <Edit size={14} />
                       Edit
                     </button>
-                    
-                    <button 
+
+                    <button
                       className="btn btn-danger"
                       onClick={() => handleDeleteCamera(camera.id)}
+                      style={COMPACT_BUTTON_STYLE}
                     >
                       <Trash2 size={14} />
                       Delete
                     </button>
+
+                    <label
+                      title="Enable Audio (record + live)"
+                      style={{
+                        ...AUDIO_TOGGLE_STYLE,
+                        background: camera.audio_enabled ? '#1e293b' : '#151a21',
+                        color: camera.audio_enabled ? '#22c55e' : '#d6deea',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(camera.audio_enabled)}
+                        onChange={(e) => handleToggleCameraAudioEnabled(camera, e.target.checked)}
+                        style={{ display: 'none' }}
+                        aria-label="Enable audio"
+                      />
+                      {camera.audio_enabled ? <Mic size={14} /> : <MicOff size={14} />}
+                    </label>
+
+                    <CameraAudioPanel camera={camera} />
                   </div>
                 </div>
 
-                {/* RIGHT COLUMN: Support view with view controls */}
-                <div className="camera-column">
+                <div className="camera-column support-column">
                   <div className="camera-frame">
-                    {(camera.status === 'online' || camera.status === 'recording') ? (
-                        <img
-                          key={`${camera.id}:support`}
-                          src={api.appendQueryParams(api.getProcessingStreamUrl(camera.id), {
-                            view: 'support',
-                          })}
-                          alt={`Support view for ${camera.name}`}
-                          className="camera-stream"
-                          style={{ width: '100%', height: 'auto', aspectRatio: parseAspect(camera.resolution), objectFit: 'contain' }}
-                        />):( 
-                        <img
-                          src={`${api.getBlankStreamUrl(camera.id)}`}
-                          alt={`Camera ${camera.name}`}
-                          className="camera-stream"
-                          style={{ width: '100%', height: 'auto', aspectRatio: parseAspect(camera.resolution), objectFit: 'contain' }}
-                        />)}
+                    <CameraStreamMedia camera={camera} variant="support" />
                   </div>
 
-                  {/* View controls below right camera */}
                   <div className="view-controls-card">
                     <div className="sensitivity-group">
                       <span className="sensitivity-label">Sensitivity:</span>
-                      {['low','medium','high'].map(level => (
-                        <label 
-                          key={level} 
-                          className={`sensitivity-option ${(cameraSettings[camera.id]?.sensitivity || 'medium') === level ? 'active' : ''}`}
-                        >
-                          <input
-                            type="radio"
-                            name={`sens-${camera.id}`}
-                            value={level}
-                            checked={(cameraSettings[camera.id]?.sensitivity || 'medium') === level}
-                            onChange={() => handleSensitivityChange(camera.id, level)}
-                          />
-                          <span className="sensitivity-option-text">{level}</span>
-                        </label>
-                      ))}
+                      <input
+                        type="range"
+                        min="0"
+                        max={SENSITIVITY_LEVEL}
+                        step="1"
+                        value={Number(cameraSettings[camera.id]?.sensitivity ?? DEFAULT_SENSITIVITY)}
+                        onChange={(e) => handleSensitivityChange(camera.id, e.target.value)}
+                        style={{ width: '140px' }}
+                      />
+                      <span className="sensitivity-option-text">
+                        {Number(cameraSettings[camera.id]?.sensitivity ?? DEFAULT_SENSITIVITY)} / {SENSITIVITY_LEVEL}
+                      </span>
                     </div>
                     <button
                       className="btn btn-outline support-toggle-btn"
                       onClick={() => handleSupportToggle(camera.id)}
+                      style={COMPACT_BUTTON_STYLE}
                     >
                       {(cameraSettings[camera.id]?.supportEnabled ?? true) ? 'Disable' : 'Enable'}
                     </button>
@@ -505,17 +998,17 @@ const CameraList = ({ cameras, setCameras }) => {
                 </div>
               </div>
             </div>
-          );
-          })}
+          ))}
 
           {cameras.length === 0 && (
             <div className="camera-card">
               <div className="camera-video">
                 <div className="camera-placeholder">
                   <p>No cameras configured</p>
-                  <button 
+                  <button
                     className="btn btn-primary"
                     onClick={() => setShowAddModal(true)}
+                    style={COMPACT_BUTTON_STYLE}
                   >
                     <Plus size={16} />
                     Add Your First Camera
@@ -528,7 +1021,7 @@ const CameraList = ({ cameras, setCameras }) => {
       </div>
 
       {showAddModal && (
-        <CameraForm 
+        <CameraForm
           initialCamera={newCamera}
           onSubmit={handleAddCamera}
           title="Add New Camera ..."
@@ -537,7 +1030,7 @@ const CameraList = ({ cameras, setCameras }) => {
       )}
 
       {editingCamera && (
-        <CameraForm 
+        <CameraForm
           initialCamera={editingCamera}
           onSubmit={handleUpdateCamera}
           title="Edit Camera"

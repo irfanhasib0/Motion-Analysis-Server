@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Request, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, APIKeyHeader
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import asyncio
@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from urllib.parse import quote_plus
 
 from services.camera_service import CameraService
 from services.dashboard_service import DashboardService
@@ -39,6 +40,7 @@ AUTH_ENABLED = os.getenv("AUTH_ENABLED", "0").lower() in {"1", "true", "yes", "o
 AUTH_PASSWORD = os.getenv("API_PASSWORD", "admin123")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "86400"))
 AUTH_SECRET = os.getenv("AUTH_SECRET", secrets.token_hex(32))
+LIVE_STREAM_MODE = os.getenv("LIVE_STREAM_MODE", "hls") # Options: "mjpeg" or "hls"
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -59,11 +61,18 @@ else:
 active_connections: Dict[str, WebSocket] = {}
 last_camera_status: Dict[str, str] = {}  # Track last known camera status
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
 api_key_scheme = APIKeyHeader(name="x-api-password", auto_error=False)
 
 class LoginRequest(BaseModel):
     password: str
+
+
+class LiveStreamModeRequest(BaseModel):
+    mode: str
+
+
+class CameraSensitivityRequest(BaseModel):
+    sensitivity: int
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
@@ -127,7 +136,7 @@ async def auth_middleware(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
 
-    public_paths = {"/api/health", "/api/auth/token", "/api/auth/login"}
+    public_paths = {"/api/health", "/api/auth/login"}
     if path in public_paths:
         return await call_next(request)
     
@@ -138,7 +147,10 @@ async def auth_middleware(request: Request, call_next):
     #    if verify_access_token(token):
     #        return await call_next(request)
     
-    bearer_token = await oauth2_scheme(request)
+    auth_header = request.headers.get("Authorization", "")
+    bearer_token = ""
+    if auth_header.startswith("Bearer "):
+        bearer_token = auth_header.replace("Bearer ", "", 1).strip()
     if bearer_token and verify_access_token(bearer_token):
         return await call_next(request)
 
@@ -220,27 +232,6 @@ async def broadcast_message(message: dict):
             pass
 
 # Camera management endpoints
-@app.post("/api/auth/token")
-async def token_login(form_data: OAuth2PasswordRequestForm = Depends()):
-    if not AUTH_ENABLED:
-        return {
-            "access_token": "",
-            "token_type": "bearer",
-            "expires_in": 0,
-            "auth_enabled": False,
-        }
-
-    if form_data.password != AUTH_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
-
-    return {
-        "access_token": create_access_token(),
-        "token_type": "bearer",
-        "expires_in": AUTH_TOKEN_TTL_SECONDS,
-        "auth_enabled": True,
-    }
-
-
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest):
     if not AUTH_ENABLED:
@@ -384,6 +375,34 @@ async def get_system_info():
         logger.error(f"Failed to get system info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/system/live-stream-mode")
+async def get_live_stream_mode():
+    """Get server-configured default live stream mode."""
+    normalized_mode = LIVE_STREAM_MODE if LIVE_STREAM_MODE in {"mjpeg", "hls"} else "mjpeg"
+    return {
+        "mode": normalized_mode,
+        "live_stream_mode": normalized_mode,
+        "supported_modes": ["mjpeg", "hls"],
+    }
+
+
+@app.post("/api/system/live-stream-mode")
+async def set_live_stream_mode(payload: LiveStreamModeRequest):
+    """Update server default live stream mode at runtime."""
+    global LIVE_STREAM_MODE
+
+    requested_mode = str(payload.mode or "").strip().lower()
+    if requested_mode not in {"mjpeg", "hls"}:
+        raise HTTPException(status_code=400, detail="Invalid mode. Supported: mjpeg, hls")
+
+    LIVE_STREAM_MODE = requested_mode
+    return {
+        "message": "Live stream mode updated",
+        "mode": LIVE_STREAM_MODE,
+        "live_stream_mode": LIVE_STREAM_MODE,
+        "supported_modes": ["mjpeg", "hls"],
+    }
+
 @app.get("/api/recordings/storage")
 async def get_recording_storage():
     """Get recording storage stats and enforce low-space cleanup policy."""
@@ -405,11 +424,29 @@ async def delete_recording(recording_id: str):
 
 # Video streaming endpoints
 @app.get("/api/cameras/{camera_id}/stream")
-async def get_camera_stream(camera_id: str):
-    """Get live video stream from camera"""
+async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
+    """Get live stream entrypoint; supports MJPEG (default) and HLS descriptor mode."""
     try:
+        selected_mode = (mode or LIVE_STREAM_MODE).strip().lower()
+        if selected_mode == "hls":
+            try:
+                camera_service.ensure_background_camera_stream(camera_id)
+            except Exception as worker_error:
+                logger.warning(f"Failed to ensure background camera stream for {camera_id}: {worker_error}")
+            camera_service.start_hls_stream(camera_id)
+            return {
+                "mode": "hls",
+                "manifest_url": f"/api/cameras/{camera_id}/hls/index.m3u8",
+            }
+
+        # MJPEG mode requested: stop any HLS process for this camera first
+        try:
+            camera_service.stop_hls_stream(camera_id)
+        except Exception:
+            pass
+
         return StreamingResponse(
-            camera_service.generate_camera_stream(camera_id),
+            camera_service.generate_live_video_stream(camera_id),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -418,16 +455,91 @@ async def get_camera_stream(camera_id: str):
                 "X-Accel-Buffering": "no",
             },
         )
+
     except Exception as e:
         logger.error(f"Failed to get camera stream: {e}")
         raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/cameras/{camera_id}/hls/index.m3u8")
+async def get_camera_hls_manifest(camera_id: str, request: Request):
+    """Serve HLS manifest for a live camera stream."""
+    try:
+        manifest_path = camera_service.get_hls_manifest_path(camera_id)
+        token = request.query_params.get("access_token")
+
+        if not token:
+            return FileResponse(
+                manifest_path,
+                media_type="application/vnd.apple.mpegurl",
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+
+        with open(manifest_path, "r", encoding="utf-8", errors="ignore") as handle:
+            lines = handle.readlines()
+
+        safe_token = quote_plus(token)
+        rewritten_lines = []
+        for raw_line in lines:
+            line = raw_line.strip()
+            if (not line) or line.startswith("#"):
+                rewritten_lines.append(raw_line)
+                continue
+
+            separator = "&" if "?" in line else "?"
+            rewritten_lines.append(f"{line}{separator}access_token={safe_token}\n")
+
+        return Response(
+            content="".join(rewritten_lines),
+            media_type="application/vnd.apple.mpegurl",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to get camera HLS manifest: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/cameras/{camera_id}/hls/{segment_name}")
+async def get_camera_hls_segment(camera_id: str, segment_name: str):
+    """Serve HLS segment for a live camera stream."""
+    try:
+        segment_path = camera_service.get_hls_segment_path(camera_id, segment_name)
+        media_type = "video/mp2t" if segment_name.endswith(".ts") else "application/octet-stream"
+        return FileResponse(
+            segment_path,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to get camera HLS segment: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/api/cameras/{camera_id}/hls/stop")
+async def stop_camera_hls_stream(camera_id: str):
+    """Stop HLS process for a camera."""
+    try:
+        camera_service.stop_hls_stream(camera_id)
+        return {"message": "Camera HLS stream stopped successfully"}
+    except Exception as e:
+        logger.error(f"Failed to stop camera HLS stream: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/cameras/{camera_id}/processing_stream")
 async def get_processing_stream(camera_id: str):
     """Get processed video stream from camera"""
     try:
         return StreamingResponse(
-            camera_service.generate_processing_stream(camera_id),
+            camera_service.generate_processed_video_stream(camera_id),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -439,7 +551,171 @@ async def get_processing_stream(camera_id: str):
     except Exception as e:
         logger.error(f"Failed to get processed camera stream: {e}")
         raise HTTPException(status_code=404, detail=str(e))
-    
+
+@app.get("/api/cameras/{camera_id}/audio_stream")
+async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optional[str] = 'mp3'):
+    """Get separate live audio stream for a camera (for use alongside MJPEG)."""
+    try:
+        output_format = (fmt or 'mp3').strip().lower()
+        if output_format == 'wav':
+            media_type = 'audio/wav'
+        elif output_format == 'aac':
+            media_type = 'audio/aac'
+        elif output_format == 'opus':
+            media_type = 'audio/ogg'
+        else:
+            media_type = 'audio/mpeg'
+
+        started = camera_service.start_audio(camera_id, output_format=output_format)
+        if not started:
+            raise HTTPException(status_code=400, detail=f"Audio stream failed to start for camera: {camera_id}")
+
+        iterator = camera_service.generate_live_audio_stream(camera_id, output_format=output_format)
+        stream_end = object()
+
+        def next_audio_chunk():
+            try:
+                return next(iterator)
+            except StopIteration:
+                return stream_end
+
+        async def audio_stream_wrapper():
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        chunk = await asyncio.to_thread(next_audio_chunk)
+                        if chunk is stream_end:
+                            break
+                    except Exception as stream_error:
+                        logger.warning(f"Audio stream iteration stopped for {camera_id}: {stream_error}")
+                        break
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                try:
+                    camera_service.stop_live_audio_stream(camera_id)
+                except Exception:
+                    pass
+
+        return StreamingResponse(
+            audio_stream_wrapper(),
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to get camera audio stream: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/cameras/{camera_id}/audio_stream/start")
+async def start_camera_audio_stream(camera_id: str, fmt: Optional[str] = 'wav'):
+    """Start/prewarm live audio stream process for a camera."""
+    try:
+        output_format = (fmt or 'wav').strip().lower()
+        started = camera_service.start_audio(camera_id, output_format=output_format)
+        if not started:
+            raise HTTPException(status_code=400, detail="Failed to start camera audio stream")
+        return {"started": True, "camera_id": camera_id, "format": output_format}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to start camera audio stream: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/cameras/{camera_id}/audio_stream/stop")
+async def stop_camera_audio_stream(camera_id: str):
+    """Stop active live audio stream process for a camera."""
+    try:
+        stopped = camera_service.stop_live_audio_stream(camera_id)
+        return {"stopped": bool(stopped), "camera_id": camera_id}
+    except Exception as e:
+        logger.error(f"Failed to stop camera audio stream: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cameras/{camera_id}/audio_stream/analysis")
+async def get_camera_audio_stream_analysis(camera_id: str):
+    """Get latest per-chunk audio analysis for a camera."""
+    try:
+        db_camera = camera_service.db.get_camera(camera_id)
+        if not db_camera:
+            raise HTTPException(status_code=404, detail=f"Camera not found: {camera_id}")
+
+        analysis = camera_service.get_latest_audio_chunk_analysis(camera_id)
+        return {
+            "camera_id": camera_id,
+            "has_analysis": bool(analysis),
+            "analysis": analysis,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get camera audio stream analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cameras/{camera_id}/sensitivity")
+async def get_camera_sensitivity(camera_id: str):
+    try:
+        db_camera = camera_service.db.get_camera(camera_id)
+        if not db_camera:
+            raise HTTPException(status_code=404, detail=f"Camera not found: {camera_id}")
+
+        sensitivity = camera_service.get_camera_sensitivity(camera_id)
+        sensitivity_level = int(getattr(camera_service, 'sensitivity_level', 5) or 5)
+        processing_stride = camera_service.get_camera_processing_stride(camera_id)
+        return {
+            "camera_id": camera_id,
+            "sensitivity": sensitivity,
+            "sensitivity_level": sensitivity_level,
+            "processing_stride": processing_stride,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get camera sensitivity: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/cameras/{camera_id}/sensitivity")
+@app.post("/api/cameras/{camera_id}/sensitivity")
+async def set_camera_sensitivity(camera_id: str, payload: CameraSensitivityRequest):
+    try:
+        db_camera = camera_service.db.get_camera(camera_id)
+        if not db_camera:
+            raise HTTPException(status_code=404, detail=f"Camera not found: {camera_id}")
+
+        sensitivity_level = int(getattr(camera_service, 'sensitivity_level', 5) or 5)
+        sensitivity = int(payload.sensitivity)
+        if sensitivity < 0 or sensitivity > sensitivity_level:
+            raise HTTPException(
+                status_code=400,
+                detail=f"sensitivity must be between 0 and {sensitivity_level}",
+            )
+
+        updated = camera_service.set_camera_sensitivity(camera_id, sensitivity)
+        processing_stride = camera_service.get_camera_processing_stride(camera_id)
+        return {
+            "camera_id": camera_id,
+            "sensitivity": updated,
+            "sensitivity_level": sensitivity_level,
+            "processing_stride": processing_stride,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set camera sensitivity: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/cameras/{camera_id}/stream/close")
 async def close_camera_stream(camera_id: str):
     """Close camera stream to free resources"""
@@ -467,7 +743,7 @@ async def get_recording_stream(recording_id: str):
     """Stream a recorded video"""
     try:
         return StreamingResponse(
-            camera_service.generate_recording_stream(recording_id),
+            camera_service.generate_recorded_video_stream(recording_id),
             media_type="multipart/x-mixed-replace; boundary=frame"
         )
     except Exception as e:
@@ -526,6 +802,9 @@ async def serve_react_app():
 
 @app.get("/{path:path}")
 async def serve_react_routes(path: str):
+    if path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+
     file_path = f"../frontend/build/{path}"
     if os.path.exists(file_path) and os.path.isfile(file_path):
         return FileResponse(file_path)

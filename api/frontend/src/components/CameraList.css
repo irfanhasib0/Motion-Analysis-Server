@@ -78,7 +78,8 @@
 
 /* Camera Column Layout */
 .camera-column {
-  flex: 1;
+  flex: 1 1 460px;
+  min-width: 320px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -203,7 +204,7 @@
 .sensitivity-group {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
 }
 
 .sensitivity-label {
@@ -218,12 +219,12 @@
 .sensitivity-option {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
   cursor: pointer;
-  padding: 10px 16px;
+  padding: 6px 10px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.5);
-  border: 2px solid rgba(0, 150, 136, 0.25);
+  border: 1px solid rgba(0, 150, 136, 0.25);
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -248,13 +249,13 @@
 .sensitivity-option input[type="radio"] {
   accent-color: #00897b;
   cursor: pointer;
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
 }
 
 .sensitivity-option-text {
   text-transform: capitalize;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.3px;
 }
@@ -269,6 +270,7 @@
 
 /* Camera Frame Containers */
 .camera-frame {
+  width: 100%;
   display: inline-block;
   padding: 8px;
   border-radius: 12px;
@@ -300,6 +302,11 @@
   min-width: 110px;
   font-weight: 700;
   letter-spacing: 0.5px;
+}
+
+.camera-controls-card .btn,
+.view-controls-card .btn {
+  white-space: nowrap;
 }
 
 /* Camera Results Display */
@@ -395,6 +402,43 @@
     gap: 8px;
   }
 
+  .camera-video {
+    display: grid !important;
+    grid-template-columns: 1fr;
+    gap: 10px !important;
+  }
+
+  .camera-column {
+    display: contents;
+  }
+
+  .primary-column > .camera-frame {
+    order: 1;
+  }
+
+  .support-column > .camera-frame {
+    order: 2;
+  }
+
+  .primary-column > .camera-controls-card {
+    order: 3;
+  }
+
+  .support-column > .view-controls-card {
+    order: 4;
+  }
+
+  .camera-column {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .camera-controls-card .btn {
+    flex: 1 1 calc(50% - 8px);
+    justify-content: center;
+    min-width: 120px;
+  }
+
   .camera-controls-card::before,
   .view-controls-card::before {
     font-size: 9px;
@@ -408,7 +452,17 @@
   }
 
   .sensitivity-option {
-    padding: 8px 10px;
+    padding: 5px 8px;
+    border-radius: 10px;
+  }
+
+  .sensitivity-option input[type="radio"] {
+    width: 12px;
+    height: 12px;
+  }
+
+  .sensitivity-option-text {
+    font-size: 11px;
   }
 
   .support-toggle-btn {
@@ -419,5 +473,14 @@
   .results-meta {
     flex-wrap: wrap;
     gap: 8px;
+  }
+}
+
+@media (max-width: 480px) {
+  .camera-controls-card .btn,
+  .view-controls-card .btn {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
   }
 }

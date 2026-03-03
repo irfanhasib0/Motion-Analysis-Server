@@ -217,7 +217,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
               style={{ width: '180px', display: 'inline-block' }}
             >
               <option value="play">File Playback</option>
-              <option value="stream">Legacy Stream</option>
+              <option value="stream">Legacy Stream (Video only)</option>
             </select>
           </div>
         </div>

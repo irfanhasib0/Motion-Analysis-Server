@@ -10,7 +10,7 @@ recordings:
   created_at: '2026-02-23T21:00:28.210715'
 - id: cam-2_webcam_1770921408_1771880688
   camera_id: cam-2_webcam_1770921408
-  file_path: /root/Motion-Analysis/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880688.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880688.mp4
   start_time: '2026-02-23T21:04:48.826993'
   status: completed
   end_time: null
@@ -19,7 +19,7 @@ recordings:
   created_at: '2026-02-23T21:04:48.827051'
 - id: cam-2_webcam_1770921408_1771880889
   camera_id: cam-2_webcam_1770921408
-  file_path: /root/Motion-Analysis/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880889.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880889.mp4
   start_time: '2026-02-23T21:08:09.151040'
   status: completed
   end_time: null
@@ -28,7 +28,7 @@ recordings:
   created_at: '2026-02-23T21:08:09.151055'
 - id: cam-2_webcam_1770921408_1771883913
   camera_id: cam-2_webcam_1770921408
-  file_path: /root/Motion-Analysis/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771883913.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771883913.mp4
   start_time: '2026-02-23T21:58:33.978935'
   status: completed
   end_time: null
@@ -37,7 +37,7 @@ recordings:
   created_at: '2026-02-23T21:58:33.979004'
 - id: cam-2_webcam_1770921408_1771887253
   camera_id: cam-2_webcam_1770921408
-  file_path: /root/Motion-Analysis/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771887253.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771887253.mp4
   start_time: '2026-02-23T22:54:13.311325'
   status: completed
   end_time: '2026-02-23T22:54:23.825609'
@@ -68,7 +68,7 @@ recordings:
     diff: 0
 - id: cam3_webcam_1771887423_1771892596
   camera_id: cam3_webcam_1771887423
-  file_path: /root/Motion-Analysis/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1771892596.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1771892596.mp4
   start_time: '2026-02-24T00:23:16.114690'
   status: completed
   end_time: '2026-02-24T00:23:36.157265'
@@ -81,7 +81,7 @@ recordings:
     diff: 254
 - id: cam-1_rtsp_1770917682_1771914099
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771914099.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771914099.mp4
   start_time: '2026-02-24T06:21:39.874981'
   status: completed
   end_time: '2026-02-24T06:21:59.855910'
@@ -94,7 +94,7 @@ recordings:
     diff: 187
 - id: cam-1_rtsp_1770917682_1771915703
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771915703.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771915703.mp4
   start_time: '2026-02-24T06:48:23.223633'
   status: completed
   end_time: '2026-02-24T06:49:03.259312'
@@ -107,7 +107,7 @@ recordings:
     diff: 248
 - id: cam-1_rtsp_1770917682_1771915973
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771915973.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771915973.mp4
   start_time: '2026-02-24T06:52:53.582893'
   status: completed
   end_time: '2026-02-24T06:53:13.603748'
@@ -120,7 +120,7 @@ recordings:
     diff: 165
 - id: cam-1_rtsp_1770917682_1771916013
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771916013.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771916013.mp4
   start_time: '2026-02-24T06:53:33.633136'
   status: completed
   end_time: '2026-02-24T06:53:53.686479'
@@ -133,7 +133,7 @@ recordings:
     diff: 254
 - id: cam-1_rtsp_1770917682_1771940294
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940294.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940294.mp4
   start_time: '2026-02-24T13:38:14.710169'
   status: completed
   end_time: '2026-02-24T13:38:34.690907'
@@ -146,7 +146,7 @@ recordings:
     diff: 185
 - id: cam-1_rtsp_1770917682_1771940594
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940594.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940594.mp4
   start_time: '2026-02-24T13:43:14.846066'
   status: completed
   end_time: '2026-02-24T13:43:34.781236'
@@ -185,7 +185,7 @@ recordings:
     diff: 202
 - id: cam-1_rtsp_1770917682_1771941105
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941105.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941105.mp4
   start_time: '2026-02-24T13:51:45.199074'
   status: completed
   end_time: '2026-02-24T13:52:05.199074'
@@ -198,7 +198,7 @@ recordings:
     diff: 0
 - id: cam-1_rtsp_1770917682_1771941325
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941325.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941325.mp4
   start_time: '2026-02-24T13:55:25.439369'
   status: completed
   end_time: '2026-02-24T13:55:45.442967'
@@ -211,7 +211,7 @@ recordings:
     diff: 127
 - id: cam-1_rtsp_1770917682_1771941385
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941385.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941385.mp4
   start_time: '2026-02-24T13:56:25.495025'
   status: completed
   end_time: '2026-02-24T13:56:45.456687'
@@ -224,7 +224,7 @@ recordings:
     diff: 127
 - id: cam-1_rtsp_1770917682_1771941405
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941405.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941405.mp4
   start_time: '2026-02-24T13:56:45.481811'
   status: completed
   end_time: '2026-02-24T13:57:05.490156'
@@ -237,7 +237,7 @@ recordings:
     diff: 127
 - id: cam-1_rtsp_1770917682_1771941815
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941815.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941815.mp4
   start_time: '2026-02-24T14:03:35.749438'
   status: completed
   end_time: '2026-02-24T14:03:55.721789'
@@ -250,7 +250,7 @@ recordings:
     diff: 160
 - id: cam-1_rtsp_1770917682_1771941925
   camera_id: cam-1_rtsp_1770917682
-  file_path: /root/Motion-Analysis/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941925.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941925.mp4
   start_time: '2026-02-24T14:05:25.891090'
   status: completed
   end_time: '2026-02-24T14:05:55.849041'
@@ -263,7 +263,7 @@ recordings:
     diff: 200
 - id: cam3_webcam_1771887423_1772425902
   camera_id: cam3_webcam_1771887423
-  file_path: /root/Motion-Analysis/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772425902.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772425902.mp4
   start_time: '2026-03-02T04:31:42.146486'
   status: completed
   end_time: '2026-03-02T04:32:12.155174'
@@ -276,7 +276,7 @@ recordings:
     diff: 207
 - id: cam3_webcam_1771887423_1772426022
   camera_id: cam3_webcam_1771887423
-  file_path: /root/Motion-Analysis/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772426022.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772426022.mp4
   start_time: '2026-03-02T04:33:42.339186'
   status: completed
   end_time: '2026-03-02T04:34:02.320753'
@@ -289,7 +289,7 @@ recordings:
     diff: 235
 - id: cam3_webcam_1771887423_1772427047
   camera_id: cam3_webcam_1771887423
-  file_path: /root/Motion-Analysis/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772427047.mp4
+  file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772427047.mp4
   start_time: '2026-03-02T04:50:47.554601'
   status: completed
   end_time: '2026-03-02T04:51:05.064807'

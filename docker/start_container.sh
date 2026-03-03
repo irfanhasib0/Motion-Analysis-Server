@@ -4,7 +4,7 @@ set -e
 #docker stop cv-env || true
 CONTAINER_NAME="cv-env"
 IMAGE_NAME="cv-env"
-WORKSPACE_DIR="/root/Motion-Analysis"
+WORKSPACE_DIR="/root/Motion-Analysis-Server"
 
 docker run -d --rm --gpus all \
     --device=/dev/dri:/dev/dri \
@@ -12,7 +12,7 @@ docker run -d --rm --gpus all \
     --device=/dev/video1:/dev/video1 \
     --device=/dev/video2:/dev/video2 \
     --privileged \
-    -v /home/irfan/Desktop/Code/Motion-Analysis:/root/Motion-Analysis \
+    -v /home/irfan/Desktop/Code/Motion-Analysis-Server:/root/Motion-Analysis-Server \
     -v /media:/media \
     -v /home/irfan/Desktop/Data/:/data/ \
     -v /home/irfan/.Xauthority:/root/.Xauthority:rw \

@@ -312,7 +312,7 @@
 }
 
 .row-grid {
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: auto;
   cursor: grab;
   touch-action: pan-x;
 }
@@ -926,10 +926,11 @@
 /* Responsive Design */
 @media (max-width: 768px) {
   .reels-container {
-    padding: 16px;
+    padding: 12px;
   }
 
   .reels-header {
+    padding: 0;
     margin-bottom: 16px;
     flex-direction: column;
     align-items: flex-start;
@@ -944,16 +945,23 @@
     width: 100%;
     justify-content: space-between;
     gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .header-controls .form-control.form-select {
+    width: 100% !important;
+    min-width: 0;
   }
 
   .camera-row-card {
-    padding: 10px;
+    padding: 8px;
   }
 
   .camera-row-header {
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+    padding: 0;
   }
 
   .camera-row-meta {
@@ -964,6 +972,14 @@
   .camera-row-metrics-card {
     margin: 0 0 10px;
     padding: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .metrics-bar-chart,
+  .metrics-time-axis,
+  .metrics-points-row {
+    min-width: 540px;
   }
 
   .camera-row-metrics-header {
@@ -978,6 +994,11 @@
   .reels-grid {
     gap: 16px;
     padding: 6px 0;
+    margin: 0;
+  }
+
+  .carousel-nav-button {
+    display: none;
   }
 
   .reel-info {
@@ -1038,16 +1059,37 @@
 
 @media (max-width: 480px) {
   .reels-container {
-    padding: 12px;
+    padding: 8px;
   }
 
   .reels-grid {
-    gap: 12px;
+    gap: 10px;
+  }
+
+  .reel-progress-header {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .reel-progress-left,
+  .reel-progress-right {
+    flex: 1 1 calc(50% - 6px);
+  }
+
+  .reel-frame-controls {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .metrics-bar-chart,
+  .metrics-time-axis,
+  .metrics-points-row {
+    min-width: 460px;
   }
 
   .reel-card {
-    flex: 0 0 min(260px, calc(100vw - 72px));
-    width: min(260px, calc(100vw - 72px));
+    flex: 0 0 min(280px, calc(100vw - 28px));
+    width: min(280px, calc(100vw - 28px));
   }
 
   .carousel-nav-button {

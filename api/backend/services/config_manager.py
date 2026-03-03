@@ -56,6 +56,11 @@ class ConfigManager:
         cam.setdefault("processing_params", {})
         cam.setdefault("created_at", self._now())
         cam.setdefault("updated_at", self._now())
+        cam.setdefault("audio_enabled", False)
+        cam.setdefault("audio_source", None)
+        cam.setdefault("audio_input_format", None)
+        cam.setdefault("audio_sample_rate", 16000)
+        cam.setdefault("audio_chunk_size", 512)
         return cam
 
     def _ensure_recording_defaults(self, rec: Dict[str, Any]) -> Dict[str, Any]:
