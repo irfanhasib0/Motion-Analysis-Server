@@ -23,7 +23,22 @@ from improc.optical_flow import OpticalFlowTracker
 logger = logging.getLogger(__name__)
 
 class Capture:
-    def __init__(self, source: Union[str, int], width:int =640, height:int =480, fps:int =30, low_power_mode: bool = False):
+    def __init__(
+        self,
+        source: Union[str, int],
+        width: int = 640,
+        height: int = 480,
+        fps: int = 30,
+        low_power_mode: bool = False,
+        audio_sample_rate: Optional[int] = None,
+        audio_channels: Optional[int] = None,
+        audio_chunk_size: Optional[int] = None,
+        audio_input_format: Optional[str] = None,
+        audio_source: Optional[str] = None,
+        rtsp_unified_demux_enabled: Optional[bool] = None,
+        pipe_buffer_size: Optional[int] = None,
+        audio_only: bool = False,
+    ):
         self.source = source
         self.cam_type = None
         self.width = width
@@ -36,14 +51,25 @@ class Capture:
         self._reconnect_cooldown_sec = 2.0
         self._last_reconnect_at = 0.0
         self.audio_cap = None
-        self.audio_sample_rate = int(os.getenv('AUDIO_SAMPLE_RATE', '16000'))
-        self.audio_channels = int(os.getenv('AUDIO_CHANNELS', '1'))
-        self.audio_chunk_seconds = float(os.getenv('AUDIO_CHUNK_SECONDS', '0.1'))
-        self._audio_chunk_bytes = max(
-            320,
-            int(self.audio_sample_rate * self.audio_channels * 2 * self.audio_chunk_seconds),
-        )
-        
+        self.audio_sample_rate = int(audio_sample_rate or 16000)
+        self.audio_channels = int(audio_channels or os.getenv('AUDIO_CHANNELS', '1'))
+        # Store as byte count: samples × channels × 2 bytes/sample (s16le)
+        self._audio_chunk_bytes = max(256, int(audio_chunk_size or 512)) * self.audio_channels * 2
+        self.audio_input_format = str(audio_input_format or os.getenv('AUDIO_INPUT_FORMAT', 'pulse')).strip().lower()
+        self.audio_source = str(audio_source or os.getenv('AUDIO_SOURCE', 'default')).strip()
+        self._audio_reconnect_cooldown_sec = 3.0
+        self._last_audio_reconnect_at = 0.0
+        self.pipe_buffer_size = int(pipe_buffer_size) if pipe_buffer_size is not None else None
+        if rtsp_unified_demux_enabled is None:
+            self._rtsp_unified_demux_enabled = str(os.getenv('RTSP_UNIFIED_DEMUX', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        else:
+            self._rtsp_unified_demux_enabled = bool(rtsp_unified_demux_enabled)
+        self._rtsp_unified_demux_active = False
+        self._audio_pipe_read_fd: Optional[int] = None
+        self._audio_pipe_write_fd: Optional[int] = None
+        self._audio_pipe_reader = None
+        self._audio_chunk_leftover = b""
+
         try:
             source = int(source)
         except:
@@ -51,15 +77,112 @@ class Capture:
 
         if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
             self.cam_type = 'rtsp'
-            self.open_video_stream_rtsp()
         elif isinstance(source, str) and source.startswith(('http://', 'https://')):
             self.cam_type = 'http'
-            self.open_video_stream_rtsp()  # For simplicity, treat HTTP sources as RTSP for now
         elif type(source) == int or (isinstance(source, str) and source.split('.')[-1] in ['mp4', 'avi', 'mkv', 'mov']):
             self.cam_type = 'webcam'
-            self.open_video_stream_webcam()
         else:
             raise ValueError(f"Unsupported camera source: {source}")
+
+        if audio_only:
+            self.open_audio()
+        else:
+            self.open()
+
+    def _resolve_pipe_buffer_size(self) -> int:
+        if self.pipe_buffer_size is not None:
+            return max(65536, int(self.pipe_buffer_size))
+        return 10**6 if self.low_power_mode else 10**8
+
+    def _close_unified_audio_pipe(self):
+        if self._audio_pipe_reader is not None:
+            try:
+                self._audio_pipe_reader.close()
+            except Exception:
+                pass
+            self._audio_pipe_reader = None
+
+        if self._audio_pipe_read_fd is not None:
+            try:
+                os.close(self._audio_pipe_read_fd)
+            except Exception:
+                pass
+            self._audio_pipe_read_fd = None
+
+        if self._audio_pipe_write_fd is not None:
+            try:
+                os.close(self._audio_pipe_write_fd)
+            except Exception:
+                pass
+            self._audio_pipe_write_fd = None
+
+    def _open_rtsp_av_stream_unified(self) -> bool:
+        self._close_unified_audio_pipe()
+        self._rtsp_unified_demux_active = False
+
+        try:
+            read_fd, write_fd = os.pipe()
+            os.set_inheritable(write_fd, True)
+            self._audio_pipe_read_fd = read_fd
+            self._audio_pipe_write_fd = write_fd
+        except Exception as error:
+            logger.warning(f"Failed to allocate RTSP unified demux pipe for {self.source}: {error}")
+            self._close_unified_audio_pipe()
+            return False
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",                         # suppress version/config noise on startup
+            "-loglevel", "error",                   # surface only actual ffmpeg errors
+            "-rtsp_transport", "tcp",               # use TCP for RTSP — more reliable than UDP on lossy networks
+            "-threads", "1",                        # limit decoder threads to avoid CPU contention
+            "-fflags", "nobuffer+discardcorrupt",   # disable input buffering for low latency; drop corrupt packets
+            "-flags", "low_delay",                  # hint decoder to prefer low-latency over quality
+            "-avioflags", "direct",                 # bypass protocol-layer read-ahead buffering
+            "-analyzeduration", "1000000",          # limit stream analysis to 1 s (faster startup)
+            "-probesize", "1000000",                # cap probe read to 1 MB (faster startup)
+            "-i", self.source,                      # RTSP/HTTP input URL
+            # --- video output → pipe:1 (stdout) ---
+            "-map", "0:v:0",                        # select first video stream from input
+            "-vf", f"fps={self.fps},scale={self.width}:{self.height}",  # normalize fps and resolution
+            "-pix_fmt", "bgr24",                    # raw BGR24 — matches numpy/OpenCV layout
+            "-f", "rawvideo",                       # emit uncompressed raw frames (no container)
+            "pipe:1",                               # write video frames to stdout
+            # --- audio output → pipe:3 (inherited fd) ---
+            "-map", "0:a:0?",                       # select first audio stream if present (? = optional)
+            "-ac", str(self.audio_channels),        # downmix/upmix to target channel count
+            "-ar", str(self.audio_sample_rate),     # resample to target rate (Hz)
+            "-f", "s16le",                          # raw signed 16-bit little-endian PCM
+            "pipe:3",                               # write audio PCM to the inherited pipe fd
+        ]
+
+        try:
+            pipe_buffer_size = self._resolve_pipe_buffer_size()
+            self.cap = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=pipe_buffer_size,
+                pass_fds=(write_fd,),
+            )
+
+            try:
+                os.close(write_fd)
+            except Exception:
+                pass
+            self._audio_pipe_write_fd = None
+
+            self._audio_pipe_reader = os.fdopen(read_fd, 'rb', buffering=0)
+            self._audio_pipe_read_fd = None
+            self._rtsp_unified_demux_active = True
+            logger.info(f"RTSP unified demux enabled for source: {self.source}")
+            return True
+        except Exception as error:
+            logger.warning(f"Failed to open RTSP unified demux stream for {self.source}: {error}")
+            self.cap = None
+            self._close_unified_audio_pipe()
+            self._rtsp_unified_demux_active = False
+            return False
 
     def open_video_stream_webcam(self):
         if self.cap:
@@ -100,7 +223,7 @@ class Capture:
         ]
 
         try:
-            pipe_buffer_size = 10**6 if self.low_power_mode else 10**8
+            pipe_buffer_size = self._resolve_pipe_buffer_size()
             self.cap = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -115,6 +238,11 @@ class Capture:
     def open_video_stream_rtsp(self):
         if self.cap:
             self.release_video_stream_rtsp()
+
+        if self._rtsp_unified_demux_enabled and self.cam_type in {'rtsp', 'http'}:
+            if self._open_rtsp_av_stream_unified():
+                return self
+            logger.warning(f"Falling back to split RTSP capture for source: {self.source}")
 
         cmd = [
             "ffmpeg",
@@ -136,19 +264,48 @@ class Capture:
             "pipe:1"
         ]
         try:
-            pipe_buffer_size = 10**6 if self.low_power_mode else 10**8
+            pipe_buffer_size = self._resolve_pipe_buffer_size()
             self.cap = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=pipe_buffer_size)
+            self._rtsp_unified_demux_active = False
         except Exception as e:
             logger.error(f"Failed to open RTSP stream: {e}")
             self.cap = None
+            self._rtsp_unified_demux_active = False
         return self
+
+    @staticmethod
+    def _resolve_pulse_source(source: str) -> str:
+        """Return the real PulseAudio source name for 'default', or *source* unchanged.
+
+        Runs ``pactl get-default-source`` (PulseAudio / PipeWire-pulse).
+        Falls back to the original value on any error so FFmpeg can still try.
+        """
+        try:
+            result = subprocess.run(
+                ['pactl', 'get-default-source'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            name = result.stdout.decode().strip()
+            if name:
+                return name
+        except Exception:
+            pass
+        return source
 
     def open_audio_stream_webcam(self):
         if self.audio_cap:
             self.release_audio_stream_webcam()
 
-        input_format = os.getenv('AUDIO_INPUT_FORMAT', 'pulse').strip().lower()
-        input_source = os.getenv('AUDIO_SOURCE', 'default').strip()
+        input_format = self.audio_input_format
+        input_source = self.audio_source
+        if input_format == 'alsa' and input_source.lower() == 'default':
+            input_source = os.getenv('AUDIO_SOURCE_ALSA', 'hw:1,0').strip() or 'hw:1,0'
+        elif input_format == 'pulse' and input_source.lower() == 'default':
+            input_source = self._resolve_pulse_source(input_source)
+            if input_source != self.audio_source:
+                logger.info(f"Resolved PulseAudio default source to: {input_source}")
 
         cmd = [
             'ffmpeg',
@@ -161,12 +318,13 @@ class Capture:
             '-f', 's16le',              # raw PCM 16-bit little-endian
             'pipe:1',
         ]
+        
         try:
             self.audio_cap = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize= 10**4 #max(10**6, self._audio_chunk_bytes * 16),
+                stderr=subprocess.PIPE,
+                bufsize=max(10**6, self._audio_chunk_bytes * 16),
             )
         except Exception as e:
             logger.error(f"Failed to open webcam audio stream ({input_format}:{input_source}): {e}")
@@ -174,6 +332,9 @@ class Capture:
         return self
 
     def open_audio_stream_rtsp(self):
+        if self._rtsp_unified_demux_active and self.cap and self.cap.poll() is None and self._audio_pipe_reader is not None:
+            return self
+
         if self.audio_cap:
             self.release_audio_stream_rtsp()
 
@@ -183,17 +344,21 @@ class Capture:
             '-loglevel', 'error',       # surface only ffmpeg errors
             '-rtsp_transport', 'tcp',   # prefer TCP for RTSP reliability
             '-i', self.source,
+            '-c:a', 'pcm_s16le',         # decode audio to raw PCM in ffmpeg for simplicity and reliability
+            '-map', '0:a:0',             # select first audio stream if present (? = optional)
             '-vn',                      # disable video in audio pipeline
             '-ac', str(self.audio_channels),      # output channel count
             '-ar', str(self.audio_sample_rate),   # output sampling rate
+            '-acodec', 'pcm_s16le',          # raw PCM 16-bit little-endian
             '-f', 's16le',              # raw PCM 16-bit little-endian
             'pipe:1',
         ]
+        
         try:
             self.audio_cap = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=max(10**6, self._audio_chunk_bytes * 16),
             )
         except Exception as e:
@@ -205,108 +370,105 @@ class Capture:
         return bool(self.cap and self.cap.poll() is None and self.cap.stdout is not None)
 
     def is_audio_stream_opened(self):
-        return self.audio_cap and self.audio_cap.poll() is None and self.audio_cap.stdout is not None
+        if self._rtsp_unified_demux_active:
+            return bool(self.cap and self.cap.poll() is None and self._audio_pipe_reader is not None)
+        ret = self.audio_cap and self.audio_cap.poll() is None and self.audio_cap.stdout is not None
+        return ret
 
-    def reconnect_video_stream_rtsp(self) -> bool:
+    def reconnect_video_stream(self) -> bool:
         now = time.time()
         if now - self._last_reconnect_at < self._reconnect_cooldown_sec:
             return self.is_video_stream_opened()
 
         self._last_reconnect_at = now
         logger.warning(f"Reconnecting stream source: {self.source}")
-        self.release_video_stream_rtsp()
-        self.open_video_stream_rtsp()
-        self._consecutive_read_failures = 0
+        # Only release/reopen the video pipeline — don't tear down audio
+        self.release()
+        self.open()
         return self.is_video_stream_opened()
     
-    def read_video_stream_webcam(self):
+    def read(self):
         if not self.cap or not self.is_video_stream_opened():
-            self.open_video_stream_webcam()
+            self.reconnect_video_stream()
             if not self.is_video_stream_opened():
                 return False, None
 
         frame_size = self.width * self.height * 3
-        raw = b""
-        try:
-            raw = self.cap.stdout.read(frame_size)
-        except Exception as error:
-            logger.warning(f"Webcam video read failed for source {self.source}: {error}")
-
-        if len(raw) == frame_size:
-            frame = np.frombuffer(raw, np.uint8).reshape((self.height, self.width, 3))
-            return True, frame
-        return False, None
-    
-    def read_video_stream_rtsp(self):
-        if not self.cap:
-            return False, None
-
-        if not self.is_video_stream_opened():
-            self.reconnect_video_stream_rtsp()
-            if not self.is_video_stream_opened():
-                return False, None
-
-        frame_size = self.width * self.height * 3
-        raw = b""
-        try:
-            raw = self.cap.stdout.read(frame_size)
-        except Exception as e:
-            logger.warning(f"RTSP read failed for source {self.source}: {e}")
-
+        raw = self.cap.stdout.read(frame_size)
+        
         if len(raw) == frame_size:
             self._consecutive_read_failures = 0
             frame = np.frombuffer(raw, np.uint8).reshape((self.height, self.width, 3))
             return True, frame
 
+        # Partial/empty read — track failures and trigger reconnect when threshold exceeded
         self._consecutive_read_failures += 1
         if self._consecutive_read_failures >= self._max_read_failures_before_reconnect:
-            logger.warning(
-                f"Short/empty RTSP frame read ({len(raw)}/{frame_size}) from {self.source}; attempting reconnect"
-            )
-            if self.reconnect_video_stream_rtsp() and self.cap and self.cap.stdout:
-                try:
-                    raw = self.cap.stdout.read(frame_size)
-                except Exception:
-                    raw = b""
-
-                if len(raw) == frame_size:
-                    self._consecutive_read_failures = 0
-                    frame = np.frombuffer(raw, np.uint8).reshape((self.height, self.width, 3))
-                    return True, frame
-
+            self._consecutive_read_failures = 0
+            self.reconnect_video_stream()
         return False, None
 
-    def read_audio_stream_webcam(self):
-        if not self.audio_cap or not self.is_audio_stream_opened():
-            self.open_audio_stream_webcam()
-            if not self.is_audio_stream_opened():
-                return False, None
-
-        try:
-            raw = self.audio_cap.stdout.read(self._audio_chunk_bytes)
-        except Exception as e:
-            logger.warning(f"Webcam audio read failed: {e}")
+    def read_audio_sample_from_pipe(self):
+        # Unified demux: audio arrives on the dedicated pipe reader, not audio_cap
+        if self._rtsp_unified_demux_active and self._audio_pipe_reader is not None:
+            pipe = self._audio_pipe_reader
+        elif self.audio_cap is not None and self.audio_cap.stdout is not None:
+            pipe = self.audio_cap.stdout
+        else:
             return False, None
 
-        if raw and len(raw) > 0:
-            return True, raw
+        # Non-blocking wait — give FFmpeg up to 2 s per attempt to produce a chunk.
+        # PulseAudio / RTSP sources can take 3-5 s to output the first frame,
+        # so the caller (start_audio) must retry rather than fail on a single timeout.
+        #ready, _, _ = select.select([pipe], [], [], 0.1)
+        #if not ready:
+        #    return False, None
+        #self._audio_chunk_leftover + 
+        chunk = pipe.read(self._audio_chunk_bytes)
+        usable = len(chunk) - (len(chunk) % 2)
+        samples = np.frombuffer(chunk[:usable], dtype="<i2").astype(np.float32)
+        samples /= 32768.0
+        #self._audio_chunk_leftover = chunk[usable:]
+        if len(samples) > 0:
+            return True, samples
         return False, None
-
-    def read_audio_stream_rtsp(self):
+    
+    def reconnect_audio_stream(self):
+        logger.warning(f"Attempting audio stream reconnect for source: {self.source}")
         if not self.audio_cap or not self.is_audio_stream_opened():
-            self.open_audio_stream_rtsp()
+            now = time.time()
+            if now - self._last_audio_reconnect_at < self._audio_reconnect_cooldown_sec:
+                return False
+            self._last_audio_reconnect_at = now
+            self.open_audio()
             if not self.is_audio_stream_opened():
+                logger.warning(f"RTSP audio reconnect failed for source {self.source}")
+                return False
+        return True
+        
+    def read_audio(self):
+        if self._rtsp_unified_demux_active:
+            # Unified demux: video and audio share the same ffmpeg process.
+            # If the process is dead, reconnect the whole video stream (which also
+            # re-establishes the audio pipe) and then try to read.
+            if not self.cap or self.cap.poll() is not None or self._audio_pipe_reader is None:
+                now = time.time()
+                if now - self._last_audio_reconnect_at < self._audio_reconnect_cooldown_sec:
+                    return False, None
+                self._last_audio_reconnect_at = now
+                self.open_video_stream_rtsp()
+                if not self._rtsp_unified_demux_active or self._audio_pipe_reader is None:
+                    logger.warning(f"Unified demux audio reconnect failed for source {self.source}")
+                    return False, None
+            # Read directly from the demux pipe — do NOT fall through to audio_cap path
+            return self.read_audio_sample_from_pipe()
+
+        # Separate audio capture path (webcam / split RTSP)
+        if not self.audio_cap or not self.is_audio_stream_opened():
+            connected = self.reconnect_audio_stream()
+            if not connected:
                 return False, None
-
-        try:
-            raw = self.audio_cap.stdout.read(self._audio_chunk_bytes)
-        except Exception as e:
-            logger.warning(f"RTSP audio read failed for source {self.source}: {e}")
-            return False, None
-
-        if raw and len(raw) > 0:
-            return True, raw
-        return False, None
+        return self.read_audio_sample_from_pipe()
 
     def release_video_stream_webcam(self):
         self.release_video_stream_rtsp()
@@ -328,12 +490,19 @@ class Capture:
                 except Exception:
                     pass
             self.cap = None
+        self._rtsp_unified_demux_active = False
+        self._close_unified_audio_pipe()
 
     def release_audio_stream_webcam(self):
         if self.audio_cap:
             try:
                 if self.audio_cap.stdout:
                     self.audio_cap.stdout.close()
+            except Exception:
+                pass
+            try:
+                if self.audio_cap.stderr:
+                    self.audio_cap.stderr.close()
             except Exception:
                 pass
 
@@ -348,8 +517,18 @@ class Capture:
             self.audio_cap = None
 
     def release_audio_stream_rtsp(self):
+        if self._rtsp_unified_demux_active:
+            self._close_unified_audio_pipe()
+            return
         self.release_audio_stream_webcam()
             
+    def release_audio(self):
+        """Release only the audio pipeline (mirrors release() for video)."""
+        if self.cam_type in ['rtsp', 'http']:
+            self.release_audio_stream_rtsp()
+        elif self.cam_type == 'webcam':
+            self.release_audio_stream_webcam()
+
     def open(self):
         if self.cam_type in ['rtsp', 'http']:
             return self.open_video_stream_rtsp()
@@ -361,30 +540,12 @@ class Capture:
             return self.open_audio_stream_rtsp()
         elif self.cam_type == 'webcam':
             return self.open_audio_stream_webcam()
-    
-    def read(self):
-        if self.cam_type in ['rtsp', 'http']:
-            return self.read_video_stream_rtsp()
-        elif self.cam_type == 'webcam':
-            return self.read_video_stream_webcam()
-        else:
-            raise ValueError(f"Unsupported camera type: {self.cam_type}")
-
-    def read_audio(self):
-        if self.cam_type in ['rtsp', 'http']:
-            return self.read_audio_stream_rtsp()
-        elif self.cam_type == 'webcam':
-            return self.read_audio_stream_webcam()
-        else:
-            raise ValueError(f"Unsupported camera type: {self.cam_type}")
         
     def release(self):
         if self.cam_type in ['rtsp', 'http']:
             self.release_video_stream_rtsp()
-            self.release_audio_stream_rtsp()
         elif self.cam_type == 'webcam':
             self.release_video_stream_webcam()
-            self.release_audio_stream_webcam()
         else:
             raise ValueError(f"Unsupported camera type: {self.cam_type}")
         
@@ -392,29 +553,39 @@ class Capture:
 class CameraService(StreamingService):
     def __init__(self, configs: Optional[str] = 'default'):
         super().__init__()
-        self.low_power_mode = True
+        self.ram_auto_low_power_enabled = True
+        self.low_power_ram_threshold_bytes = 1 * 1024 * 1024 * 1024
+        self.rtsp_unified_demux_enabled = str(os.getenv('RTSP_UNIFIED_DEMUX', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        self.low_power_mode = self._should_auto_enable_low_power()
         self.root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
         self.db = ConfigManager(configs_dir=os.path.join(self.root_dir, 'configs', configs))  # Use same YAML-backed DB as recording service
         self.recordings_dir = os.path.join(self.root_dir, "recordings")
+        self.archive_dir = os.path.join(self.root_dir, "archive")
         self.start_time = datetime.now()
         
-        # Create recordings directory
+        # Create recordings and archive directories
         os.makedirs(self.recordings_dir, exist_ok=True)
+        os.makedirs(self.archive_dir, exist_ok=True)
         self.audio_utils = AudioRecordingUtils(self.recordings_dir)
         
         self._camera_streams = {}
         self._camera_trackers = {}
-        self._active_audio_stream_processes: Dict[str, subprocess.Popen] = {}
-        self._active_audio_stream_formats: Dict[str, str] = {}
+        # Load persisted system settings (fall back to in-code defaults)
+        _sys = self.db.get_system_settings()
+        self.motion_check_interval = int(_sys.get('motion_check_interval', 10))
+        self.max_clip_length = int(_sys.get('max_clip_length', 60))
+        self.max_velocity = float(_sys.get('max_vel', 0.1))
+        self.max_bg_diff = int(_sys.get('bg_diff', 50))
+        self.motion_result_max_age_sec = 3.0  # not persisted
+        self.min_free_storage_bytes = int(_sys.get('min_free_storage_bytes', 1 * 1024 * 1024 * 1024))
+        if 'low_power_mode' in _sys:
+            self.low_power_mode = bool(_sys['low_power_mode'])
+        self.sensitivity = int(_sys.get('sensitivity', 2 if self.low_power_mode else 4))
+        self.jpeg_quality = int(_sys.get('jpeg_quality', 55 if self.low_power_mode else 70))
+        self.pipe_buffer_size = int(_sys.get('pipe_buffer_size', 10**6 if self.low_power_mode else 10**8))
+        self.rtsp_unified_demux_enabled = bool(_sys.get('rtsp_unified_demux_enabled', self.rtsp_unified_demux_enabled))
 
-        self.motion_check_interval = 10  # seconds
-        self.max_clip_length = 60  # seconds
-        self.max_velocity = 0.1#0.4  # velocity threshold for motion detection
-        self.max_bg_diff = 50#200  # background difference threshold for motion detection
-        self.motion_result_max_age_sec = 3.0  # ignore stale vel/bg_diff samples
-        self.min_free_storage_bytes = 1 * 1024 * 1024 * 1024  # 1 GB
-        self.processing_stride = 3 if self.low_power_mode else 1
-        self.jpeg_quality = 55 if self.low_power_mode else 70
+        self.default_sensitivity = int(self.sensitivity)
 
         self.recording_manager = RecordingManager(
             camera_service=self,
@@ -427,9 +598,144 @@ class CameraService(StreamingService):
             max_velocity=self.max_velocity,
             max_bg_diff=self.max_bg_diff,
             motion_result_max_age_sec=self.motion_result_max_age_sec,
+            archive_dir=self.archive_dir,
         )
         self.active_recordings = self.recording_manager.active_recordings
         self._load_existing_recordings()
+
+    def _should_auto_enable_low_power(self) -> bool:
+        try:
+            total_memory_bytes = int(psutil.virtual_memory().total)
+        except Exception:
+            total_memory_bytes = 0
+        return 0 < total_memory_bytes <= int(self.low_power_ram_threshold_bytes)
+
+    def get_runtime_settings(self) -> Dict[str, Union[bool, int, float]]:
+        try:
+            total_memory_bytes = int(psutil.virtual_memory().total)
+        except Exception:
+            total_memory_bytes = 0
+
+        return {
+            'low_power_mode': bool(self.low_power_mode),
+            'sensitivity': int(self.sensitivity),
+            'jpeg_quality': int(self.jpeg_quality),
+            'pipe_buffer_size': int(self.pipe_buffer_size),
+            'max_vel': float(self.max_velocity),
+            'bg_diff': int(self.max_bg_diff),
+            'max_clip_length': int(self.max_clip_length),
+            'motion_check_interval': int(self.motion_check_interval),
+            'min_free_storage_bytes': int(self.min_free_storage_bytes),
+            'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
+            'ram_auto_low_power_enabled': bool(self.ram_auto_low_power_enabled),
+            'low_power_ram_threshold_bytes': int(self.low_power_ram_threshold_bytes),
+            'total_memory_bytes': total_memory_bytes,
+        }
+
+    def update_runtime_settings(
+        self,
+        low_power_mode: Optional[bool] = None,
+        sensitivity: Optional[int] = None,
+        jpeg_quality: Optional[int] = None,
+        pipe_buffer_size: Optional[int] = None,
+        max_vel: Optional[float] = None,
+        bg_diff: Optional[int] = None,
+        max_clip_length: Optional[int] = None,
+        motion_check_interval: Optional[int] = None,
+        min_free_storage_bytes: Optional[int] = None,
+        rtsp_unified_demux_enabled: Optional[bool] = None,
+    ) -> Dict[str, Union[bool, int, float]]:
+        low_power_changed = False
+
+        if low_power_mode is not None:
+            self.low_power_mode = bool(low_power_mode)
+            low_power_changed = True
+
+        if sensitivity is not None:
+            safe_sensitivity = max(0, min(int(self.sensitivity_level), int(sensitivity)))
+            self.sensitivity = safe_sensitivity
+            try:
+                for camera in self.get_cameras():
+                    self.set_camera_sensitivity(camera.id, safe_sensitivity)
+            except Exception:
+                pass
+        elif low_power_changed:
+            self.sensitivity = 2 if self.low_power_mode else 4
+
+        if jpeg_quality is not None:
+            safe_quality = max(25, min(95, int(jpeg_quality)))
+            self.jpeg_quality = safe_quality
+        elif low_power_changed:
+            self.jpeg_quality = 55 if self.low_power_mode else 70
+
+        if pipe_buffer_size is not None:
+            self.pipe_buffer_size = max(65536, min(268435456, int(pipe_buffer_size)))
+        elif low_power_changed:
+            self.pipe_buffer_size = 10**6 if self.low_power_mode else 10**8
+
+        if max_vel is not None:
+            self.max_velocity = max(0.0, min(5.0, float(max_vel)))
+
+        if bg_diff is not None:
+            self.max_bg_diff = max(1, min(5000, int(bg_diff)))
+
+        if max_clip_length is not None:
+            self.max_clip_length = max(5, min(600, int(max_clip_length)))
+
+        if motion_check_interval is not None:
+            self.motion_check_interval = max(1, min(120, int(motion_check_interval)))
+
+        if min_free_storage_bytes is not None:
+            self.min_free_storage_bytes = max(0, int(min_free_storage_bytes))
+            try:
+                self.recording_manager.min_free_storage_bytes = self.min_free_storage_bytes
+            except Exception:
+                pass
+
+        if rtsp_unified_demux_enabled is not None:
+            self.rtsp_unified_demux_enabled = bool(rtsp_unified_demux_enabled)
+
+        try:
+            self.default_sensitivity = int(self.sensitivity)
+        except Exception:
+            pass
+
+        for cap in self._camera_streams.values():
+            try:
+                cap.low_power_mode = bool(self.low_power_mode)
+                cap.pipe_buffer_size = int(self.pipe_buffer_size)
+                if hasattr(cap, '_rtsp_unified_demux_enabled'):
+                    cap._rtsp_unified_demux_enabled = bool(self.rtsp_unified_demux_enabled)
+            except Exception:
+                continue
+
+        try:
+            self.recording_manager.max_velocity = float(self.max_velocity)
+            self.recording_manager.max_bg_diff = int(self.max_bg_diff)
+            self.recording_manager.max_clip_length = int(self.max_clip_length)
+            self.recording_manager.motion_check_interval = int(self.motion_check_interval)
+            self.recording_manager.min_free_storage_bytes = int(self.min_free_storage_bytes)
+        except Exception:
+            pass
+
+        # Persist all runtime settings to system.yaml
+        try:
+            self.db.save_system_settings({
+                'low_power_mode': bool(self.low_power_mode),
+                'sensitivity': int(self.sensitivity),
+                'jpeg_quality': int(self.jpeg_quality),
+                'pipe_buffer_size': int(self.pipe_buffer_size),
+                'max_vel': float(self.max_velocity),
+                'bg_diff': int(self.max_bg_diff),
+                'max_clip_length': int(self.max_clip_length),
+                'motion_check_interval': int(self.motion_check_interval),
+                'min_free_storage_bytes': int(self.min_free_storage_bytes),
+                'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
+            })
+        except Exception:
+            pass
+
+        return self.get_runtime_settings()
 
     def __del__(self):
         # Clean up any active recordings on shutdown
@@ -437,7 +743,7 @@ class CameraService(StreamingService):
             self.stop_recording(camera_id)
         for camera_id in list(self._camera_streams.keys()):
             self.stop_camera(camera_id)
-        for camera_id in list(self._active_audio_stream_processes.keys()):
+        for camera_id in list(self._audio_streams.keys()):
             self.stop_live_audio_stream(camera_id)
         
     def _load_existing_recordings(self):
@@ -623,10 +929,26 @@ class CameraService(StreamingService):
         
         resolution = [int(res) for res in db_camera['resolution'].split('x')]
         fps = db_camera['fps']
+        audio_sample_rate = int(db_camera.get('audio_sample_rate') or 16000)
+        audio_chunk_size = int(db_camera.get('audio_chunk_size') or 512)
+        audio_input_format = db_camera.get('audio_input_format')
+        audio_source = db_camera.get('audio_source')
         
         cap = None
         try:
-            cap = Capture(source, width=resolution[0], height=resolution[1], fps=fps, low_power_mode=self.low_power_mode)
+            cap = Capture(
+                source,
+                width=resolution[0],
+                height=resolution[1],
+                fps=fps,
+                low_power_mode=self.low_power_mode,
+                audio_sample_rate=audio_sample_rate,
+                audio_chunk_size=audio_chunk_size,
+                audio_input_format=audio_input_format,
+                audio_source=audio_source,
+                rtsp_unified_demux_enabled=self.rtsp_unified_demux_enabled,
+                pipe_buffer_size=self.pipe_buffer_size,
+            )
         except Exception as e:
             logger.error(f"Failed to open video source: {source} with error: {e}")
             logger.error(f"Check if the source is correct and accessible: {source}")
@@ -665,44 +987,58 @@ class CameraService(StreamingService):
     def stop_camera(self, camera_id: str):
         """Stop a camera"""
         db_camera = self.db.get_camera(camera_id)
+        if not db_camera:
+            raise ValueError(f"Camera not found: {camera_id}")
         
         # Stop any active recording
         if camera_id in self.active_recordings:
             self.stop_recording(camera_id)
 
-        if camera_id in self._camera_streams:
-            cap = self._camera_streams.pop(camera_id)
-            tracker = self._camera_trackers.pop(camera_id)
-            cap.release()
-            self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
-            logger.info(f"Stopped camera: {db_camera['name']} ({camera_id})")
-            
-            del tracker
-        else:
-            logger.warning(f"No active camera object found for id: {camera_id}")
-            return
-
-    def close_camera_stream(self, camera_id: str):
-        """Close an active camera stream and release related resources."""
         try:
             self.stop_hls_stream(camera_id)
         except Exception:
             pass
 
-        if camera_id not in self._camera_streams:
-            logger.info(f"No active stream to close for camera: {camera_id}")
-            return
+        try:
+            self.stop_live_audio_stream(camera_id)
+        except Exception:
+            pass
 
-        self.stop_camera(camera_id)
+        self.active_streams.pop(camera_id, None)
+        self.active_processing_streams.pop(camera_id, None)
+
+        cap = self._camera_streams.pop(camera_id, None)
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        tracker = self._camera_trackers.pop(camera_id, None)
+        if tracker is not None:
+            try:
+                del tracker
+            except Exception:
+                pass
 
         self.stream_locks.pop(camera_id, None)
         self._latest_frames.pop(camera_id, None)
+        self._latest_hls_frames.pop(camera_id, None)
         self._latest_frame_seq.pop(camera_id, None)
         self._latest_viz.pop(camera_id, None)
-        self._latest_res.pop(camera_id, None)
+        self._latest_res_video.pop(camera_id, None)
+        self._latest_pts_payload.pop(camera_id, None)
+        self._overlay_masks.pop(camera_id, None)
 
         self._fps_stats.pop(f"{camera_id}:primary", None)
         self._fps_stats.pop(f"{camera_id}:processing", None)
+
+        self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
+        logger.info(f"Stopped camera: {db_camera['name']} ({camera_id})")
+
+    def close_camera_stream(self, camera_id: str):
+        """Close an active camera stream and release related resources."""
+        self.stop_camera(camera_id)
 
         if hasattr(self, "active_streams"):
             self.active_streams.pop(camera_id, None)
@@ -710,66 +1046,87 @@ class CameraService(StreamingService):
     def get_recording_storage_info(self, enforce_policy: bool = False) -> Dict:
         return self.recording_manager.get_recording_storage_info(enforce_policy=enforce_policy)
 
-    def audio_capture(self, camera_id: str, output_format: str = 'wav'):
+    def audio_capture(self, camera_id: str):
+        """Create an audio-only Capture for this camera (mirrors video_capture)."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            raise ValueError(f"Camera not found: {camera_id}")
+            logger.error(f"Audio capture failed: camera not found: {camera_id}")
+            return None
 
-        command = self.audio_utils.build_live_audio_stream_command(db_camera, output_format=output_format)
-        if not command:
-            raise ValueError(f"Audio stream is not configured for camera: {camera_id}")
-
-        process = None
+        source = db_camera['source']
         try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-            )
-        except Exception as error:
-            logger.error(f"Failed to open audio source for camera {camera_id}: {error}")
-            process = None
-        return process
+            source = int(source)
+        except Exception:
+            source = str(source)
 
-    def start_audio(self, camera_id: str, output_format: str = 'wav') -> bool:
+        audio_sample_rate = int(db_camera.get('audio_sample_rate') or 16000)
+        audio_chunk_size = int(db_camera.get('audio_chunk_size') or 512)
+        audio_input_format = db_camera.get('audio_input_format')
+        audio_source = db_camera.get('audio_source')
+
+        cap = None
+        try:
+            cap = Capture(
+                source,
+                audio_sample_rate=audio_sample_rate,
+                audio_chunk_size=audio_chunk_size,
+                audio_input_format=audio_input_format,
+                audio_source=audio_source,
+                audio_only=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to open audio source for camera {camera_id}: {e}")
+        return cap
+
+    def start_audio(self, camera_id: str) -> bool:
+        """Start audio capture and verify it works (mirrors start_camera)."""
         self.stop_live_audio_stream(camera_id)
 
-        process = self.audio_capture(camera_id, output_format=output_format)
-        if process is None:
+        cap = self.audio_capture(camera_id)
+        if cap is None:
             return False
 
-        # Probe quickly for initial bytes to validate process readiness.
-        ready = False
-        try:
-            if process.stdout:
-                probe_deadline = time.time() + 0.6
-                while time.time() < probe_deadline and process.poll() is None:
-                    r, _, _ = select.select([process.stdout], [], [], 0.05)
-                    if not r:
-                        continue
-                    probe_chunk = os.read(process.stdout.fileno(), 256)
-                    if probe_chunk:
-                        ready = True
-                        break
-        except Exception:
-            ready = False
+        # Retry probe to cover FFmpeg/PulseAudio startup latency (can be 3-5 s).
+        # Each read_audio() call waits up to 2 s internally via select.select,
+        # so 6 attempts = up to 12 s total probe window.
+        _MAX_PROBE_ATTEMPTS = 6
+        ret = False
+        for attempt in range(_MAX_PROBE_ATTEMPTS):
+            if not cap.is_audio_stream_opened():
+                stderr_msg = ''
+                if cap.audio_cap and cap.audio_cap.stderr:
+                    try:
+                        stderr_msg = cap.audio_cap.stderr.read().decode(errors='replace').strip()
+                    except Exception:
+                        pass
+                exit_code = cap.audio_cap.poll() if cap.audio_cap else None
+                logger.warning(
+                    f"Audio FFmpeg process died before producing data for camera {camera_id}"
+                    + (f" (exit {exit_code})" if exit_code is not None else "")
+                    + (f": {stderr_msg}" if stderr_msg else "")
+                )
+                break
+            ret, _ = cap.read_audio()
+            if ret:
+                break
+            logger.debug(
+                f"Audio probe attempt {attempt + 1}/{_MAX_PROBE_ATTEMPTS} returned no data "
+                f"for camera {camera_id} — retrying"
+            )
 
-        if not ready and process.poll() is not None:
+        if ret:
+            db_camera = self.db.get_camera(camera_id)
+            name = db_camera['name'] if db_camera else camera_id
+            logger.info(f"Started audio: {name} ({camera_id})")
+            self._audio_streams[camera_id] = cap
+            return True
+        else:
+            logger.warning(f"Audio capture opened but failed to read for camera {camera_id}")
             try:
-                stderr_text = (process.stderr.read() if process.stderr else b'').decode('utf-8', errors='ignore')
-            except Exception:
-                stderr_text = ''
-            logger.warning(f"Audio process exited early for camera {camera_id}: {(stderr_text or '')[-400:]}")
-            try:
-                process.kill()
+                cap.release_audio()
             except Exception:
                 pass
             return False
-
-        self._active_audio_stream_processes[camera_id] = process
-        self._active_audio_stream_formats[camera_id] = str(output_format or 'wav').strip().lower()
-        return True
 
     def start_recording(self, camera_id: str):
         return self.recording_manager.start_recording(camera_id)

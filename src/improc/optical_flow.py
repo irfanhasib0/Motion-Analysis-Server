@@ -314,7 +314,7 @@ class OpticalFlowTracker:
                 self.prev_pts[i]['vel'] = np.mean(p1[val_pts] - kp1[val_pts], axis=0)
                 self.prev_pts[i]['keypoints_2'][~val_pts] += (self.prev_pts[i]['vel']).reshape(1,2)
 
-    def detect(self, frame):
+    def detect(self, frame, return_pts: bool = False):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         if self.prev_gray is None:
@@ -322,7 +322,9 @@ class OpticalFlowTracker:
             self.prev_gray = gray
             self.viz_div_h = int(gray.shape[0] // (self.num_traj_viz+1))
             self.viz_div_w = int(gray.shape[1])
-            return frame, frame,  {}
+            if return_pts:
+                return frame, {}, deepcopy(self.prev_pts)
+            return frame, {}
         
         if self.det_method == 'fast':
             for i in self.prev_pts.keys():
@@ -353,13 +355,18 @@ class OpticalFlowTracker:
                 }
         
         viz_frame = self._draw_pts_flow(frame, self.prev_pts)
+        pts_out = deepcopy(self.prev_pts)
         
         if self.det_method == 'fast':
             self.prev_pts = self._detect_pts(gray, det_feat_pts=False)
+            if return_pts:
+                return viz_frame, points_dict, pts_out
             return viz_frame, points_dict
         
         self._update_init_pts(gray)
         self.count += 1
+        if return_pts:
+            return viz_frame, points_dict, pts_out
         return viz_frame, points_dict
     
     def plot_velocities(self, plot_array, points_dict):

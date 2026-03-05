@@ -80,8 +80,18 @@ class StreamDrawingHelper:
     )
     AUDIO_LOUDNESS_COLOR = (100, 220, 255)
     AUDIO_PEAKFREQ_COLOR = (180, 255, 100)
-    AUDIO_SERIES_GAIN = 0.82
-    VELOCITY_ROW_GAIN = 0.20
+    AUDIO_SERIES_GAIN = 1.0 #0.82
+    VELOCITY_ROW_GAIN = 0.1
+    OVERLAY_COLORS = (
+        (0, 255, 0),
+        (255, 0, 0),
+        (0, 0, 255),
+        (255, 255, 0),
+        (255, 0, 255),
+        (0, 255, 255),
+        (128, 255, 0),
+        (255, 128, 0),
+    )
 
     @staticmethod
     def ensure_bgr_frame(frame: np.ndarray) -> np.ndarray:
@@ -141,7 +151,7 @@ class StreamDrawingHelper:
 
         return frame
 
-    def plot_velocities_for_stream(
+    def plot_dynamic_stream_data(
         self,
         plot_array: np.ndarray,
         points_dict: Dict[str, Any],
@@ -156,8 +166,10 @@ class StreamDrawingHelper:
         usable_h = max(1, h - top_margin - bottom_margin)
 
         num_traj_viz = self.NUM_TRAJ_VIZ
-        row_count = max(1, min(len(points_dict), num_traj_viz))
-        row_h = max(8, usable_h // row_count)
+
+        # Fixed layout: 2 audio rows (0-1) + num_traj_viz velocity rows (2-6) = 7 total, always
+        total_rows = 2 + num_traj_viz
+        row_h = max(8, usable_h // total_rows)
 
         scale = max(0.65, min(1.6, h / 720.0))
         baseline_thickness = max(1, int(round(1.2 * scale)))
@@ -172,129 +184,68 @@ class StreamDrawingHelper:
         n_colors = max(1, len(colors))
 
         analysis = latest_audio_chunk_analysis.get(camera_id) or {}
-        loudness_series = analysis.get('loudness_series') or []
-        peak_freq_series = analysis.get('peak_frequency_mean_series') or []
 
-        def _draw_small_series(series, y0: int, y1: int, color, label: str):
-            inner_pad = max(1, int(round(1.5 * scale)))
-            label_scale = max(0.32, 0.36 * scale)
-            label_thickness = max(1, int(round(1.2 * scale)))
-            (_, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, label_scale, label_thickness)
-            label_y = max(y0 + label_h + 1, y1 - 2)
-            cv2.putText(
-                plot_array,
-                label,
-                (left_pad, label_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                label_scale,
-                color,
-                label_thickness,
-                cv2.LINE_AA,
-            )
-
-            y_mid = (y0 + y1) // 2
-            cv2.line(
-                plot_array,
-                (left_pad, y_mid),
-                (w - left_pad, y_mid),
-                (70, 70, 70),
-                1,
-                cv2.LINE_AA,
-            )
-
+        # Extract just the y-values from audio series (drop timestamps — same as velocity)
+        def _extract_series_values(series) -> np.ndarray:
             if not series:
-                return
-
+                return np.array([], dtype=np.float32)
             arr = np.asarray(series, dtype=np.float32)
-            if arr.ndim != 2 or arr.shape[1] < 2:
+            if arr.ndim == 2 and arr.shape[1] >= 2:
+                return arr[:, 1]
+            if arr.ndim == 1:
+                return arr
+            return np.array([], dtype=np.float32)
+
+        loudness_vals = _extract_series_values(analysis.get('loudness_series') or [])
+        peak_freq_vals = _extract_series_values(analysis.get('peak_frequency_mean_series') or [])
+        
+        # Fixed audio row defs — always at rows 0 and 1 (empty axes shown if no data)
+        audio_row_defs = [
+            ("A-Amp", loudness_vals,  self.AUDIO_LOUDNESS_COLOR, self.AUDIO_SERIES_GAIN),
+            ("A-Fq",  peak_freq_vals/20000, self.AUDIO_PEAKFREQ_COLOR, self.AUDIO_SERIES_GAIN),
+        ]
+
+        def _draw_row(row_idx: int, label: str, vals: np.ndarray, color, gain: float):
+            center_y = top_margin + row_idx * row_h + (row_h // 2)
+            cv2.line(plot_array, (0, center_y), (w, center_y), (150, 150, 150), baseline_thickness, cv2.LINE_AA)
+            if label:
+                row_label_scale = max(0.32, 0.38 * scale)
+                row_label_thickness = max(1, int(round(1.2 * scale)))
+                label_y = max(8, min(h - 4, center_y - 3))
+                cv2.putText(plot_array, label, (4, label_y), cv2.FONT_HERSHEY_SIMPLEX,
+                            row_label_scale, color, row_label_thickness, cv2.LINE_AA)
+            if vals.size < 2:
                 return
-
-            x_vals = arr[:, 0]
-            y_vals = arr[:, 1]
-            if x_vals.size < 2:
-                return
-
-            x_span = max(1.0, float(x_vals[-1] - x_vals[0]))
-            y_min = float(np.min(y_vals))
-            y_max = float(np.max(y_vals))
-            y_span = max(1e-6, y_max - y_min)
-
-            x_left = graph_x0
-            x_right = max(x_left + 1, w - left_pad)
-            y_top = y0 + inner_pad
-            y_bottom = max(y_top + 2, y1 - inner_pad)
-
-            xs = x_left + ((x_vals - x_vals[0]) / x_span) * (x_right - x_left)
-            inner_h = max(2, y_bottom - y_top)
-            center_y = y_top + (inner_h * 0.5)
-            ys = center_y - ((((y_vals - y_min) / y_span) - 0.5) * inner_h * self.AUDIO_SERIES_GAIN)
+            clipped = vals[-max_pts:]
+            amp = 1.0 #max(float(np.max(np.abs(clipped))), 1e-6)
+            y_amp = max(3.0, row_h * gain)
+            xs = (5 * np.arange(clipped.size, dtype=np.float32)) + graph_x0
+            ys = center_y - (clipped / amp) * y_amp
             pts = np.stack([xs, ys], axis=1).astype(np.int32).reshape((-1, 1, 2))
-            cv2.polylines(plot_array, [pts], False, color, max(1, int(round(1.5 * scale))), cv2.LINE_AA)
+            cv2.polylines(plot_array, [pts], False, color, curve_thickness, cv2.LINE_AA)
 
-        top_band_top = max(4, int(round(10 * scale)))
-        top_band_bottom = max(top_band_top + 12, top_margin - 2)
-        split_y = top_band_top + ((top_band_bottom - top_band_top) // 2)
-        _draw_small_series(peak_freq_series, split_y, top_band_bottom, self.AUDIO_PEAKFREQ_COLOR, "A-Fq")
-        _draw_small_series(loudness_series, top_band_top, split_y, self.AUDIO_LOUDNESS_COLOR, "A-Amp")
+        # Draw audio rows — always rows 0 and 1
+        for row_idx, (label, vals, color, gain) in enumerate(audio_row_defs):
+            _draw_row(row_idx, label, vals, color, gain)
 
+        # Draw velocity rows — always rows 2 .. 2+num_traj_viz-1 (empty axis if no camera data)
+        empty_vel = np.array([], dtype=np.float32)
         res = {}
-        for idx, (_id, payload) in enumerate(points_items):
-            if idx >= num_traj_viz:
-                break
-
-            color = colors[idx % n_colors]
-            center_y = top_margin + idx * row_h + (row_h // 2)
-
-            cv2.line(
-                plot_array,
-                (0, center_y),
-                (w, center_y),
-                (150, 150, 150),
-                baseline_thickness,
-                cv2.LINE_AA,
-            )
-
-            row_label = f"V-{_id}"
-            row_label_scale = max(0.32, 0.38 * scale)
-            row_label_thickness = max(1, int(round(1.2 * scale)))
-            (_, row_label_h), _ = cv2.getTextSize(row_label, cv2.FONT_HERSHEY_SIMPLEX, row_label_scale, row_label_thickness)
-            row_label_y = max(8, min(h - 4, center_y - 3))
-            cv2.putText(
-                plot_array,
-                row_label,
-                (4, row_label_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                row_label_scale,
-                color,
-                row_label_thickness,
-                cv2.LINE_AA,
-            )
-
-            vel = np.asarray(payload.get('vel', []), dtype=np.float32).reshape(-1)
-            mean_vel = float(payload.get('mean_vel', 0.0))
-            if vel.size > 0:
-                vel = vel[-max_pts:]
-                amp = max(float(np.max(np.abs(vel))), 1e-6)
-                y_amp = max(3.0, row_h * self.VELOCITY_ROW_GAIN)
-
-                xs = np.arange(vel.size, dtype=np.float32) + graph_x0
-                ys = center_y - (vel / amp) * y_amp
-                points = np.stack([xs, ys], axis=1).astype(np.int32).reshape((-1, 1, 2))
-
-                cv2.polylines(
-                    plot_array,
-                    pts=[points],
-                    isClosed=False,
-                    color=color,
-                    thickness=curve_thickness,
-                    lineType=cv2.LINE_AA,
-                )
-
-            res[_id] = {'vel': round(mean_vel, 2), 'bg_diff': bg_diff_int}
+        for idx in range(num_traj_viz):
+            row_idx = 2 + idx
+            if idx < len(points_items):
+                _id, payload = points_items[idx]
+                color = colors[idx % n_colors]
+                vel = np.asarray(payload.get('vel', []), dtype=np.float32).reshape(-1)
+                mean_vel = float(payload.get('mean_vel', 0.0))
+                _draw_row(row_idx, f"V-{_id}", vel, color, self.VELOCITY_ROW_GAIN)
+                res[_id] = {'vel': round(mean_vel, 2), 'bg_diff': bg_diff_int}
+            else:
+                _draw_row(row_idx, "", empty_vel, colors[idx % n_colors], self.VELOCITY_ROW_GAIN)
 
         return plot_array, res
 
-    def draw_processing_overlay(
+    def draw_box_tracking_overlay(
         self,
         frame: np.ndarray,
         camera_id: str,
@@ -340,17 +291,64 @@ class StreamDrawingHelper:
         text_y = min(box_bottom - pad_y, box_top + text_h + pad_y)
         frame = cv2.putText(frame, text, (pad_x, text_y), font, font_scale, color, thickness, cv2.LINE_AA)
         return frame
-'''
-# Parse resolution for mock camera
-if db_camera.get('resolution'):
-    width, height = map(int, db_camera['resolution'].split('x'))
-else:
-    width, height = 640, 480
-    
-mock_cap = MockCapture(width, height, db_camera['name'])
-self._camera_streams[camera_id] = mock_cap
-logger.info(f"Created mock stream for {db_camera['name']} at {width}x{height}")
-'''
+
+    def draw_pts_flow_for_stream(
+        self,
+        frame: np.ndarray,
+        pts_payload: Optional[Dict[Any, Dict[str, Any]]],
+        draw_mask: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        viz_frame = frame.copy()
+        if draw_mask is None or draw_mask.shape[:2] != viz_frame.shape[:2]:
+            draw_mask = np.zeros_like(viz_frame)
+        else:
+            draw_mask = (0.99 * draw_mask).astype(np.uint8)
+
+        if not pts_payload:
+            return viz_frame, draw_mask
+
+        colors = self.OVERLAY_COLORS
+        n_colors = max(1, len(colors))
+
+        for track_id, track_data in pts_payload.items():
+            good_new = np.asarray(track_data.get('keypoints_2', []), dtype=np.float32).reshape(-1, 2)
+            good_old = np.asarray(track_data.get('keypoints_1', []), dtype=np.float32).reshape(-1, 2)
+
+            for idx, (new, old) in enumerate(zip(good_new, good_old)):
+                a, b = new.ravel().astype(int)
+                c, d = old.ravel().astype(int)
+                if min(a, b, c, d) < 0:
+                    continue
+                color = colors[idx % n_colors]
+                try:
+                    draw_mask = cv2.line(draw_mask, (a, b), (c, d), color, 2)
+                    viz_frame = cv2.circle(viz_frame, (a, b), 3, color, -1)
+                except Exception:
+                    continue
+
+            bbox = track_data.get('bbox')
+            if bbox is not None and len(bbox) >= 4:
+                try:
+                    x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+                    cv2.rectangle(viz_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(
+                        viz_frame,
+                        f'ID: {track_id}',
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        2,
+                    )
+                except Exception:
+                    pass
+
+        try:
+            viz_frame = cv2.add(viz_frame, draw_mask)
+        except Exception:
+            pass
+
+        return viz_frame, draw_mask
 
 class StreamingService:
     def __init__(self):
@@ -360,10 +358,12 @@ class StreamingService:
         self.active_audio_streams: Dict[str, str] = {}  # camera_id -> active audio stream token
         self.active_processing_streams: Dict[str, str] = {}  # camera_id -> active processing stream token
         self._latest_frames: Dict[str, np.ndarray] = {}
+        self._latest_hls_frames: Dict[str, np.ndarray] = {}
         self._latest_frame_seq: Dict[str, int] = {}
         self._stream_frame_index: Dict[str, int] = {}
         self._latest_viz: Dict[str, np.ndarray] = {}
-        self._latest_res: Dict[str, Dict[str, Any]] = {}
+        self._latest_res_video: Dict[str, Dict[str, Any]] = {}
+        self._latest_res_audio: Dict[str, Dict[str, Any]] = {}
         self._fps_stats: Dict[str, Dict[str, float]] = {}
         self._background_camera_threads: Dict[str, threading.Thread] = {}
         self._hls_manager = HLSManager(
@@ -376,11 +376,14 @@ class StreamingService:
         self._hls_pipe_stop_events: Dict[str, threading.Event] = {}
         self._audio_chunk_analyzers: Dict[str, FrequencyIntensityAnalyzer] = {}
         self._latest_audio_chunk_analysis: Dict[str, Dict[str, Any]] = {}
+        self._audio_streams: Dict[str, Any] = {}  # camera_id -> audio-only Capture
         self._drawing = StreamDrawingHelper()
         self.sensitivity_level = 5
         self.default_sensitivity = 2
         self._camera_sensitivity: Dict[str, int] = {}
         self._audio_chunk_index: Dict[str, int] = {}
+        self._latest_pts_payload: Dict[str, Dict[Any, Dict[str, Any]]] = {}
+        self._overlay_masks: Dict[str, np.ndarray] = {}
 
     def set_camera_sensitivity(self, camera_id: str, sensitivity: int) -> int:
         safe_sensitivity = max(0, min(int(self.sensitivity_level), int(sensitivity)))
@@ -394,13 +397,19 @@ class StreamingService:
             value = self.default_sensitivity
         return max(0, min(int(self.sensitivity_level), value))
 
-    def get_camera_processing_stride(self, camera_id: str) -> int:
+    def get_camera_effective_stride(self, camera_id: str) -> int:
         sensitivity = self.get_camera_sensitivity(camera_id)
-        return max(1, int(self.sensitivity_level) - sensitivity)
+        sensitivity_stride = max(1, int(self.sensitivity_level) - sensitivity)
+        if sensitivity_stride >= int(self.sensitivity_level):
+            return int(self.sensitivity_level)
+        return max(1, sensitivity_stride)
 
     def _get_audio_chunk_analyzer(self, camera_id: str, db_camera: Dict[str, Any]) -> FrequencyIntensityAnalyzer:
         analyzer = self._audio_chunk_analyzers.get(camera_id)
-        sample_rate = int(db_camera.get('audio_sample_rate') or os.getenv('AUDIO_SAMPLE_RATE', '16000'))
+        try:
+            sample_rate = int(db_camera.get('audio_sample_rate'))
+        except (TypeError, ValueError):
+            sample_rate = int(os.getenv('AUDIO_SAMPLE_RATE', '16000'))
         channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
 
         if analyzer is not None:
@@ -440,9 +449,13 @@ class StreamingService:
         lock = self.stream_locks.get(camera_id)
         if lock is not None:
             with lock:
-                frame = self._latest_frames.get(camera_id)
+                frame = self._latest_hls_frames.get(camera_id)
+                if frame is None:
+                    frame = self._latest_frames.get(camera_id)
                 return frame.copy() if frame is not None else None
-        frame = self._latest_frames.get(camera_id)
+        frame = self._latest_hls_frames.get(camera_id)
+        if frame is None:
+            frame = self._latest_frames.get(camera_id)
         return frame.copy() if frame is not None else None
 
     def start_hls_stream(self, camera_id: str) -> str:
@@ -499,39 +512,64 @@ class StreamingService:
             merged['bg_diff'] = max(int(item.get('bg_diff', 0) or 0), merged['bg_diff'])
         return merged
 
-    def _extract_points_dict(self, detect_output: Any, fallback_frame: np.ndarray) -> tuple[np.ndarray, Dict[str, Any]]:
+    def _extract_detect_payload(
+        self,
+        detect_output: Any,
+        fallback_frame: np.ndarray,
+    ) -> tuple[np.ndarray, Dict[str, Any], Dict[Any, Dict[str, Any]]]:
         if isinstance(detect_output, np.ndarray):
-            return detect_output, {}
+            return detect_output, {}, {}
 
         if not isinstance(detect_output, tuple):
-            return fallback_frame, {}
+            return fallback_frame, {}, {}
 
         if len(detect_output) == 0:
-            return fallback_frame, {}
+            return fallback_frame, {}, {}
 
         frame_candidate = detect_output[0] if detect_output[0] is not None else fallback_frame
+        points_dict: Dict[str, Any] = {}
+        pts_payload: Dict[Any, Dict[str, Any]] = {}
+
         for item in detect_output[1:]:
             if isinstance(item, dict):
-                return frame_candidate, item
-        return frame_candidate, {}
+                if not points_dict and any(
+                    isinstance(value, dict) and ('vel' in value or 'mean_vel' in value)
+                    for value in item.values()
+                ):
+                    points_dict = item
+                    continue
+                if not pts_payload and any(
+                    isinstance(value, dict) and ('keypoints_1' in value or 'keypoints_2' in value)
+                    for value in item.values()
+                ):
+                    pts_payload = item
 
-    def _plot_velocities_for_stream(self, plot_array: np.ndarray, points_dict: Dict[str, Any], camera_id: str) -> tuple[np.ndarray, Dict[str, Dict[str, Any]]]:
-        return self._drawing.plot_velocities_for_stream(
+        return frame_candidate, points_dict, pts_payload
+
+    def _plot_dynamic_stream_data(self, plot_array: np.ndarray, points_dict: Dict[str, Any], camera_id: str) -> tuple[np.ndarray, Dict[str, Dict[str, Any]]]:
+        return self._drawing.plot_dynamic_stream_data(
             plot_array,
             points_dict,
             camera_id,
             self._latest_audio_chunk_analysis,
         )
 
-    def _draw_processing_overlay(self, frame: np.ndarray, camera_id: str, fps_value: float, res: Optional[Dict[str, Any]] = None) -> np.ndarray:
-        return self._drawing.draw_processing_overlay(
+    def _draw_box_tracking_overlay(self, frame: np.ndarray, camera_id: str, fps_value: float, res: Optional[Dict[str, Any]] = None) -> np.ndarray:
+        return self._drawing.draw_box_tracking_overlay(
             frame,
             camera_id,
             fps_value,
             res,
             self._latest_audio_chunk_analysis,
         )
-        
+
+    def _draw_pts_flow_for_stream(self, frame: np.ndarray, camera_id: str, pts_payload: Optional[Dict[Any, Dict[str, Any]]]) -> np.ndarray:
+        current_mask = self._overlay_masks.get(camera_id)
+        frame_with_overlay, updated_mask = self._drawing.draw_pts_flow_for_stream(frame, pts_payload, current_mask)
+        self._overlay_masks[camera_id] = updated_mask
+        return frame_with_overlay
+
+            
     def generate_failure_frame(self, msg: str = "Camera Unavailable"):
         failure_frame = np.zeros((480, 640, 3), dtype=np.uint8)  # Placeholder frame for errors
         w, h = cv2.getTextSize(msg, cv2.FONT_HERSHEY_COMPLEX, 0.7, 1)[0]
@@ -558,16 +596,41 @@ class StreamingService:
                 b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         return buffer
 
-    def generate_live_audio_stream(self, camera_id: str, chunk_size: Optional[int] = None, output_format: str = 'mp3'):
+    @staticmethod
+    def _make_wav_header(sample_rate: int, num_channels: int, bits_per_sample: int = 16) -> bytes:
+        """Build a 44-byte WAV header suitable for streaming.
+
+        Both the RIFF and data chunk sizes are set to 0xFFFFFFFF (the standard
+        sentinel for unknown/streaming length).  Most browsers, ffplay, and Web
+        Audio API accept this without issue.
+        """
+        import struct
+        byte_rate   = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        return struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF', 0xFFFFFFFF,   # RIFF chunk size  — unknown/streaming
+            b'WAVE',
+            b'fmt ', 16,           # fmt  sub-chunk size
+            1,                     # PCM audio format
+            num_channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bits_per_sample,
+            b'data', 0xFFFFFFFF,   # data sub-chunk size — unknown/streaming
+        )
+
+    def generate_live_audio_stream(self, camera_id: str, chunk_size: Optional[int] = None):
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
             raise ValueError(f"Camera not found: {camera_id}")
 
         if chunk_size is None:
             try:
-                chunk_size = int(db_camera.get('audio_chunk_size') or os.getenv('AUDIO_CHUNK_SIZE', '512'))
+                chunk_size = int(db_camera.get('audio_chunk_size'))
             except (TypeError, ValueError):
-                chunk_size = 512
+                chunk_size = int(os.getenv('AUDIO_CHUNK_SIZE', '512'))
         chunk_size = max(128, min(16384, int(chunk_size)))
 
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
@@ -576,111 +639,76 @@ class StreamingService:
             logger.info(f"Taking over existing audio stream for camera {camera_id}")
         self.active_audio_streams[camera_id] = stream_token
 
-        requested_format = str(output_format or 'mp3').strip().lower()
-        active_format = self._active_audio_stream_formats.get(camera_id)
-        process = self._active_audio_stream_processes.get(camera_id)
-
-        if process is None or process.poll() is not None or active_format != requested_format:
-            started = self.start_audio(camera_id, output_format=requested_format)
+        # Start audio capture if not already running (mirrors generate_live_video_stream)
+        cap = self._audio_streams.get(camera_id)
+        if cap is None or not cap.is_audio_stream_opened():
+            started = self.start_audio(camera_id)
             if not started:
+                self.active_audio_streams.pop(camera_id, None)
                 raise ValueError(f"Audio stream failed to start for camera: {camera_id}")
-            process = self._active_audio_stream_processes.get(camera_id)
+            cap = self._audio_streams.get(camera_id)
 
-        if process is None or process.stdout is None:
-            raise ValueError(f"Audio stream process unavailable for camera: {camera_id}")
+        if cap is None:
+            self.active_audio_streams.pop(camera_id, None)
+            raise ValueError(f"Audio capture unavailable for camera: {camera_id}")
 
-        has_emitted_audio = False
         try:
-            while process.stdout and process.poll() is None and self.active_audio_streams.get(camera_id) == stream_token:
-                try:
-                    ready, _, _ = select.select([process.stdout], [], [], 0.2)
-                except (ValueError, OSError):
-                    break
-                if not ready:
+            # Yield a streaming WAV header so the browser / Web Audio API gets a
+            # properly typed audio stream without any extra encoding overhead.
+            yield self._make_wav_header(cap.audio_sample_rate, cap.audio_channels)
+
+            has_emitted_audio = False
+            while cap.is_audio_stream_opened() and self.active_audio_streams.get(camera_id) == stream_token:
+                ret, samples = cap.read_audio()
+                if not ret or samples is None or samples.size == 0:
                     continue
 
-                latest_chunk = b''
-                while True:
-                    try:
-                        chunk = os.read(process.stdout.fileno(), chunk_size)
-                    except (ValueError, OSError):
-                        chunk = b''
-                    if not chunk:
-                        break
-                    latest_chunk = chunk
-
-                    try:
-                        more_ready, _, _ = select.select([process.stdout], [], [], 0)
-                    except (ValueError, OSError):
-                        more_ready = []
-                    if not more_ready:
-                        break
-
-                if not latest_chunk:
-                    break
+                # Convert float32 samples → raw s16le bytes for streaming
+                raw_chunk = (samples * 32768.0).clip(-32768, 32767).astype(np.int16).tobytes()
 
                 self._audio_chunk_index[camera_id] = self._audio_chunk_index.get(camera_id, 0) + 1
                 audio_chunk_index = self._audio_chunk_index[camera_id]
-                processing_stride = self.get_camera_processing_stride(camera_id)
-                should_run_audio_analysis = processing_stride != int(self.sensitivity_level) and (
-                    processing_stride == 1 or audio_chunk_index % processing_stride == 0
-                )
+                effective_stride = self.get_camera_effective_stride(camera_id)
+                if effective_stride == int(self.sensitivity_level):
+                    should_run_audio_analysis = False
+                else:
+                    should_run_audio_analysis = (effective_stride == 1 or audio_chunk_index % effective_stride == 0)
 
                 if should_run_audio_analysis:
                     analyzer = self._get_audio_chunk_analyzer(camera_id, db_camera)
-                    try:
-                        analysis = analyzer.process_chunk(latest_chunk)
-                        self._latest_audio_chunk_analysis[camera_id] = analysis
-                    except Exception as analysis_error:
-                        logger.warning(f"Audio chunk analysis failed for camera {camera_id}: {analysis_error}")
+                    analysis = analyzer.process_chunk(samples)
+                    self._latest_audio_chunk_analysis[camera_id] = analysis
+                    self._latest_res_audio[camera_id] = {
+                        'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
+                        'freq': float(analysis.get('peak_frequency_mean', 0.0) or 0.0),
+                    }
 
                 has_emitted_audio = True
-                yield latest_chunk
+                yield raw_chunk
 
-            if process and process.poll() is not None and not has_emitted_audio:
-                try:
-                    stderr_text = (process.stderr.read() if process.stderr else b'').decode('utf-8', errors='ignore')
-                except Exception:
-                    stderr_text = ''
-                if stderr_text.strip():
-                    logger.error(f"Live audio stream failed for camera {camera_id}: {(stderr_text or '')[-500:]}")
+            if not has_emitted_audio:
+                logger.warning(f"Live audio stream produced no data for camera {camera_id}")
+
+        except Exception as error:
+            logger.warning(f"Audio stream error for camera {camera_id}: {error}")
+
         finally:
             if self.active_audio_streams.get(camera_id) == stream_token:
                 self.active_audio_streams.pop(camera_id, None)
-            if process and process.poll() is not None:
-                registered = self._active_audio_stream_processes.get(camera_id)
-                if registered is process:
-                    self._active_audio_stream_processes.pop(camera_id, None)
-                    self._active_audio_stream_formats.pop(camera_id, None)
 
     def stop_live_audio_stream(self, camera_id: str) -> bool:
         self.active_audio_streams.pop(camera_id, None)
         self._audio_chunk_analyzers.pop(camera_id, None)
         self._latest_audio_chunk_analysis.pop(camera_id, None)
+        self._latest_res_audio.pop(camera_id, None)
         self._audio_chunk_index.pop(camera_id, None)
-        process = self._active_audio_stream_processes.pop(camera_id, None)
-        self._active_audio_stream_formats.pop(camera_id, None)
-        if not process:
+        cap = self._audio_streams.pop(camera_id, None)
+        if not cap:
             return False
         try:
-            process.terminate()
-            process.wait(timeout=1.0)
-            try:
-                if process.stdout:
-                    process.stdout.close()
-            except Exception:
-                pass
-            try:
-                if process.stderr:
-                    process.stderr.close()
-            except Exception:
-                pass
+            cap.release_audio()
             return True
         except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
             return True
 
     def generate_live_video_stream(self, camera_id: str, emit_stream: bool = True) -> Generator[bytes, None, None]:
@@ -733,27 +761,33 @@ class StreamingService:
 
             # Resize frame if needed for better streaming performance
             frame  = self._resize_frame_for_streaming(frame)
-            processing_stride = self.get_camera_processing_stride(camera_id)
-            if processing_stride == int(self.sensitivity_level):
+            effective_stride = self.get_camera_effective_stride(camera_id)
+            if effective_stride == int(self.sensitivity_level):
                 should_run_tracker = False
             else:
-                should_run_tracker = (processing_stride == 1) or (frame_index % processing_stride == 0)
+                should_run_tracker = (effective_stride == 1) or (frame_index % effective_stride == 0)
 
             if should_run_tracker:
-                detect_output = tracker.detect(frame)
-                frame, points_dict = self._extract_points_dict(detect_output, frame)
-                viz1, _res = self._plot_velocities_for_stream(frame, points_dict, camera_id)
+                detect_output = tracker.detect(frame, return_pts=True)
+                frame, points_dict, pts_payload = self._extract_detect_payload(detect_output, frame)
+                frame = self._draw_pts_flow_for_stream(frame, camera_id, pts_payload)
+                viz1, _res = self._plot_dynamic_stream_data(frame, points_dict, camera_id)
                 res = self._aggregate_motion_result(_res)
                 with lock:
                     self._latest_viz[camera_id] = viz1
-                    self._latest_res[camera_id] = res
+                    self._latest_res_video[camera_id] = res
+                    self._latest_pts_payload[camera_id] = pts_payload
+                    self._latest_hls_frames[camera_id] = frame
             else:
                 with lock:
                     viz1 = self._latest_viz.get(camera_id)
-                    res = self._latest_res.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time()})
+                    res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time()})
                     if viz1 is None:
                         viz1 = frame
                         self._latest_viz[camera_id] = viz1
+                    latest_pts = self._latest_pts_payload.get(camera_id)
+                    frame = self._draw_pts_flow_for_stream(frame, camera_id, latest_pts)
+                    self._latest_hls_frames[camera_id] = frame
 
             frame_fps = self._update_loop_fps(f"{camera_id}:primary")
             frame = self._draw_fps_overlay(frame, frame_fps)
@@ -796,11 +830,11 @@ class StreamingService:
 
             output_frame = processed_frame.copy()
             processing_fps = self._update_loop_fps(f"{camera_id}:processing")
-            output_frame = self._draw_processing_overlay(
+            output_frame = self._draw_box_tracking_overlay(
                 output_frame,
                 camera_id,
                 processing_fps,
-                res=getattr(self, '_latest_res', {}).get(camera_id, {'vel': 0, 'bg_diff': 0}),
+                res=getattr(self, '_latest_res_video', {}).get(camera_id, {'vel': 0, 'bg_diff': 0}),
             )
 
             # Resize frame if needed for better streaming performance
@@ -883,7 +917,7 @@ class StreamingService:
     def generate_result_json_stream(self, camera_id: str) -> Generator[Dict[str, Union[int, float]], None, None]:
         """Generate JSON stream of processing results for a camera"""
         while camera_id in self._camera_trackers:
-            res = getattr(self, '_latest_res', {}).get(camera_id, None)
+            res = getattr(self, '_latest_res_video', {}).get(camera_id, None)
             if res is not None:
                 yield json.dumps(res)
             time.sleep(1.0)  # Update every second

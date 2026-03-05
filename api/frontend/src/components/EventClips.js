@@ -733,6 +733,7 @@ const EventClips = ({ recordings = [], cameras = [] }) => {
                       durationValue,
                       velValue,
                       diffValue,
+                      loudnessValue,
                       playbackStats,
                       playbackDuration,
                       playbackProgress,
@@ -855,7 +856,7 @@ const EventClips = ({ recordings = [], cameras = [] }) => {
                             />
                           </div>
                           <div className="reel-meta-row">
-                            <RecordingMetaInfo durationText={formatDuration(durationValue)} velValue={velValue} diffValue={diffValue} />
+                            <RecordingMetaInfo durationText={formatDuration(durationValue)} velValue={velValue} diffValue={diffValue} loudnessValue={loudnessValue} />
                             <div className="reel-card-actions" onClick={(event) => event.stopPropagation()}>
                               <button
                                 type="button"
@@ -898,25 +899,26 @@ const EventClips = ({ recordings = [], cameras = [] }) => {
         // Expanded modal view for focused reel playback.
         <div className="enlarged-overlay" onClick={handleCloseExpanded}>
           <div className="enlarged-content" onClick={(event) => event.stopPropagation()}>
-            <div className="enlarged-header">
-              <span className="enlarged-title">{expandedRecording.filename || expandedRecording.id}</span>
-              <button
-                type="button"
-                className="enlarged-close"
-                onClick={handleCloseExpanded}
-                title="Close enlarged playback"
-              >
-                <X size={16} />
-              </button>
-            </div>
             <div className="enlarged-card-stage">
               <div className="reel-card enlarged-reel-card">
+                <div className="enlarged-reel-header">
+                  <span className="enlarged-title">{expandedRecording.filename || expandedRecording.id}</span>
+                  <button
+                    type="button"
+                    className="enlarged-close"
+                    onClick={handleCloseExpanded}
+                    title="Close enlarged playback"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
                 {(() => {
                   const {
                     timestampParts,
                     durationValue,
                     velValue,
                     diffValue,
+                    loudnessValue,
                     playbackStats,
                     playbackDuration,
                     playbackProgress,
@@ -1020,7 +1022,7 @@ const EventClips = ({ recordings = [], cameras = [] }) => {
                             style={{ '--progress': `${playbackProgress}%` }}
                           />
                         </div>
-                        <RecordingMetaInfo durationText={formatDuration(durationValue)} velValue={velValue} diffValue={diffValue} />
+                        <RecordingMetaInfo durationText={formatDuration(durationValue)} velValue={velValue} diffValue={diffValue} loudnessValue={loudnessValue} />
                       </div>
                     </>
                   );

@@ -134,6 +134,19 @@ function App() {
     setSystemInfo(systemRes.data);
   };
 
+  // Refresh recordings when an archive is loaded or unloaded from EventView
+  useEffect(() => {
+    const refresh = () => {
+      api.getRecordings().then((res) => setRecordings(res.data)).catch(() => {});
+    };
+    window.addEventListener('archive-loaded', refresh);
+    window.addEventListener('archive-unloaded', refresh);
+    return () => {
+      window.removeEventListener('archive-loaded', refresh);
+      window.removeEventListener('archive-unloaded', refresh);
+    };
+  }, []);
+
   if (loading) {
     return (
       <div className="app-loading">
@@ -236,7 +249,7 @@ function App() {
             />
             <Route 
               path="/settings" 
-              element={<SystemSettings systemInfo={systemInfo} />} 
+              element={<SystemSettings systemInfo={systemInfo} cameras={cameras} setCameras={setCameras} />} 
             />
           </Routes>
         </main>

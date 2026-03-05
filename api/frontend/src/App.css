@@ -289,6 +289,22 @@
   gap: 24px;
 }
 
+.system-settings-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1200px) {
+  .system-settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .system-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .info-card {
   background: rgba(255, 255, 255, 0.75);
   backdrop-filter: blur(30px) saturate(200%);

@@ -312,7 +312,7 @@
 }
 
 .row-grid {
-  scrollbar-gutter: auto;
+  scrollbar-gutter: stable both-edges;
   cursor: grab;
   touch-action: pan-x;
 }
@@ -713,9 +713,13 @@
   justify-content: space-between;
   background: rgba(255, 255, 255, 0.06);
   color: #d4efea;
+  min-width: 0;
 }
 
 .enlarged-title {
+  flex: 1;
+  min-width: 0;
+  margin-right: 10px;
   font-size: 13px;
   font-weight: 600;
   overflow: hidden;
@@ -724,6 +728,7 @@
 }
 
 .enlarged-close {
+  flex: 0 0 auto;
   width: 28px;
   height: 28px;
   border-radius: 6px;
@@ -738,6 +743,32 @@
 
 .enlarged-close:hover {
   background: rgba(255, 255, 255, 0.16);
+}
+
+.enlarged-reel-header {
+  height: 42px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(255, 255, 255, 0.92);
+  color: #004d40;
+  border-bottom: 1px solid rgba(0, 137, 123, 0.2);
+  min-width: 0;
+}
+
+.enlarged-reel-header .enlarged-title {
+  color: #004d40;
+}
+
+.enlarged-reel-header .enlarged-close {
+  border: 1px solid rgba(0, 77, 64, 0.35);
+  background: rgba(0, 77, 64, 0.1);
+  color: #004d40;
+}
+
+.enlarged-reel-header .enlarged-close:hover {
+  background: rgba(0, 77, 64, 0.2);
 }
 
 .enlarged-card-stage {
@@ -843,8 +874,10 @@
 
 .recording-meta {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
 }
 
 .meta-item {
@@ -1022,7 +1055,7 @@
   }
 
   .recording-meta {
-    gap: 4px;
+    gap: 3px 8px;
   }
 
   .meta-item {

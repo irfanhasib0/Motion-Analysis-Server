@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clock, Activity, BarChart3, ChevronLeft, ChevronRight, Image } from 'lucide-react';
+import { Clock, Activity, BarChart3, Volume2, ChevronLeft, ChevronRight, Image } from 'lucide-react';
 
 export const TimeFrameBadge = ({ timeText, frame }) => (
   <span className="reel-time-frame-badge">
@@ -33,7 +33,7 @@ export const FrameStepButtons = ({ disabled, onStepBack, onStepForward }) => (
   </div>
 );
 
-export const RecordingMetaInfo = ({ durationText, velValue, diffValue }) => (
+export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessValue }) => (
   <div className="recording-meta">
     <div className="meta-item">
       <Clock size={12} />
@@ -46,6 +46,10 @@ export const RecordingMetaInfo = ({ durationText, velValue, diffValue }) => (
     <div className="meta-item">
       <BarChart3 size={12} />
       <span>{diffValue ?? 'N/A'}</span>
+    </div>
+    <div className="meta-item">
+      <Volume2 size={12} />
+      <span>{typeof loudnessValue === 'number' ? loudnessValue.toFixed(2) : 'N/A'}</span>
     </div>
   </div>
 );
@@ -134,6 +138,7 @@ export const getRecordingPlaybackViewData = (recording, playbackStatsInput) => {
   const durationValue = metadata.duration ?? recording?.duration;
   const velValue = metadata.vel;
   const diffValue = metadata.diff;
+  const loudnessValue = metadata.loudness ?? null;
 
   const playbackStats = playbackStatsInput || { currentTime: 0, duration: 0 };
   const playbackDuration = playbackStats.duration > 0
@@ -152,6 +157,7 @@ export const getRecordingPlaybackViewData = (recording, playbackStatsInput) => {
     durationValue,
     velValue,
     diffValue,
+    loudnessValue,
     playbackStats,
     playbackDuration,
     playbackProgress,

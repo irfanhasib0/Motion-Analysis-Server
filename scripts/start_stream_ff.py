@@ -6,8 +6,8 @@ from improc import optical_flow
 
 W, H, FPS = 640, 480, 30
 RTSP_URL = "rtsp://0.0.0.0:8554/camera1"
-
-cap = cv2.VideoCapture("/dev/video0")
+RTSP_URL = "rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif"
+cap = cv2.VideoCapture(RTSP_URL)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
 cap.set(cv2.CAP_PROP_FPS, FPS)

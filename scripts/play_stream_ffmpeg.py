@@ -2,7 +2,8 @@ import subprocess as sp
 import numpy as np
 import cv2
 
-source = 'rtsp://admin:L2CD8412@192.168.1.30:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif'
+#source = 'rtsp://admin:L2CD8412@192.168.1.30:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif'
+source = 'rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif'
 # First, probe your stream size once (or set known width/height)
 W, H = 1920, 1080
 

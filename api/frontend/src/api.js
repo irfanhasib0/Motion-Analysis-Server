@@ -116,6 +116,7 @@ export const api = {
   },
   getRecordingStorageInfo: () => apiClient.get('/recordings/storage'),
   deleteRecording: (recordingId) => apiClient.delete(`/recordings/${recordingId}`),
+  updateRecordingMeta: (recordingId, data) => apiClient.patch(`/recordings/${recordingId}/meta`, data),
   downloadRecording: (recordingId) => {
     return buildUrlWithToken(`/api/recordings/${recordingId}/download`);
   },
@@ -131,7 +132,7 @@ export const api = {
       ? buildUrlWithToken(`/api/cameras/${cameraId}/hls/index.m3u8`)
       : appendQueryParams(buildUrlWithToken(`/api/cameras/${cameraId}/stream`), { mode: 'mjpeg' });
   },
-  getCameraAudioStreamUrl: (cameraId, fmt = 'mp3', nonce = null) => {
+  getCameraAudioStreamUrl: (cameraId, fmt = 'wav', nonce = null) => {
     const base = buildUrlWithToken(`/api/cameras/${cameraId}/audio_stream?fmt=${encodeURIComponent(fmt)}`);
     return nonce ? appendQueryParams(base, { nonce }) : base;
   },
@@ -163,6 +164,14 @@ export const api = {
   
   // System endpoints
   getSystemInfo: () => apiClient.get('/system/info'),
+  getSystemSettings: () => apiClient.get('/system/settings'),
+  updateSystemSettings: (settings) => apiClient.put('/system/settings', settings),
+
+  // Archive endpoints
+  exportArchive: (filters = {}) => apiClient.post('/recordings/archive/export', filters),
+  listArchives: () => apiClient.get('/recordings/archive/list'),
+  loadArchive: (archivePath) => apiClient.post('/recordings/archive/load', { archive_path: archivePath }),
+  unloadArchive: (archivePath) => apiClient.post('/recordings/archive/unload', { archive_path: archivePath }),
 };
 
 export default api;

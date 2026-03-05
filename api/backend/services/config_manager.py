@@ -4,8 +4,24 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 
+_SYSTEM_DEFAULTS: Dict[str, Any] = {
+    'live_stream_mode': 'mjpeg',
+    'uvicorn_reload': True,
+    'low_power_mode': False,
+    'sensitivity': 4,
+    'jpeg_quality': 70,
+    'pipe_buffer_size': 100000000,
+    'max_vel': 0.1,
+    'bg_diff': 50,
+    'max_clip_length': 60,
+    'motion_check_interval': 10,
+    'min_free_storage_bytes': 1073741824,
+    'rtsp_unified_demux_enabled': False,
+}
+
+
 class ConfigManager:
-    """YAML-based dynamic text database for cameras and recordings.
+    """YAML-based dynamic text database for cameras, recordings, and system settings.
 
     Mirrors the public API of DatabaseService using YAML files stored under configs/.
     """
@@ -16,12 +32,15 @@ class ConfigManager:
 
         self.cameras_path = os.path.join(configs_dir, "cameras.yaml")
         self.recordings_path = os.path.join(configs_dir, "recordings.yaml")
+        self.system_path = os.path.join(configs_dir, "system.yaml")
 
         # Ensure files exist with base structure
         if not os.path.exists(self.cameras_path):
             self._write_yaml(self.cameras_path, {"cameras": []})
         if not os.path.exists(self.recordings_path):
             self._write_yaml(self.recordings_path, {"recordings": []})
+        if not os.path.exists(self.system_path):
+            self._write_yaml(self.system_path, {"system": dict(_SYSTEM_DEFAULTS)})
         
         # Load into memory
         self.cameras: List[Dict[str, Any]] = self._read_yaml(self.cameras_path).get("cameras", [])
@@ -45,6 +64,22 @@ class ConfigManager:
 
     def _save_recordings(self) -> None:
         self._write_yaml(self.recordings_path, {"recordings": self.recordings})
+
+    # System settings operations
+    def get_system_settings(self) -> Dict[str, Any]:
+        """Return system settings, merging defaults with what is stored on disk."""
+        result = dict(_SYSTEM_DEFAULTS)
+        if os.path.exists(self.system_path):
+            stored = self._read_yaml(self.system_path).get("system", {}) or {}
+            result.update(stored)
+        return result
+
+    def save_system_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge *updates* into the stored system settings and persist to disk."""
+        current = self.get_system_settings()
+        current.update({k: v for k, v in updates.items() if k in _SYSTEM_DEFAULTS})
+        self._write_yaml(self.system_path, {"system": current})
+        return current
 
     def _ensure_camera_defaults(self, cam: Dict[str, Any]) -> Dict[str, Any]:
         cam.setdefault("camera_type", "webcam")

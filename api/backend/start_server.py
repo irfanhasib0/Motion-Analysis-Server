@@ -40,7 +40,21 @@ AUTH_ENABLED = os.getenv("AUTH_ENABLED", "0").lower() in {"1", "true", "yes", "o
 AUTH_PASSWORD = os.getenv("API_PASSWORD", "admin123")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "86400"))
 AUTH_SECRET = os.getenv("AUTH_SECRET", secrets.token_hex(32))
-LIVE_STREAM_MODE = os.getenv("LIVE_STREAM_MODE", "hls") # Options: "mjpeg" or "hls"
+
+# Load LIVE_STREAM_MODE: env var takes priority, then system.yaml, then default
+_sys_boot = camera_service.db.get_system_settings()
+_live_stream_env = os.getenv("LIVE_STREAM_MODE")
+LIVE_STREAM_MODE = (_live_stream_env if _live_stream_env in {"mjpeg", "hls"}
+                    else str(_sys_boot.get('live_stream_mode', 'mjpeg')))
+if LIVE_STREAM_MODE not in {"mjpeg", "hls"}:
+    LIVE_STREAM_MODE = "mjpeg"
+
+# Load UVICORN_RELOAD: env var takes priority, then system.yaml, then default
+_uvicorn_env = os.getenv("UVICORN_RELOAD")
+if _uvicorn_env is not None:
+    UVICORN_RELOAD = _uvicorn_env.lower() in {"1", "true", "yes", "on"}
+else:
+    UVICORN_RELOAD = bool(_sys_boot.get('uvicorn_reload', True))
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -73,6 +87,41 @@ class LiveStreamModeRequest(BaseModel):
 
 class CameraSensitivityRequest(BaseModel):
     sensitivity: int
+
+
+class SystemSettingsUpdateRequest(BaseModel):
+    live_stream_mode: Optional[str] = None
+    low_power_mode: Optional[bool] = None
+    sensitivity: Optional[int] = None
+    jpeg_quality: Optional[int] = None
+    pipe_buffer_size: Optional[int] = None
+    max_vel: Optional[float] = None
+    bg_diff: Optional[int] = None
+    max_clip_length: Optional[int] = None
+    motion_check_interval: Optional[int] = None
+    min_free_storage_bytes: Optional[int] = None
+    rtsp_unified_demux_enabled: Optional[bool] = None
+    uvicorn_reload: Optional[bool] = None
+
+
+class RecordingMetaUpdate(BaseModel):
+    label: Optional[str] = None
+    note: Optional[str] = None
+
+
+class ArchiveExportRequest(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    min_vel: Optional[float] = None
+    min_diff: Optional[float] = None
+    min_duration: Optional[float] = None
+    delete_after: bool = False
+    exclude_mode: bool = True
+    label_filter: Optional[List[str]] = None
+
+
+class ArchivePathRequest(BaseModel):
+    archive_path: str
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
@@ -313,7 +362,7 @@ async def start_camera(camera_id: str):
 async def stop_camera(camera_id: str):
     """Stop/Disconnect from a camera"""
     try:
-        camera_service.stop_camera(camera_id)
+        camera_service.close_camera_stream(camera_id)
         await broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
         return {"message": "Camera stopped successfully"}
     except Exception as e:
@@ -370,10 +419,84 @@ async def get_recordings(camera_id: Optional[str] = None):
 async def get_system_info():
     """Get overall system and start_server process metrics for dashboard."""
     try:
-        return dashboard_service.get_system_info()
+        info = dashboard_service.get_system_info()
+        info['settings'] = {
+            'live_stream_mode': LIVE_STREAM_MODE if LIVE_STREAM_MODE in {"mjpeg", "hls"} else "mjpeg",
+            **camera_service.get_runtime_settings(),
+        }
+        return info
     except Exception as e:
         logger.error(f"Failed to get system info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/system/settings")
+async def get_system_settings():
+    normalized_mode = LIVE_STREAM_MODE if LIVE_STREAM_MODE in {"mjpeg", "hls"} else "mjpeg"
+    runtime_settings = camera_service.get_runtime_settings()
+    return {
+        'live_stream_mode': normalized_mode,
+        'uvicorn_reload': bool(UVICORN_RELOAD),
+        **runtime_settings,
+        'supported_live_stream_modes': ['mjpeg', 'hls'],
+        'sensitivity_range': {'min': 0, 'max': int(getattr(camera_service, 'sensitivity_level', 5) or 5)},
+        'jpeg_quality_range': {'min': 25, 'max': 95},
+        'pipe_buffer_size_range': {'min': 65536, 'max': 268435456},
+        'max_vel_range': {'min': 0.0, 'max': 5.0},
+        'bg_diff_range': {'min': 1, 'max': 5000},
+        'max_clip_length_range': {'min': 5, 'max': 600},
+        'motion_check_interval_range': {'min': 1, 'max': 120},
+    }
+
+
+@app.put("/api/system/settings")
+async def update_system_settings(payload: SystemSettingsUpdateRequest):
+    global LIVE_STREAM_MODE, UVICORN_RELOAD
+    restart_required = False
+
+    if payload.live_stream_mode is not None:
+        requested_mode = str(payload.live_stream_mode or '').strip().lower()
+        if requested_mode not in {"mjpeg", "hls"}:
+            raise HTTPException(status_code=400, detail="Invalid live_stream_mode. Supported: mjpeg, hls")
+        LIVE_STREAM_MODE = requested_mode
+
+    runtime_settings = camera_service.update_runtime_settings(
+        low_power_mode=payload.low_power_mode,
+        sensitivity=payload.sensitivity,
+        jpeg_quality=payload.jpeg_quality,
+        pipe_buffer_size=payload.pipe_buffer_size,
+        max_vel=payload.max_vel,
+        bg_diff=payload.bg_diff,
+        max_clip_length=payload.max_clip_length,
+        motion_check_interval=payload.motion_check_interval,
+        min_free_storage_bytes=payload.min_free_storage_bytes,
+        rtsp_unified_demux_enabled=payload.rtsp_unified_demux_enabled,
+    )
+
+    if payload.uvicorn_reload is not None:
+        next_reload = bool(payload.uvicorn_reload)
+        if next_reload != bool(UVICORN_RELOAD):
+            restart_required = True
+        UVICORN_RELOAD = next_reload
+        os.environ["UVICORN_RELOAD"] = "1" if UVICORN_RELOAD else "0"
+
+    # Persist live_stream_mode and uvicorn_reload to system.yaml
+    try:
+        camera_service.db.save_system_settings({
+            'live_stream_mode': LIVE_STREAM_MODE,
+            'uvicorn_reload': bool(UVICORN_RELOAD),
+        })
+    except Exception:
+        pass
+
+    return {
+        'message': 'System settings updated',
+        'live_stream_mode': LIVE_STREAM_MODE,
+        'uvicorn_reload': bool(UVICORN_RELOAD),
+        'restart_required': restart_required,
+        **runtime_settings,
+        'supported_live_stream_modes': ['mjpeg', 'hls'],
+    }
 
 @app.get("/api/system/live-stream-mode")
 async def get_live_stream_mode():
@@ -421,6 +544,99 @@ async def delete_recording(recording_id: str):
     except Exception as e:
         logger.error(f"Failed to delete recording: {e}")
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.patch("/api/recordings/{recording_id}/meta")
+async def update_recording_meta(recording_id: str, request: RecordingMetaUpdate):
+    """Update alert label and/or note on a recording."""
+    try:
+        db_recording = camera_service.db.get_recording(recording_id)
+        if not db_recording:
+            raise HTTPException(status_code=404, detail=f"Recording not found: {recording_id}")
+        meta = db_recording.get('metadata') or {}
+        if isinstance(meta, str):
+            try:
+                import json as _json
+                meta = _json.loads(meta)
+            except Exception:
+                meta = {}
+        if request.label is not None:
+            if request.label == '':
+                meta.pop('label', None)
+            else:
+                meta['label'] = request.label
+        if request.note is not None:
+            meta['note'] = request.note
+        camera_service.db.update_recording(recording_id, {'metadata': meta})
+        return {"success": True, "recording_id": recording_id, "metadata": meta}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update recording meta: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Archive endpoints
+@app.post("/api/recordings/archive/export")
+async def export_archive(request: ArchiveExportRequest):
+    """Export filtered completed recordings to a timestamped archive folder with recordings.yaml."""
+    try:
+        result = camera_service.recording_manager.export_archive(
+            date_from=request.date_from,
+            date_to=request.date_to,
+            min_vel=request.min_vel,
+            min_diff=request.min_diff,
+            min_duration=request.min_duration,
+            delete_after=request.delete_after,
+            exclude_mode=request.exclude_mode,
+            label_filter=request.label_filter,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Failed to export archive: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/recordings/archive/list")
+async def list_archives():
+    """List archive folders inside the fixed archive directory that contain a recordings.yaml."""
+    try:
+        archives = camera_service.recording_manager.list_archives()
+        return {"archives": archives}
+    except Exception as e:
+        logger.error(f"Failed to list archives: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/recordings/archive/load")
+async def load_archive(request: ArchivePathRequest):
+    """Load recordings from an archive directory into the database."""
+    try:
+        loaded_ids = camera_service.recording_manager.load_archive(request.archive_path)
+        recordings = camera_service.get_recordings()
+        loaded_recordings = [r for r in recordings if r.id in loaded_ids]
+        return {
+            "loaded_count": len(loaded_ids),
+            "recordings": [r.dict() for r in loaded_recordings],
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to load archive: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/recordings/archive/unload")
+async def unload_archive(request: ArchivePathRequest):
+    """Remove archive recordings from the database (files are NOT deleted)."""
+    try:
+        count = camera_service.recording_manager.unload_archive(request.archive_path)
+        return {"unloaded_count": count}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to unload archive: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Video streaming endpoints
 @app.get("/api/cameras/{camera_id}/stream")
@@ -553,24 +769,19 @@ async def get_processing_stream(camera_id: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 @app.get("/api/cameras/{camera_id}/audio_stream")
-async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optional[str] = 'mp3'):
+async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optional[str] = 'wav'):
     """Get separate live audio stream for a camera (for use alongside MJPEG)."""
     try:
-        output_format = (fmt or 'mp3').strip().lower()
-        if output_format == 'wav':
-            media_type = 'audio/wav'
-        elif output_format == 'aac':
-            media_type = 'audio/aac'
-        elif output_format == 'opus':
-            media_type = 'audio/ogg'
-        else:
-            media_type = 'audio/mpeg'
+        if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
+            raise HTTPException(status_code=409, detail="Separate audio stream is disabled in HLS mode (audio is muxed into HLS)")
 
-        started = camera_service.start_audio(camera_id, output_format=output_format)
+        media_type = 'audio/wav'
+
+        started = await asyncio.to_thread(camera_service.start_audio, camera_id)
         if not started:
             raise HTTPException(status_code=400, detail=f"Audio stream failed to start for camera: {camera_id}")
 
-        iterator = camera_service.generate_live_audio_stream(camera_id, output_format=output_format)
+        iterator = camera_service.generate_live_audio_stream(camera_id)
         stream_end = object()
 
         def next_audio_chunk():
@@ -610,17 +821,22 @@ async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optiona
                 "X-Accel-Buffering": "no",
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get camera audio stream: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/cameras/{camera_id}/audio_stream/start")
 async def start_camera_audio_stream(camera_id: str, fmt: Optional[str] = 'wav'):
     """Start/prewarm live audio stream process for a camera."""
     try:
+        if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
+            raise HTTPException(status_code=409, detail="Separate audio stream is disabled in HLS mode (audio is muxed into HLS)")
+
         output_format = (fmt or 'wav').strip().lower()
-        started = camera_service.start_audio(camera_id, output_format=output_format)
+        started = await asyncio.to_thread(camera_service.start_audio, camera_id)
         if not started:
             raise HTTPException(status_code=400, detail="Failed to start camera audio stream")
         return {"started": True, "camera_id": camera_id, "format": output_format}
@@ -634,6 +850,9 @@ async def start_camera_audio_stream(camera_id: str, fmt: Optional[str] = 'wav'):
 async def stop_camera_audio_stream(camera_id: str):
     """Stop active live audio stream process for a camera."""
     try:
+        if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
+            return {"stopped": True, "camera_id": camera_id, "message": "No separate audio stream in HLS mode"}
+
         stopped = camera_service.stop_live_audio_stream(camera_id)
         return {"stopped": bool(stopped), "camera_id": camera_id}
     except Exception as e:
@@ -671,12 +890,12 @@ async def get_camera_sensitivity(camera_id: str):
 
         sensitivity = camera_service.get_camera_sensitivity(camera_id)
         sensitivity_level = int(getattr(camera_service, 'sensitivity_level', 5) or 5)
-        processing_stride = camera_service.get_camera_processing_stride(camera_id)
+        effective_stride = camera_service.get_camera_effective_stride(camera_id)
         return {
             "camera_id": camera_id,
             "sensitivity": sensitivity,
             "sensitivity_level": sensitivity_level,
-            "processing_stride": processing_stride,
+            "effective_stride": effective_stride,
         }
     except HTTPException:
         raise
@@ -702,12 +921,12 @@ async def set_camera_sensitivity(camera_id: str, payload: CameraSensitivityReque
             )
 
         updated = camera_service.set_camera_sensitivity(camera_id, sensitivity)
-        processing_stride = camera_service.get_camera_processing_stride(camera_id)
+        effective_stride = camera_service.get_camera_effective_stride(camera_id)
         return {
             "camera_id": camera_id,
             "sensitivity": updated,
             "sensitivity_level": sensitivity_level,
-            "processing_stride": processing_stride,
+            "effective_stride": effective_stride,
         }
     except HTTPException:
         raise
@@ -815,5 +1034,4 @@ async def serve_react_routes(path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    reload_enabled = os.getenv("UVICORN_RELOAD", "0").lower() in {"1", "true", "yes", "on"}
-    uvicorn.run("start_server:app", host="0.0.0.0", port=9001, reload=reload_enabled)
+    uvicorn.run("start_server:app", host="0.0.0.0", port=9001, reload=bool(UVICORN_RELOAD))
