@@ -777,9 +777,9 @@ async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optiona
 
         media_type = 'audio/wav'
 
-        started = await asyncio.to_thread(camera_service.start_audio, camera_id)
-        if not started:
-            raise HTTPException(status_code=400, detail=f"Audio stream failed to start for camera: {camera_id}")
+        #started = await asyncio.to_thread(camera_service.start_audio, camera_id)
+        #if not started:
+        #    raise HTTPException(status_code=400, detail=f"Audio stream failed to start for camera: {camera_id}")
 
         iterator = camera_service.generate_live_audio_stream(camera_id)
         stream_end = object()
@@ -821,11 +821,9 @@ async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optiona
                 "X-Accel-Buffering": "no",
             },
         )
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Failed to get camera audio stream: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.post("/api/cameras/{camera_id}/audio_stream/start")
@@ -853,7 +851,7 @@ async def stop_camera_audio_stream(camera_id: str):
         if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
             return {"stopped": True, "camera_id": camera_id, "message": "No separate audio stream in HLS mode"}
 
-        stopped = camera_service.stop_live_audio_stream(camera_id)
+        stopped = await asyncio.to_thread(camera_service.stop_live_audio_stream, camera_id)
         return {"stopped": bool(stopped), "camera_id": camera_id}
     except Exception as e:
         logger.error(f"Failed to stop camera audio stream: {e}")
