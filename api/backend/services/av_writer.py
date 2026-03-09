@@ -35,7 +35,6 @@ class AVWriterV2:
         camera_service=None,
         camera_id: str = "",
         camera_config: dict = None,
-        video_codec: str = 'mp4v',
         mux_realtime: bool = False  # False = separate files, True = real-time ffmpeg muxing
     ) -> None:
         self.path = path
@@ -69,10 +68,8 @@ class AVWriterV2:
             self._init_separate_files()
     
     def _init_realtime_muxing(self):
-        """Initialize real-time FFmpeg muxing mode."""
-        # Get audio config if available
         audio_enabled = self.camera_config.get('audio_enabled', False)
-        
+
         cmd = [
             'ffmpeg', '-y',
             '-hide_banner',
@@ -86,30 +83,25 @@ class AVWriterV2:
 
         self._audio_pipe = None
         audio_r_fd = None
-        audio_w_fd = None
         pass_fds = ()
-        preexec_fn = None
 
         if audio_enabled:
             sample_rate = int(self.camera_config.get('audio_sample_rate', 16000))
             channels = int(self.camera_config.get('audio_channels', 1))
 
+            audio_r_fd, audio_w_fd = os.pipe()
+            os.set_inheritable(audio_r_fd, True)
+
+            self._audio_pipe = os.fdopen(audio_w_fd, 'wb', buffering=0)
+
             cmd += [
+                '-thread_queue_size', '512',
                 '-f', 's16le',
                 '-ar', str(sample_rate),
                 '-ac', str(channels),
-                '-i', 'pipe:3',
+                '-i', f'pipe:{audio_r_fd}',
             ]
 
-            audio_r_fd, audio_w_fd = os.pipe()
-            self._audio_pipe = os.fdopen(audio_w_fd, 'wb', buffering=0)
-
-            def _preexec():
-                os.dup2(audio_r_fd, 3)
-                if audio_r_fd != 3:
-                    os.close(audio_r_fd)
-
-            preexec_fn = _preexec
             pass_fds = (audio_r_fd,)
 
         cmd += [
@@ -121,7 +113,11 @@ class AVWriterV2:
         ]
 
         if audio_enabled:
-            cmd += ['-c:a', 'aac', '-b:a', '128k', '-af', 'apad']
+            cmd += [
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-af', 'apad',
+            ]
 
         cmd += ['-movflags', '+faststart', self.path]
 
@@ -131,7 +127,6 @@ class AVWriterV2:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             pass_fds=pass_fds,
-            preexec_fn=preexec_fn,
         )
 
         if audio_r_fd is not None:
@@ -140,8 +135,8 @@ class AVWriterV2:
         time.sleep(0.1)
         if self._proc.poll() is not None:
             stderr_data = self._proc.stderr.read() if self._proc.stderr else b''
-            raise RuntimeError(f'FFmpeg failed to start: {stderr_data.decode()[:500]}')
-    
+            raise RuntimeError(f'FFmpeg failed to start: {stderr_data.decode(errors="replace")[:1000]}')
+        
     def _init_separate_files(self):
         """Initialize separate video/audio files mode."""
         # Initialize video writer
@@ -201,7 +196,8 @@ class AVWriterV2:
                     return False
                 self._proc.stdin.write(data)
                 return True
-            except (BrokenPipeError, OSError, ValueError):
+            except Exception as e:
+                logger.error(f"Error writing video frame to pipe: {e}")
                 return False
         else:
             # Separate files mode
@@ -218,12 +214,13 @@ class AVWriterV2:
             
         if self.mux_realtime:
             # Real-time muxing mode
-            if self._audio_pipe is None or not audio_chunk:
+            if not self.audio_recording or self._audio_pipe is None or not audio_chunk:
                 return False
             try:
                 self._audio_pipe.write(audio_chunk)
                 return True
-            except (BrokenPipeError, OSError, ValueError):
+            except Exception as e:
+                logger.error(f"Error writing audio chunk to pipe: {e}")
                 return False
         else:
             # Separate files mode
@@ -240,20 +237,20 @@ class AVWriterV2:
     
     def write_frame_with_timing(self, frame: np.ndarray, audio_chunk: bytes = None) -> bool:
         """Write frame with frame rate control and optional audio chunk."""
+        self.write_audio(audio_chunk)
         # Handle frame rate timing first - this prevents flickering
         current_time = time.time()
         if current_time < self.next_write_at:
             sleep_time = self.next_write_at - current_time
             if sleep_time > 0.001:  # Only sleep if meaningful (>1ms)
                 time.sleep(sleep_time)
-        
-        # Write video frame
-        if not self.write_video(frame):
-            return False
             
-        # Write synchronized audio chunk if provided
-        if not self.mux_realtime and self.audio_recording and audio_chunk:
-            self.write_audio(audio_chunk)
+        # Write video frame
+        self.write_video(frame)
+        
+        ## Write synchronized audio chunk if provided
+        #if self.audio_recording and audio_chunk:
+        #    self.write_audio(audio_chunk)
         
         # Update next frame time
         self.next_write_at = max(time.time(), self.next_write_at + self.target_interval)
@@ -664,16 +661,12 @@ class AVWriterV3:
         
         return True
     
-    def write_frame_with_timing(self, frame: np.ndarray) -> bool:
+    def write_frame_with_timing(self, frame: np.ndarray, audio_chunk: bytes = None) -> bool:
         """Write frame with frame rate control and audio chunk collection."""
         if not self.write_video(frame):
             return False
             
-        # Collect and write audio chunk from camera service
-        if self.audio_recording and hasattr(self.camera_service, '_latest_audio_chunk'):
-            latest_audio_chunk = self.camera_service._latest_audio_chunk.get(self.camera_id)
-            if latest_audio_chunk and len(latest_audio_chunk) > 0:
-                self.write_audio(latest_audio_chunk)
+        self.write_audio(audio_chunk)
         
         # Handle frame rate timing
         self.next_write_at += self.target_interval

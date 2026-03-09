@@ -370,8 +370,9 @@ class StreamingService:
             get_recordings_dir=lambda: getattr(self, 'recordings_dir', os.path.abspath('./recordings')),
             get_camera_config=lambda camera_id: self.db.get_camera(camera_id) if hasattr(self, 'db') else None,
             ensure_background_stream=self.start_av_stream,
-            get_latest_frame=self._get_latest_frame_for_hls,
-            get_latest_audio_chunk=self.get_latest_audio_chunk,  # Enable shared audio chunks for HLS
+            get_latest_video_frame=self.get_latest_video_frame,  # Unified video frame access
+            get_latest_audio_chunk=self.get_latest_audio_chunk,  # Unified audio chunk access 
+            get_latest_results=self.get_latest_results,  # Unified results access
         )
         self._hls_pipe_threads: Dict[str, threading.Thread] = {}
         self._hls_pipe_stop_events: Dict[str, threading.Event] = {}
@@ -398,6 +399,64 @@ class StreamingService:
         self._video_stop_events: Dict[str, threading.Event] = {}
         self._latest_video_frame: Dict[str, bytes] = {}
         self._video_thread_locks: Dict[str, threading.Lock] = {}
+
+        self.max_sequence_number = 2**32 -1  # Prevent unbounded growth of sequence numbers
+
+    def _sequence_has_new_data(self, current_seq, last_seq, max_val=2**32):
+        """Check if current sequence indicates new data, handling wrap-around"""
+        if last_seq == -1:  # Initial state
+            return current_seq != -1
+        
+        # Handle wrap-around by computing signed difference
+        diff = (current_seq - last_seq) % max_val
+        if diff > max_val // 2:  # Wrapped backwards (shouldn't happen normally)
+            diff -= max_val
+        
+        return diff > 0
+
+    def get_latest_video_frame(self, camera_id: str, last_frame_seq: int):
+        """Get latest video frame if sequence indicates new data"""
+        current_frame_seq = int(self._latest_frame_seq.get(camera_id, -1))
+        
+        if self._sequence_has_new_data(current_frame_seq, last_frame_seq):
+            frame_ref = self._latest_frames.get(camera_id)
+            frame = frame_ref.copy() if frame_ref is not None else None
+            return frame, current_frame_seq
+        else:
+            return None, last_frame_seq
+
+    def get_latest_audio_chunk(self, camera_id: str, last_audio_chunk_seq: Optional[int] = None):
+        """Get latest audio chunk, optionally checking sequence for new data"""
+        if last_audio_chunk_seq is None:
+            # Simple case: just return the latest chunk
+            audio_lock = self._audio_thread_locks.get(camera_id)
+            if audio_lock:
+                with audio_lock:
+                    return self._latest_audio_chunk.get(camera_id)
+            return self._latest_audio_chunk.get(camera_id)
+        
+        # Sequence-based case: check for new data
+        current_audio_chunk_seq = self._latest_audio_chunk_seq.get(camera_id, -1)
+        
+        if self._sequence_has_new_data(current_audio_chunk_seq, last_audio_chunk_seq):
+            audio_chunk_ref = self._latest_audio_chunk.get(camera_id)
+            if audio_chunk_ref and len(audio_chunk_ref) > 0:
+                return audio_chunk_ref, current_audio_chunk_seq
+        
+        return None, last_audio_chunk_seq
+
+    def get_latest_results(self, camera_id: str):
+        """Get latest video and audio processing results"""
+        res_ref = self._latest_res_video.get(camera_id)
+        audio_res_ref = self._latest_res_audio.get(camera_id)
+        
+        res = res_ref.copy() if isinstance(res_ref, dict) else {'vel': 0.0, 'bg_diff': 0}
+        audio_res = audio_res_ref.copy() if isinstance(audio_res_ref, dict) else {}
+        
+        return {
+            'video': res,
+            'audio': audio_res
+        }
 
     def set_camera_sensitivity(self, camera_id: str, sensitivity: int) -> int:
         safe_sensitivity = max(0, min(int(self.sensitivity_level), int(sensitivity)))
@@ -440,13 +499,7 @@ class StreamingService:
         """Get latest audio analysis from background thread."""
         return self._latest_audio_chunk_analysis.get(camera_id)
 
-    def get_latest_audio_chunk(self, camera_id: str) -> Optional[bytes]:
-        """Get the latest audio chunk from background thread for HLS distribution."""
-        audio_lock = self._audio_thread_locks.get(camera_id)
-        if audio_lock:
-            with audio_lock:
-                return self._latest_audio_chunk.get(camera_id)
-        return self._latest_audio_chunk.get(camera_id)
+
 
     def start_av_stream(self, camera_id: str):
         """Start background video and audio streams directly (checks audio_enabled setting)."""
@@ -468,18 +521,7 @@ class StreamingService:
         except Exception as error:
             logger.warning(f"Failed to start AV streams for {camera_id}: {error}")
 
-    def _get_latest_frame_for_hls(self, camera_id: str) -> Optional[np.ndarray]:
-        lock = self.stream_locks.get(camera_id)
-        if lock is not None:
-            with lock:
-                frame = self._latest_hls_frames.get(camera_id)
-                if frame is None:
-                    frame = self._latest_frames.get(camera_id)
-                return frame.copy() if frame is not None else None
-        frame = self._latest_hls_frames.get(camera_id)
-        if frame is None:
-            frame = self._latest_frames.get(camera_id)
-        return frame.copy() if frame is not None else None
+
 
     def start_hls_stream(self, camera_id: str) -> str:
         return self._hls_manager.start_stream(camera_id)
@@ -706,7 +748,7 @@ class StreamingService:
                 samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
                 samples /= 32768.0
                 
-                self._audio_chunk_index[camera_id] = self._audio_chunk_index.get(camera_id, 0) + 1
+                self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
                 audio_chunk_index = self._audio_chunk_index[camera_id]
                 effective_stride = self.get_camera_effective_stride(camera_id)
                 
@@ -804,7 +846,7 @@ class StreamingService:
         logger.info(f"Audio Stream:: Starting audio stream endpoint for camera {camera_id} with token {stream_token}")
         
         audio_lock = self._audio_thread_locks.get(camera_id)
-        last_chunk = None
+        last_audio_chunk_seq = -1
         consecutive_empty = 0
         max_empty = 50  # About 5 seconds at 100ms chunks
         
@@ -813,13 +855,19 @@ class StreamingService:
                camera_id in self._audio_background_threads):
             
             current_chunk = None
+            current_audio_chunk_seq = -1
+            
             if audio_lock:
                 with audio_lock:
-                    current_chunk = self._latest_audio_chunk.get(camera_id)
+                    current_audio_chunk_seq = self._latest_audio_chunk_seq.get(camera_id, -1)
+                    # Only get chunk if sequence indicates new data
+                    if self._sequence_has_new_data(current_audio_chunk_seq, last_audio_chunk_seq):
+                        current_chunk = self._latest_audio_chunk.get(camera_id)
+                        if current_chunk and len(current_chunk) > 0:
+                            last_audio_chunk_seq = current_audio_chunk_seq
             
-            if current_chunk and current_chunk != last_chunk:
+            if current_chunk and len(current_chunk) > 0:
                 yield current_chunk
-                last_chunk = current_chunk
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
@@ -893,7 +941,7 @@ class StreamingService:
                     
                     # Store original frame for recording consumers
                     self._latest_frames[camera_id] = frame
-                    self._latest_frame_seq[camera_id] = self._latest_frame_seq.get(camera_id, 0) + 1
+                    self._latest_frame_seq[camera_id] = (self._latest_frame_seq.get(camera_id, 0) + 1) % self.max_sequence_number
                     self._stream_frame_index[camera_id] = frame_index
                     frame_index += 1
                 
@@ -935,6 +983,10 @@ class StreamingService:
                 frame_bytes = self.frame_to_bytes(stream_frame)
                 with video_lock:
                     self._latest_video_frame[camera_id] = frame_bytes
+                    
+                # Periodic debug logging
+                if frame_index % 30 == 0:  # Log every 30 frames (about once per second at 30 FPS)
+                    logger.debug(f"Video Thread:: {camera_id} processed frame {frame_index}, bytes length: {len(frame_bytes)}")
                 
                 # Small delay to control frame rate
                 #time.sleep(1.0 / 30)  # Max 30 FPS processing
@@ -987,14 +1039,18 @@ class StreamingService:
         
         # Background thread should already be running from /start endpoint
         if camera_id not in self._video_background_threads:
-            logger.warning(f"Video Thread:: No background thread found for camera {camera_id} - user must start camera first")
-            yield self.generate_failure_frame("Camera not started - click start button first")
-            return
+            logger.warning(f"Video Thread:: No background thread found for camera {camera_id} - starting one...")
+            success = self.start_video_stream(camera_id)
+            if not success:
+                logger.error(f"Video Stream:: Failed to start background thread for camera {camera_id}")
+                yield self.generate_failure_frame("Failed to start video processing")
+                return
         
         logger.info(f"Video Stream:: Starting video stream endpoint for camera {camera_id} with token {stream_token}")
         
         video_lock = self._video_thread_locks.get(camera_id)
-        last_frame = None
+        last_frame_seq = -1
+        last_yielded_frame = None
         consecutive_empty = 0
         max_empty = 100  # About 3 seconds at 30 FPS
         
@@ -1002,25 +1058,35 @@ class StreamingService:
         while (self.active_streams.get(camera_id) == stream_token and 
                camera_id in self._video_background_threads):
             
-            current_frame = None
+            current_frame_bytes = None
+            current_frame_seq = -1
+            
             if video_lock:
                 with video_lock:
-                    current_frame = self._latest_video_frame.get(camera_id)
+                    current_frame_seq = int(self._latest_frame_seq.get(camera_id, -1))
+                    # Get latest frame regardless of sequence (for smooth streaming)
+                    current_frame_bytes = self._latest_video_frame.get(camera_id)
+                    # Update sequence tracking for new data detection
+                    if self._sequence_has_new_data(current_frame_seq, last_frame_seq) and current_frame_bytes is not None:
+                        last_frame_seq = current_frame_seq
             
-            if current_frame and current_frame != last_frame:
-                yield current_frame
-                last_frame = current_frame
+            if current_frame_bytes is not None:
+                yield current_frame_bytes
+                last_yielded_frame = current_frame_bytes
                 consecutive_empty = 0
-            elif current_frame:
-                # Re-yield same frame to maintain steady stream (prevents flickering)
-                yield current_frame
+                # Periodic debug logging for successful frames
+                if last_frame_seq % 30 == 0:
+                    logger.debug(f"Video Stream:: {camera_id} yielded frame seq {last_frame_seq}, bytes length: {len(current_frame_bytes)}")
+            elif last_yielded_frame is not None:
+                # Re-yield last frame to maintain stream continuity (prevents flickering)
+                yield last_yielded_frame
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
                 if consecutive_empty >= max_empty:
-                    logger.warning(f"Video Stream:: No new video data for camera {camera_id}, ending stream")
+                    logger.warning(f"Video Stream:: No video data for camera {camera_id}, ending stream")
                     break
-                # Yield a placeholder frame to maintain stream continuity
+                # Only yield placeholder when no frame has been captured yet
                 yield self.generate_failure_frame("Waiting for frames...")
                 
             time.sleep(1.0 / 30)  # 30 FPS target

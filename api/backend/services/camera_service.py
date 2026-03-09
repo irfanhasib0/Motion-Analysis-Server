@@ -560,6 +560,7 @@ class CameraService(StreamingService):
 
         self.recording_manager = RecordingManager(
             camera_service=self,
+            streaming_service=self,
             db=self.db,
             recordings_dir=self.recordings_dir,
             audio_utils=audio_utils,

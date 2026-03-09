@@ -44,7 +44,7 @@ cameras:
   processing_type: null
   processing_params: {}
   created_at: '2026-02-23T22:57:03.300029'
-  updated_at: '2026-03-09T14:15:39.021394'
+  updated_at: '2026-03-09T22:03:49.097388'
   audio_enabled: true
   audio_source: rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   audio_input_format: rtsp

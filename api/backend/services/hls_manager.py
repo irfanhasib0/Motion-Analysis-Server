@@ -76,20 +76,26 @@ class HLSManager:
         get_recordings_dir: Callable[[], str],
         get_camera_config: Callable[[str], Optional[dict]],
         ensure_background_stream: Callable[[str], None],
-        get_latest_frame: Callable[[str], Optional[Any]],
-        get_latest_audio_chunk: Callable[[str], Optional[bytes]] = None,  # Audio chunk provider
+        get_latest_video_frame: Callable[[str, int], tuple],  # Returns (frame, sequence) or (None, last_seq)
+        get_latest_audio_chunk: Callable[[str, Optional[int]], Any] = None,  # Returns chunk or (chunk, seq)
+        get_latest_results: Callable[[str], dict] = None,  # Returns {'video': {}, 'audio': {}}
     ):
         self._get_recordings_dir = get_recordings_dir
         self._get_camera_config = get_camera_config
         self._ensure_background_stream = ensure_background_stream
-        self._get_latest_frame = get_latest_frame
+        self._get_latest_video_frame = get_latest_video_frame
         self._get_latest_audio_chunk = get_latest_audio_chunk
+        self._get_latest_results = get_latest_results
 
         self.active_streams: Dict[str, Dict[str, Any]] = {}
         self.last_errors: Dict[str, str] = {}
         self._pipe_threads: Dict[str, threading.Thread] = {}
         self._pipe_stop_events: Dict[str, threading.Event] = {}
         self._audio_pipes: Dict[str, Any] = {}  # Audio pipes for shared chunks
+        
+        # Sequence tracking for unified packet access
+        self._last_video_seq: Dict[str, int] = {}
+        self._last_audio_seq: Dict[str, int] = {}
 
     def _hls_root_dir(self) -> str:
         path = os.path.join(self._get_recordings_dir(), 'hls')
@@ -211,12 +217,15 @@ class HLSManager:
 
         def _writer():
             next_tick = time.time()
+            last_video_seq = self._last_video_seq.get(camera_id, -1)
+            last_audio_seq = self._last_audio_seq.get(camera_id, -1)
+            
             while not stop_event.is_set():
                 if process.poll() is not None or process.stdin is None:
                     break
 
-                # Write video frame
-                frame = self._get_latest_frame(camera_id)
+                # Write video frame using unified packet access
+                frame, last_video_seq = self._get_latest_video_frame(camera_id, last_video_seq)
                 if frame is None:
                     time.sleep(min(0.02, frame_interval))
                     continue
@@ -229,14 +238,20 @@ class HLSManager:
                 except Exception:
                     break
 
-                # Write audio chunk if available and enabled
+                # Write audio chunk if available and enabled using unified packet access
                 if audio_enabled and audio_pipe and self._get_latest_audio_chunk:
                     try:
-                        audio_chunk = self._get_latest_audio_chunk(camera_id)
-                        if audio_chunk and len(audio_chunk) > 0:
-                            audio_pipe.write(audio_chunk)
+                        audio_result = self._get_latest_audio_chunk(camera_id, last_audio_seq)
+                        if audio_result:
+                            if isinstance(audio_result, tuple):
+                                audio_chunk, last_audio_seq = audio_result
+                            else:
+                                audio_chunk = audio_result
+                            
+                            if audio_chunk and len(audio_chunk) > 0:
+                                audio_pipe.write(audio_chunk)
                     except Exception as e:
-                        logger.debug(f"Audio pipe write failed for {camera_id}: {e}")
+                                logger.debug(f"Audio pipe write failed for {camera_id}: {e}")
 
                 next_tick += frame_interval
                 sleep_for = next_tick - time.time()
@@ -244,6 +259,10 @@ class HLSManager:
                     time.sleep(sleep_for)
                 else:
                     next_tick = time.time()
+            
+            # Update sequence tracking before cleanup
+            self._last_video_seq[camera_id] = last_video_seq
+            self._last_audio_seq[camera_id] = last_audio_seq
 
             try:
                 if process.stdin:
@@ -467,6 +486,10 @@ class HLSManager:
 
         if cleanup:
             self._clean_hls_output_dir(state.get('output_dir', ''))
+            
+        # Clean up sequence tracking
+        self._last_video_seq.pop(camera_id, None)
+        self._last_audio_seq.pop(camera_id, None)
 
     def get_stream_status(self, camera_id: str) -> Dict[str, Any]:
         state = self.active_streams.get(camera_id)
