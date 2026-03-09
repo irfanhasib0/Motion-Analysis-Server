@@ -342,73 +342,59 @@ async def delete_camera(camera_id: str):
 
 @app.post("/api/cameras/{camera_id}/start")
 async def start_camera(camera_id: str):
-    """Start/Connect to a camera"""
-    try:
+    """Start camera with both video and audio streams (unified approach)"""
+    success = camera_service.start_camera(camera_id)
+    if success:
+        # Also start background audio/video streaming threads if camera started successfully
+        await asyncio.to_thread(camera_service.start_av_stream, camera_id)
+        #await broadcast_message({"type": "camera_started", "camera_id": camera_id})
+        return {"message": "Camera and streaming started successfully"}
+    else:
+        camera_service.close_camera_stream(camera_id)
         success = camera_service.start_camera(camera_id)
-        if success:
-            await broadcast_message({"type": "camera_started", "camera_id": camera_id})
-            return {"message": "Camera started successfully"}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to start camera - camera may be unavailable or in use")
-    except ValueError as e:
-        logger.error(f"Camera not found: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to start camera: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    if success:
+        # Also start background streaming on retry
+        await asyncio.to_thread(camera_service.start_av_stream, camera_id)
+        #await broadcast_message({"type": "camera_started", "camera_id": camera_id})
+        return {"message": "Camera and streaming started successfully on retry"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to start camera - camera may be unavailable or in use")
     
 
 @app.post("/api/cameras/{camera_id}/stop")
 async def stop_camera(camera_id: str):
-    """Stop/Disconnect from a camera"""
-    try:
-        camera_service.close_camera_stream(camera_id)
-        await broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
-        return {"message": "Camera stopped successfully"}
-    except Exception as e:
-        logger.error(f"Failed to stop camera: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+    """Stop camera and all associated streams (video, audio, HLS, recordings)"""
+    camera_service.close_camera_stream(camera_id)
+    #await broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
+    return {"message": "Camera and all streams stopped successfully"}
 
 # Recording management endpoints
 @app.post("/api/cameras/{camera_id}/start-recording")
 async def start_recording(camera_id: str, background_tasks: BackgroundTasks):
     """Start recording from a camera"""
     logger.info(f"Start recording request for camera: {camera_id}")
-    try:
-        # Check if camera exists and get its status
-        if camera_id not in camera_service.cameras:
-            logger.error(f"Camera not found: {camera_id}")
-            raise HTTPException(status_code=404, detail=f"Camera not found: {camera_id}")
-        
-        camera = camera_service.cameras[camera_id]
-        logger.info(f"Camera status: {camera.status}, name: {camera.name}")
-        
-        recording_id = camera_service.start_recording(camera_id)
-        logger.info(f"Recording started successfully: {recording_id}")
-        
-        await broadcast_message({
-            "type": "recording_started", 
-            "camera_id": camera_id,
-            "recording_id": recording_id
-        })
-        return {"message": "Recording started", "recording_id": recording_id}
-    except ValueError as e:
-        logger.error(f"Validation error starting recording: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to start recording: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    if camera_id not in camera_service.cameras:
+        raise HTTPException(status_code=404, detail=f"Camera not found: {camera_id}")
+
+    camera = camera_service.cameras[camera_id]
+    logger.info(f"Camera status: {camera.status}, name: {camera.name}")
+
+    recording_id = camera_service.start_recording(camera_id)
+    logger.info(f"Recording started successfully: {recording_id}")
+
+    #await broadcast_message({
+    #    "type": "recording_started",
+    #    "camera_id": camera_id,
+    #    "recording_id": recording_id
+    #})
+    return {"message": "Recording started", "recording_id": recording_id}
 
 @app.post("/api/cameras/{camera_id}/stop-recording")
 async def stop_recording(camera_id: str):
     """Stop recording from a camera"""
-    try:
-        camera_service.stop_recording(camera_id)
-        await broadcast_message({"type": "recording_stopped", "camera_id": camera_id})
-        return {"message": "Recording stopped"}
-    except Exception as e:
-        logger.error(f"Failed to stop recording: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+    camera_service.stop_recording(camera_id)
+    #await broadcast_message({"type": "recording_stopped", "camera_id": camera_id})
+    return {"message": "Recording stopped"}
 
 @app.get("/api/recordings", response_model=List[Recording])
 async def get_recordings(camera_id: Optional[str] = None):
@@ -642,27 +628,22 @@ async def unload_archive(request: ArchivePathRequest):
 @app.get("/api/cameras/{camera_id}/stream")
 async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
     """Get live stream entrypoint; supports MJPEG (default) and HLS descriptor mode."""
-    try:
-        selected_mode = (mode or LIVE_STREAM_MODE).strip().lower()
-        if selected_mode == "hls":
-            try:
-                camera_service.ensure_background_camera_stream(camera_id)
-            except Exception as worker_error:
-                logger.warning(f"Failed to ensure background camera stream for {camera_id}: {worker_error}")
-            camera_service.start_hls_stream(camera_id)
-            return {
-                "mode": "hls",
-                "manifest_url": f"/api/cameras/{camera_id}/hls/index.m3u8",
-            }
-
-        # MJPEG mode requested: stop any HLS process for this camera first
+    selected_mode = (mode or LIVE_STREAM_MODE).strip().lower()
+    if selected_mode == "hls":
         try:
-            camera_service.stop_hls_stream(camera_id)
-        except Exception:
-            pass
-
+            camera_service.start_av_stream(camera_id)
+        except Exception as worker_error:
+            logger.warning(f"Failed to ensure background camera stream for {camera_id}: {worker_error}")
+        camera_service.start_hls_stream(camera_id)
+        return {
+            "mode": "hls",
+            "manifest_url": f"/api/cameras/{camera_id}/hls/index.m3u8",
+        }
+    elif selected_mode == "mjpeg":
+        # MJPEG mode requested: stop any HLS process for this camera first
+        camera_service.stop_hls_stream(camera_id)
         return StreamingResponse(
-            camera_service.generate_live_video_stream(camera_id),
+            camera_service.generate_video_stream_endpoint(camera_id),
             media_type="multipart/x-mixed-replace; boundary=frame",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -671,11 +652,10 @@ async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
                 "X-Accel-Buffering": "no",
             },
         )
+    else:
+        raise HTTPException(status_code=400, detail="Invalid mode. Supported: mjpeg, hls")
 
-    except Exception as e:
-        logger.error(f"Failed to get camera stream: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
-
+    
 @app.get("/api/cameras/{camera_id}/hls/index.m3u8")
 async def get_camera_hls_manifest(camera_id: str, request: Request):
     """Serve HLS manifest for a live camera stream."""
@@ -743,119 +723,85 @@ async def get_camera_hls_segment(camera_id: str, segment_name: str):
 @app.post("/api/cameras/{camera_id}/hls/stop")
 async def stop_camera_hls_stream(camera_id: str):
     """Stop HLS process for a camera."""
-    try:
-        camera_service.stop_hls_stream(camera_id)
-        return {"message": "Camera HLS stream stopped successfully"}
-    except Exception as e:
-        logger.error(f"Failed to stop camera HLS stream: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    camera_service.stop_hls_stream(camera_id)
+    return {"message": "Camera HLS stream stopped successfully"}
 
 @app.get("/api/cameras/{camera_id}/processing_stream")
 async def get_processing_stream(camera_id: str):
     """Get processed video stream from camera"""
-    try:
-        return StreamingResponse(
-            camera_service.generate_processed_video_stream(camera_id),
-            media_type="multipart/x-mixed-replace; boundary=frame",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    except Exception as e:
-        logger.error(f"Failed to get processed camera stream: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+    return StreamingResponse(
+        camera_service.generate_processed_video_stream(camera_id),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.get("/api/cameras/{camera_id}/audio_stream")
 async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optional[str] = 'wav'):
     """Get separate live audio stream for a camera (for use alongside MJPEG)."""
-    try:
-        if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
-            raise HTTPException(status_code=409, detail="Separate audio stream is disabled in HLS mode (audio is muxed into HLS)")
+    
+    if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
+        raise HTTPException(status_code=409, detail="Separate audio stream is disabled in HLS mode (audio is muxed into HLS)")
 
-        media_type = 'audio/wav'
+    media_type = 'audio/wav'
 
-        #started = await asyncio.to_thread(camera_service.start_audio, camera_id)
-        #if not started:
-        #    raise HTTPException(status_code=400, detail=f"Audio stream failed to start for camera: {camera_id}")
+    return StreamingResponse(
+        camera_service.generate_audio_stream_endpoint(camera_id),
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
-        iterator = camera_service.generate_live_audio_stream(camera_id)
-        stream_end = object()
+@app.post("/api/cameras/{camera_id}/video_stream/start")
+async def start_camera_video_stream(camera_id: str):
+    """Start video background processing thread for a camera.
+    
+    NOTE: This endpoint is redundant - the main /cameras/{id}/start endpoint 
+    now starts both video and audio streams. Maintained for backward compatibility.
+    """
+    started = await asyncio.to_thread(camera_service.start_video_stream, camera_id)
+    if not started:
+        logger.warning(f"Video stream for camera {camera_id} is already running or failed to start")
+    return {"started": True, "camera_id": camera_id}
 
-        def next_audio_chunk():
-            try:
-                return next(iterator)
-            except StopIteration:
-                return stream_end
-
-        async def audio_stream_wrapper():
-            try:
-                while True:
-                    if await request.is_disconnected():
-                        break
-                    try:
-                        chunk = await asyncio.to_thread(next_audio_chunk)
-                        if chunk is stream_end:
-                            break
-                    except Exception as stream_error:
-                        logger.warning(f"Audio stream iteration stopped for {camera_id}: {stream_error}")
-                        break
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                try:
-                    camera_service.stop_live_audio_stream(camera_id)
-                except Exception:
-                    pass
-
-        return StreamingResponse(
-            audio_stream_wrapper(),
-            media_type=media_type,
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    except Exception as e:
-        logger.error(f"Failed to get camera audio stream: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
-
+@app.post("/api/cameras/{camera_id}/video_stream/stop")
+async def stop_camera_video_stream(camera_id: str):
+    """Stop video background processing thread for a camera."""
+    stopped = await asyncio.to_thread(camera_service.stop_video_stream, camera_id)
+    return {"stopped": stopped, "camera_id": camera_id}
 
 @app.post("/api/cameras/{camera_id}/audio_stream/start")
 async def start_camera_audio_stream(camera_id: str, fmt: Optional[str] = 'wav'):
-    """Start/prewarm live audio stream process for a camera."""
-    try:
-        if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
-            raise HTTPException(status_code=409, detail="Separate audio stream is disabled in HLS mode (audio is muxed into HLS)")
+    """Start/prewarm live audio stream process for a camera.
+    
+    NOTE: This endpoint is redundant - the main /cameras/{id}/start endpoint 
+    now starts both video and audio streams. Maintained for backward compatibility.
+    """
+    if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
+        raise HTTPException(status_code=409, detail="Separate audio stream is disabled in HLS mode (audio is muxed into HLS)")
 
-        output_format = (fmt or 'wav').strip().lower()
-        started = await asyncio.to_thread(camera_service.start_audio, camera_id)
-        if not started:
-            raise HTTPException(status_code=400, detail="Failed to start camera audio stream")
-        return {"started": True, "camera_id": camera_id, "format": output_format}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to start camera audio stream: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+    output_format = (fmt or 'wav').strip().lower()
+    started = await asyncio.to_thread(camera_service.start_audio_stream, camera_id)
+    if not started:
+        logger.warning(f"Audio stream for camera {camera_id} is already running or failed to start")
+    return {"started": True, "camera_id": camera_id, "format": output_format}
+    
 @app.post("/api/cameras/{camera_id}/audio_stream/stop")
 async def stop_camera_audio_stream(camera_id: str):
     """Stop active live audio stream process for a camera."""
-    try:
-        if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
-            return {"stopped": True, "camera_id": camera_id, "message": "No separate audio stream in HLS mode"}
+    if str(LIVE_STREAM_MODE).strip().lower() == 'hls':
+        return {"stopped": True, "camera_id": camera_id, "message": "No separate audio stream in HLS mode"}
 
-        stopped = await asyncio.to_thread(camera_service.stop_live_audio_stream, camera_id)
-        return {"stopped": bool(stopped), "camera_id": camera_id}
-    except Exception as e:
-        logger.error(f"Failed to stop camera audio stream: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    stopped = await asyncio.to_thread(camera_service.stop_audio_stream, camera_id)
+    return {"stopped": bool(stopped), "camera_id": camera_id}
 
 
 @app.get("/api/cameras/{camera_id}/audio_stream/analysis")
@@ -936,36 +882,24 @@ async def set_camera_sensitivity(camera_id: str, payload: CameraSensitivityReque
 @app.post("/api/cameras/{camera_id}/stream/close")
 async def close_camera_stream(camera_id: str):
     """Close camera stream to free resources"""
-    try:
-        camera_service.close_camera_stream(camera_id)
-        return {"message": "Camera stream closed successfully"}
-    except Exception as e:
-        logger.error(f"Failed to close camera stream: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    camera_service.close_camera_stream(camera_id)
+    return {"message": "Camera stream closed successfully"}
 
 @app.get("/api/cameras/{camera_id}/stream/blank")
 async def get_blank_stream(camera_id: str):
     """Stream a blank video"""
-    try:
-        return Response(
-            camera_service.generate_blank_image(str(camera_id)),
-            media_type="image/jpeg"
-        )
-    except Exception as e:
-        logger.error(f"Failed to get blank stream: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+    return Response(
+        camera_service.generate_blank_image(str(camera_id)),
+        media_type="image/jpeg"
+    )
     
 @app.get("/api/recordings/{recording_id}/stream")
 async def get_recording_stream(recording_id: str):
     """Stream a recorded video"""
-    try:
-        return StreamingResponse(
-            camera_service.generate_recorded_video_stream(recording_id),
-            media_type="multipart/x-mixed-replace; boundary=frame"
-        )
-    except Exception as e:
-        logger.error(f"Failed to get recording stream: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
+    return StreamingResponse(
+        camera_service.generate_recorded_video_stream(recording_id),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 @app.get("/api/recordings/{recording_id}/play")
 async def play_recording(recording_id: str):

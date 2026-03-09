@@ -127,7 +127,7 @@ export const api = {
   getCameraHlsManifestUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/hls/index.m3u8`),
   getCameraStreamModeInfo: (cameraId, mode = 'mjpeg') =>
     apiClient.get(`/cameras/${cameraId}/stream`, { params: { mode } }),
-  getCameraStreamUrl: (cameraId, mode = 'mjpeg') => {
+  getCameraVideoStreamUrl: (cameraId, mode = 'mjpeg') => {
     return mode === 'hls'
       ? buildUrlWithToken(`/api/cameras/${cameraId}/hls/index.m3u8`)
       : appendQueryParams(buildUrlWithToken(`/api/cameras/${cameraId}/stream`), { mode: 'mjpeg' });

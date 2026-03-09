@@ -245,6 +245,152 @@ const CameraList = ({ cameras, setCameras }) => {
   // -----------------------------
   // Subcomponents
   // -----------------------------
+  
+  const CameraCard = ({ camera }) => {
+    return (
+      <div className="camera-card">
+        <div className="camera-header">
+          <div className="camera-title">{camera.name}</div>
+          <div className="camera-info">
+            <span className={`status status-${camera.status}`}>{camera.status}</span>
+            <span>{camera.resolution}</span>
+            <span>{camera.fps ? `${camera.fps} FPS` : 'FPS N/A'}</span>
+            <span>{camera.camera_type}</span>
+          </div>
+        </div>
+
+        <div className="camera-video" style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+          <div className="camera-column primary-column">
+            <div className="camera-frame">
+              <CameraVideoPanel camera={camera} variant="primary" />
+            </div>
+
+            <div className="camera-controls-card">
+              {camera.status === 'offline' || camera.status === 'error' ? (
+                <button
+                  className="btn btn-success"
+                  onClick={() => handleStartCamera(camera.id)}
+                  style={COMPACT_BUTTON_STYLE}
+                >
+                  <Power size={14} />
+                  Start
+                </button>
+              ) : (
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => handleStopCamera(camera.id)}
+                  disabled={camera.status === 'recording'}
+                  style={COMPACT_BUTTON_STYLE}
+                >
+                  <PowerOff size={14} />
+                  Stop
+                </button>
+              )}
+
+              {camera.status === 'recording' ? (
+                <button
+                  className="btn btn-danger"
+                  onClick={() => handleStopRecording(camera.id)}
+                  style={COMPACT_BUTTON_STYLE}
+                >
+                  <Square size={14} />
+                  Stop Rec
+                </button>
+              ) : (
+                <button
+                  className="btn btn-success"
+                  onClick={() => handleStartRecording(camera.id)}
+                  disabled={camera.status !== 'online'}
+                  title={camera.status !== 'online' ? `Camera must be online to record (current: ${camera.status})` : 'Start recording'}
+                  style={{
+                    ...COMPACT_BUTTON_STYLE,
+                    opacity: camera.status !== 'online' ? 0.92 : 1,
+                    filter: 'none',
+                    background: camera.status !== 'online' ? '#2f5f37' : undefined,
+                    borderColor: camera.status !== 'online' ? '#3d7d48' : undefined,
+                    color: camera.status !== 'online' ? '#e8f5eb' : undefined,
+                  }}
+                >
+                  <Play size={14} />
+                  Record
+                </button>
+              )}
+
+              <button
+                className="btn btn-primary"
+                onClick={() => setEditingCamera(camera)}
+                style={COMPACT_BUTTON_STYLE}
+              >
+                <Edit size={14} />
+                Edit
+              </button>
+
+              <button
+                className="btn btn-danger"
+                onClick={() => handleDeleteCamera(camera.id)}
+                style={COMPACT_BUTTON_STYLE}
+              >
+                <Trash2 size={14} />
+                Delete
+              </button>
+
+              <label
+                title="Enable Audio (record + live)"
+                style={{
+                  ...AUDIO_TOGGLE_STYLE,
+                  background: camera.audio_enabled ? '#1e293b' : '#151a21',
+                  color: camera.audio_enabled ? '#22c55e' : '#d6deea',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={Boolean(camera.audio_enabled)}
+                  onChange={(e) => handleToggleCameraAudioEnabled(camera, e.target.checked)}
+                  style={{ display: 'none' }}
+                  aria-label="Enable audio"
+                />
+                {camera.audio_enabled ? <Mic size={14} /> : <MicOff size={14} />}
+              </label>
+
+              <CameraAudioPanel camera={camera} disabled={isLiveHlsMode} />
+            </div>
+          </div>
+
+          <div className="camera-column support-column">
+            <div className="camera-frame">
+              <CameraVideoPanel camera={camera} variant="support" />
+            </div>
+
+            <div className="view-controls-card">
+              <div className="sensitivity-group">
+                <span className="sensitivity-label">Sensitivity:</span>
+                <input
+                  type="range"
+                  min="0"
+                  max={SENSITIVITY_LEVEL}
+                  step="1"
+                  value={Number(cameraSettings[camera.id]?.sensitivity ?? DEFAULT_SENSITIVITY)}
+                  onChange={(e) => handleSensitivityChange(camera.id, e.target.value)}
+                  style={{ width: '140px' }}
+                />
+                <span className="sensitivity-option-text">
+                  {Number(cameraSettings[camera.id]?.sensitivity ?? DEFAULT_SENSITIVITY)} / {SENSITIVITY_LEVEL}
+                </span>
+              </div>
+              <button
+                className="btn btn-outline support-toggle-btn"
+                onClick={() => handleSupportToggle(camera.id)}
+                style={COMPACT_BUTTON_STYLE}
+              >
+                {(cameraSettings[camera.id]?.supportEnabled ?? true) ? 'Disable' : 'Enable'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const CameraAudioPanel = ({ camera, disabled = false }) => {
     const audioRef = useRef(null);
     const isOnline = camera.status === 'online' || camera.status === 'recording';
@@ -253,38 +399,16 @@ const CameraList = ({ cameras, setCameras }) => {
     const [activeAudioUrl, setActiveAudioUrl] = useState('');
     const [audioLoadFailed, setAudioLoadFailed] = useState(false);
 
-    // Retry state — survive re-renders via refs
-    const audioRetryTimer = useRef(null);
-    const audioRetryCount = useRef(0);
-    const MAX_AUDIO_RETRIES = 10;
-    const AUDIO_RETRY_DELAY_MS = 3500; // slightly longer than backend's 3 s reconnect cooldown
-
-    const scheduleAudioRetry = () => {
-      clearTimeout(audioRetryTimer.current);
-      if (audioRetryCount.current >= MAX_AUDIO_RETRIES) return;
-      audioRetryTimer.current = setTimeout(() => {
-        const audioEl = audioRef.current;
-        if (!audioEl) return;
-        audioRetryCount.current += 1;
-        audioEl.load();
-        audioEl.play().catch(() => {});
-      }, AUDIO_RETRY_DELAY_MS);
-    };
-
     const handleAudioSuccess = () => {
       setAudioLoadFailed(false);
-      audioRetryCount.current = 0;
-      clearTimeout(audioRetryTimer.current);
     };
 
     const handleAudioError = () => {
       setAudioLoadFailed(true);
-      scheduleAudioRetry();
     };
 
     const handleAudioStalled = () => {
-      // A dropped HTTP stream often stalls rather than firing an error event
-      scheduleAudioRetry();
+      // Optionally, treat as error or ignore
     };
 
     const currentInputFormat = String(camera.audio_input_format || 'pulse').toLowerCase();
@@ -295,8 +419,6 @@ const CameraList = ({ cameras, setCameras }) => {
     useEffect(() => {
       setActiveAudioUrl('');
       setAudioLoadFailed(false);
-      audioRetryCount.current = 0;
-      clearTimeout(audioRetryTimer.current);
     }, [camera.id]);
 
     useEffect(() => {
@@ -305,8 +427,6 @@ const CameraList = ({ cameras, setCameras }) => {
       }
       setActiveAudioUrl('');
       setAudioLoadFailed(false);
-      audioRetryCount.current = 0;
-      clearTimeout(audioRetryTimer.current);
       const audioEl = audioRef.current;
       if (!audioEl) {
         return;
@@ -318,6 +438,7 @@ const CameraList = ({ cameras, setCameras }) => {
       } catch {}
     }, [shouldRenderAudio]);
 
+    // Only attempt to play audio once on mount or when camera changes
     useEffect(() => {
       if (!shouldRenderAudio) {
         return undefined;
@@ -327,9 +448,8 @@ const CameraList = ({ cameras, setCameras }) => {
 
       const startAudio = async () => {
         try {
-          // Fire pre-warm best-effort — the GET streaming endpoint starts audio
-          // internally anyway, so a failure here must not block playback.
-          api.startCameraAudioStream(camera.id, audioPlaybackFormat).catch(() => {});
+          // No longer auto-start camera - user must click start button first
+          // await api.startCamera(camera.id);
 
           if (cancelled) {
             return;
@@ -344,7 +464,6 @@ const CameraList = ({ cameras, setCameras }) => {
             return;
           }
 
-          // Then attach URL to native player and attempt autoplay.
           audioEl.autoplay = true;
           audioEl.defaultMuted = true;
           audioEl.muted = true;
@@ -353,14 +472,7 @@ const CameraList = ({ cameras, setCameras }) => {
           try {
             await audioEl.play();
           } catch {
-            const retryPlay = () => {
-              if (cancelled) {
-                return;
-              }
-              audioEl.play().catch(() => {});
-            };
-            audioEl.addEventListener('canplay', retryPlay, { once: true });
-            audioEl.addEventListener('loadeddata', retryPlay, { once: true });
+            // Ignore autoplay errors
           }
         } catch {
           if (!cancelled) {
@@ -374,8 +486,6 @@ const CameraList = ({ cameras, setCameras }) => {
 
       return () => {
         cancelled = true;
-        clearTimeout(audioRetryTimer.current);
-        audioRetryCount.current = 0;
         const audioEl = audioRef.current;
         if (audioEl) {
           try {
@@ -384,13 +494,13 @@ const CameraList = ({ cameras, setCameras }) => {
             audioEl.load();
           } catch {}
         }
-        api.stopCameraAudioStream(camera.id).catch(() => {});
+        //api.stopCameraAudioStream(camera.id).catch(() => {});
       };
-    }, [camera.id, shouldRenderAudio, audioPlaybackFormat]);
+    }, [camera.id, shouldRenderAudio]);//camera.id, shouldRenderAudio, audioPlaybackFormat]);
 
-    if (!shouldRenderAudio) {
-      return null;
-    }
+    //if (!shouldRenderAudio) {
+    //  return null;
+    //}
 
     return (
       <div style={AUDIO_PANEL_STYLE}>
@@ -413,15 +523,23 @@ const CameraList = ({ cameras, setCameras }) => {
           onAbort={handleAudioError}
         />
         {audioLoadFailed && (
-          <div style={{ marginTop: '4px', fontSize: '12px', fontWeight: 600, color: '#fbbf24', lineHeight: 1.2 }}>
-            Audio failed — try {suggestedInput}
-          </div>
+          <button onClick={() => {
+            setAudioLoadFailed(false);
+            // Re-run the audio start logic
+            const audioEl = audioRef.current;
+            if (audioEl) {
+              audioEl.load();
+              audioEl.play().catch(() => {});
+            }
+          }} style={{ marginTop: 8 }}>
+            Retry Audio
+          </button>
         )}
       </div>
     );
   };
 
-  const CameraStreamMedia = ({ camera, variant = 'primary' }) => {
+  const CameraVideoPanel = ({ camera, variant = 'primary' }) => {
     const videoRef = useRef(null);
     const isOnline = camera.status === 'online' || camera.status === 'recording';
     const isHlsStream = isLiveHlsMode && variant === 'primary' && !hlsFailedByCamera[camera.id];
@@ -434,7 +552,7 @@ const CameraList = ({ cameras, setCameras }) => {
       let destroyed = false;
       let hlsInstance = null;
       const videoEl = videoRef.current;
-      const sourceUrl = api.getCameraStreamUrl(camera.id, 'hls');
+      const sourceUrl = api.getCameraVideoStreamUrl(camera.id, 'hls');
 
       const attachStream = async () => {
         if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
@@ -533,7 +651,7 @@ const CameraList = ({ cameras, setCameras }) => {
 
     const streamUrl = variant === 'support'
       ? api.appendQueryParams(api.getProcessingStreamUrl(camera.id), { view: 'support' })
-      : api.getCameraStreamUrl(camera.id, 'mjpeg');
+      : api.getCameraVideoStreamUrl(camera.id, 'mjpeg');
 
     return (
       <img
@@ -618,6 +736,8 @@ const CameraList = ({ cameras, setCameras }) => {
   const handleStartCamera = async (cameraId) => {
     try {
       await api.startCamera(cameraId);
+      // Give background threads time to start before UI shows streams
+      await new Promise(resolve => setTimeout(resolve, 750));
       patchCameraInState(cameraId, { status: 'online', last_seen: new Date().toISOString() });
       toast.success('Camera started');
     } catch (error) {
@@ -1039,146 +1159,7 @@ const CameraList = ({ cameras, setCameras }) => {
 
         <div className="camera-grid">
           {cameras.map((camera) => (
-            <div key={camera.id} className="camera-card">
-              <div className="camera-header">
-                <div className="camera-title">{camera.name}</div>
-                <div className="camera-info">
-                  <span className={`status status-${camera.status}`}>{camera.status}</span>
-                  <span>{camera.resolution}</span>
-                  <span>{camera.fps ? `${camera.fps} FPS` : 'FPS N/A'}</span>
-                  <span>{camera.camera_type}</span>
-                </div>
-              </div>
-
-              <div className="camera-video" style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                <div className="camera-column primary-column">
-                  <div className="camera-frame">
-                    <CameraStreamMedia camera={camera} variant="primary" />
-                  </div>
-
-                  <div className="camera-controls-card">
-                    {camera.status === 'offline' || camera.status === 'error' ? (
-                      <button
-                        className="btn btn-success"
-                        onClick={() => handleStartCamera(camera.id)}
-                        style={COMPACT_BUTTON_STYLE}
-                      >
-                        <Power size={14} />
-                        Start
-                      </button>
-                    ) : (
-                      <button
-                        className="btn btn-secondary"
-                        onClick={() => handleStopCamera(camera.id)}
-                        disabled={camera.status === 'recording'}
-                        style={COMPACT_BUTTON_STYLE}
-                      >
-                        <PowerOff size={14} />
-                        Stop
-                      </button>
-                    )}
-
-                    {camera.status === 'recording' ? (
-                      <button
-                        className="btn btn-danger"
-                        onClick={() => handleStopRecording(camera.id)}
-                        style={COMPACT_BUTTON_STYLE}
-                      >
-                        <Square size={14} />
-                        Stop Rec
-                      </button>
-                    ) : (
-                      <button
-                        className="btn btn-success"
-                        onClick={() => handleStartRecording(camera.id)}
-                        disabled={camera.status !== 'online'}
-                        title={camera.status !== 'online' ? `Camera must be online to record (current: ${camera.status})` : 'Start recording'}
-                        style={{
-                          ...COMPACT_BUTTON_STYLE,
-                          opacity: camera.status !== 'online' ? 0.92 : 1,
-                          filter: 'none',
-                          background: camera.status !== 'online' ? '#2f5f37' : undefined,
-                          borderColor: camera.status !== 'online' ? '#3d7d48' : undefined,
-                          color: camera.status !== 'online' ? '#e8f5eb' : undefined,
-                        }}
-                      >
-                        <Play size={14} />
-                        Record
-                      </button>
-                    )}
-
-                    <button
-                      className="btn btn-primary"
-                      onClick={() => setEditingCamera(camera)}
-                      style={COMPACT_BUTTON_STYLE}
-                    >
-                      <Edit size={14} />
-                      Edit
-                    </button>
-
-                    <button
-                      className="btn btn-danger"
-                      onClick={() => handleDeleteCamera(camera.id)}
-                      style={COMPACT_BUTTON_STYLE}
-                    >
-                      <Trash2 size={14} />
-                      Delete
-                    </button>
-
-                    <label
-                      title="Enable Audio (record + live)"
-                      style={{
-                        ...AUDIO_TOGGLE_STYLE,
-                        background: camera.audio_enabled ? '#1e293b' : '#151a21',
-                        color: camera.audio_enabled ? '#22c55e' : '#d6deea',
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={Boolean(camera.audio_enabled)}
-                        onChange={(e) => handleToggleCameraAudioEnabled(camera, e.target.checked)}
-                        style={{ display: 'none' }}
-                        aria-label="Enable audio"
-                      />
-                      {camera.audio_enabled ? <Mic size={14} /> : <MicOff size={14} />}
-                    </label>
-
-                    <CameraAudioPanel camera={camera} disabled={isLiveHlsMode} />
-                  </div>
-                </div>
-
-                <div className="camera-column support-column">
-                  <div className="camera-frame">
-                    <CameraStreamMedia camera={camera} variant="support" />
-                  </div>
-
-                  <div className="view-controls-card">
-                    <div className="sensitivity-group">
-                      <span className="sensitivity-label">Sensitivity:</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max={SENSITIVITY_LEVEL}
-                        step="1"
-                        value={Number(cameraSettings[camera.id]?.sensitivity ?? DEFAULT_SENSITIVITY)}
-                        onChange={(e) => handleSensitivityChange(camera.id, e.target.value)}
-                        style={{ width: '140px' }}
-                      />
-                      <span className="sensitivity-option-text">
-                        {Number(cameraSettings[camera.id]?.sensitivity ?? DEFAULT_SENSITIVITY)} / {SENSITIVITY_LEVEL}
-                      </span>
-                    </div>
-                    <button
-                      className="btn btn-outline support-toggle-btn"
-                      onClick={() => handleSupportToggle(camera.id)}
-                      style={COMPACT_BUTTON_STYLE}
-                    >
-                      {(cameraSettings[camera.id]?.supportEnabled ?? true) ? 'Disable' : 'Enable'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <CameraCard key={camera.id} camera={camera} />
           ))}
 
           {cameras.length === 0 && (

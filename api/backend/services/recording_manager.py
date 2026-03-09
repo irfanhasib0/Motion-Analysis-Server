@@ -14,6 +14,8 @@ import yaml
 
 from models.camera import CameraStatus
 from models.recording import Recording, RecordingStatus
+from services.av_writer import AVWriterV2 as AVWriter  # Flexible writer - can switch between V2Flexible and V3
+from services.audio_recording_utils import AudioRecordingUtils
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ class RecordingManager:
         camera_service,
         db,
         recordings_dir: str,
-        audio_utils,
+        audio_utils: AudioRecordingUtils,
         min_free_storage_bytes: int,
         motion_check_interval: int,
         max_clip_length: int,
@@ -36,8 +38,8 @@ class RecordingManager:
         self.camera_service = camera_service
         self.db = db
         self.recordings_dir = recordings_dir
-        self.archive_dir = archive_dir or os.path.join(os.path.dirname(recordings_dir), 'archive')
         self.audio_utils = audio_utils
+        self.archive_dir = archive_dir or os.path.join(os.path.dirname(recordings_dir), 'archive')
         self.min_free_storage_bytes = min_free_storage_bytes
         self.motion_check_interval = motion_check_interval
         self.max_clip_length = max_clip_length
@@ -87,7 +89,7 @@ class RecordingManager:
             except (ValueError, IndexError) as error:
                 logger.warning(f"Could not parse recording filename {filename}: {error}")
 
-    def init_recording(self, camera_id: str, db_camera: dict, cap) -> tuple[str, str, cv2.VideoWriter]:
+    def init_recording(self, camera_id: str, db_camera: dict, cap) -> tuple[str, str, AVWriter]:
         self._ensure_min_free_storage()
 
         timestamp = int(time.time())
@@ -109,9 +111,19 @@ class RecordingManager:
         width = cap.width
         height = cap.height
 
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
-        return recording_id, file_path, out
+        # Create flexible AV writer with separate files mode (mux_realtime=False)
+        writer = AVWriter(
+            path=file_path,
+            fps=fps,
+            width=width,
+            height=height,
+            camera_service=self.camera_service,
+            camera_id=camera_id,
+            camera_config=db_camera,
+            mux_realtime=False  # Start with separate files for testing
+        )
+        
+        return recording_id, file_path, writer
 
     def _parse_recording_time(self, db_recording: dict) -> datetime:
         for key in ('start_time', 'created_at', 'end_time'):
@@ -199,8 +211,7 @@ class RecordingManager:
         self,
         recording_id: str,
         file_path: str,
-        out: cv2.VideoWriter,
-        audio_session: Optional[dict],
+        writer: AVWriter,
         clip_motion_detected: bool,
         clip_start_time: float,
         curr_time: float,
@@ -208,28 +219,39 @@ class RecordingManager:
         bg_diff: int = 0,
         loudness: float = 0.0,
     ):
-        out.release()
-        audio_file_path = self.audio_utils.stop_audio_capture(audio_session)
-        final_file_path = file_path
-
+        # Check if audio was being recorded before releasing (compatible interface)
+        had_audio = getattr(writer, 'audio_recording', False) and getattr(writer, 'audio_file_path', None) is not None
+        
+        # Release writer - returns immediately in separate files mode
+        final_file_path = writer.release()
+        
         if not clip_motion_detected:
-            if os.path.exists(file_path):
-                os.system(f'rm -f {file_path}')
-                logger.info(f"Deleted no-motion recording: {file_path}")
+            if os.path.exists(final_file_path):
+                os.system(f'rm -f {final_file_path}')
+                logger.info(f"Deleted no-motion recording: {final_file_path}")
+                
+            # Also clean up audio file if it exists
+            audio_file_path = getattr(writer, 'audio_file_path', None)
             if audio_file_path and os.path.exists(audio_file_path):
-                os.system(f'rm -f {audio_file_path}')
+                try:
+                    os.remove(audio_file_path)
+                except Exception as e:
+                    logger.warning(f"Could not clean up audio file: {e}")
+                    
             self.db.delete_recording(recording_id)
             return
 
-        if audio_file_path:
-            final_file_path = self.audio_utils.mux_audio_into_video(file_path, audio_file_path)
-            try:
-                os.remove(audio_file_path)
-            except Exception:
-                pass
-
         clip_duration = max(0, int(curr_time - clip_start_time))
-        file_size = os.path.getsize(final_file_path) if os.path.exists(final_file_path) else 0
+        
+        # Small delay to ensure file is fully written before getting size
+        if os.path.exists(final_file_path):
+            time.sleep(0.1)  # 100ms delay
+            file_size = os.path.getsize(final_file_path)
+        else:
+            file_size = 0
+        
+        # Recording clip processed (reduced logging)
+        
         self.db.update_recording(
             recording_id,
             {
@@ -243,7 +265,7 @@ class RecordingManager:
                     'vel': float(vel),
                     'diff': int(bg_diff),
                     'loudness': float(loudness),
-                    'audio_recorded': bool(audio_file_path),
+                    'audio_recorded': had_audio,
                 },
             },
         )
@@ -261,7 +283,7 @@ class RecordingManager:
         except Exception as error:
             logger.warning(f"Failed to warm browser playback cache for {recording_id}: {error}")
 
-    def record_worker(self, file_path, recording_id, camera_id, cap, out, audio_session):
+    def record_worker(self, file_path, recording_id, camera_id, cap, writer):
         start_time = time.time()
         clip_start_time = start_time
         curr_time = start_time
@@ -271,9 +293,15 @@ class RecordingManager:
         clip_loudness = 0.0
         db_camera = self.db.get_camera(camera_id) or {}
         target_fps = max(1, int(db_camera.get('fps', 10) or 10))
-        target_interval = 1.0 / float(target_fps)
-        next_write_at = time.time()
         last_frame_seq = -1
+        last_audio_chunk_seq = -1
+        
+        # Add small delay before starting to allow system to stabilize
+        time.sleep(0.1)
+        
+        # Debug: Check if audio is enabled
+        audio_enabled = db_camera.get('audio_enabled', False)
+        logger.info(f"Recording worker started for camera {camera_id}, audio enabled: {audio_enabled}")
 
         while camera_id in self.active_recordings:
             lock = self.camera_service.stream_locks.get(camera_id)
@@ -281,27 +309,97 @@ class RecordingManager:
             frame_seq = -1
             res = {'vel': 0.0, 'bg_diff': 0}
             audio_res = {}
+            audio_chunk = None
+            current_audio_chunk_seq = -1
+            got_new_data = False
 
+            # Minimize lock hold time by checking sequences inside lock
             if lock is not None:
                 with lock:
-                    frame = getattr(self.camera_service, '_latest_frames', {}).get(camera_id)
-                    frame_seq = int(getattr(self.camera_service, '_latest_frame_seq', {}).get(camera_id, -1))
-                    latest_res = getattr(self.camera_service, '_latest_res_video', {}).get(camera_id)
-                    if isinstance(latest_res, dict):
-                        res = latest_res
-                    latest_audio_res = getattr(self.camera_service, '_latest_res_audio', {}).get(camera_id)
-                    if isinstance(latest_audio_res, dict):
-                        audio_res = latest_audio_res
+                    # Get frame sequence first to check if we need the frame
+                    current_frame_seq = int(getattr(self.camera_service, '_latest_frame_seq', {}).get(camera_id, -1))
+                    current_audio_chunk_seq = getattr(self.camera_service, '_latest_audio_chunk_seq', {}).get(camera_id, -1)
+                    
+                    # Only get references if we have new data
+                    if current_frame_seq > last_frame_seq:
+                        frame_ref = getattr(self.camera_service, '_latest_frames', {}).get(camera_id)
+                        frame_seq = current_frame_seq
+                        last_frame_seq = current_frame_seq
+                    else:
+                        frame_ref = None
+                        frame_seq = -1
+                    
+                    # Get audio chunk independently - don't tie it to video frames
+                    if current_audio_chunk_seq > last_audio_chunk_seq:
+                        audio_chunk_ref = getattr(self.camera_service, '_latest_audio_chunk', {}).get(camera_id)
+                        if audio_chunk_ref and len(audio_chunk_ref) > 0:
+                            last_audio_chunk_seq = current_audio_chunk_seq
+                        else:
+                            audio_chunk_ref = None
+                    else:
+                        audio_chunk_ref = None
+                        
+                    # Debug: Check if camera service has audio attributes
+                    if not hasattr(self.camera_service, '_latest_audio_chunk'):
+                        if not hasattr(self, '_audio_attr_warning_logged'):
+                            logger.warning(f"Camera service missing _latest_audio_chunk attribute for camera {camera_id}")
+                            self._audio_attr_warning_logged = True
+                    
+                    # Get other references quickly
+                    res_ref = getattr(self.camera_service, '_latest_res_video', {}).get(camera_id)
+                    audio_res_ref = getattr(self.camera_service, '_latest_res_audio', {}).get(camera_id)
+                    
+                # Do expensive copying operations outside the lock (only if we got new data)
+                frame = frame_ref.copy() if frame_ref is not None else None
+                res = res_ref.copy() if isinstance(res_ref, dict) else {'vel': 0.0, 'bg_diff': 0}
+                audio_res = audio_res_ref.copy() if isinstance(audio_res_ref, dict) else {}
+                
+                # Process audio chunk outside lock (only if new and matched with frame)
+                if audio_chunk_ref and len(audio_chunk_ref) > 0:
+                    audio_chunk = audio_chunk_ref  # bytes are immutable, no need to copy
             else:
-                latest_res = getattr(self.camera_service, '_latest_res_video', {}).get(camera_id)
-                if isinstance(latest_res, dict):
-                    res = latest_res
-                latest_audio_res = getattr(self.camera_service, '_latest_res_audio', {}).get(camera_id)
-                if isinstance(latest_audio_res, dict):
-                    audio_res = latest_audio_res
+                # No lock available, check sequences quickly without blocking
+                current_frame_seq = int(getattr(self.camera_service, '_latest_frame_seq', {}).get(camera_id, -1))
+                current_audio_chunk_seq = getattr(self.camera_service, '_latest_audio_chunk_seq', {}).get(camera_id, -1)
+                
+                # Only get references if we have new data
+                if current_frame_seq > last_frame_seq:
+                    frame_ref = getattr(self.camera_service, '_latest_frames', {}).get(camera_id)
+                    frame_seq = current_frame_seq
+                    last_frame_seq = current_frame_seq
+                else:
+                    frame_ref = None
+                    frame_seq = -1
+                
+                # Get audio chunk independently - don't tie it to video frames
+                if current_audio_chunk_seq > last_audio_chunk_seq:
+                    audio_chunk_ref = getattr(self.camera_service, '_latest_audio_chunk', {}).get(camera_id)
+                    if audio_chunk_ref and len(audio_chunk_ref) > 0:
+                        last_audio_chunk_seq = current_audio_chunk_seq
+                    else:
+                        audio_chunk_ref = None
+                else:
+                    audio_chunk_ref = None
+                
+                # Debug: Check if camera service has audio attributes
+                if not hasattr(self.camera_service, '_latest_audio_chunk'):
+                    if not hasattr(self, '_audio_attr_warning_logged'):
+                        logger.warning(f"Camera service missing _latest_audio_chunk attribute for camera {camera_id}")
+                        self._audio_attr_warning_logged = True
+                
+                res_ref = getattr(self.camera_service, '_latest_res_video', {}).get(camera_id)
+                audio_res_ref = getattr(self.camera_service, '_latest_res_audio', {}).get(camera_id)
+                
+                # Do copying operations (only if we got new data)
+                frame = frame_ref.copy() if frame_ref is not None else None
+                res = res_ref.copy() if isinstance(res_ref, dict) else {'vel': 0.0, 'bg_diff': 0}
+                audio_res = audio_res_ref.copy() if isinstance(audio_res_ref, dict) else {}
+                
+                # Process audio chunk (collect audio independently of video frames)
+                if audio_chunk_ref and len(audio_chunk_ref) > 0:
+                    audio_chunk = audio_chunk_ref
 
-            if frame is not None and frame_seq == last_frame_seq:
-                frame = None
+            # Frame will be None if no new frame available (sequence hasn't advanced)
 
             curr_time = time.time()
             if curr_time - start_time > self.motion_check_interval:
@@ -330,8 +428,7 @@ class RecordingManager:
                     self.process_recorded_clip(
                         recording_id,
                         file_path,
-                        out,
-                        audio_session,
+                        writer,
                         clip_motion_detected,
                         clip_start_time,
                         curr_time,
@@ -339,15 +436,10 @@ class RecordingManager:
                         bg_diff=clip_bg_diff,
                         loudness=clip_loudness,
                     )
-                    recording_id, file_path, out = self.init_recording(
+                    recording_id, file_path, writer = self.init_recording(
                         camera_id,
                         self.db.get_camera(camera_id),
                         cap,
-                    )
-                    audio_session = self.audio_utils.start_audio_capture(
-                        camera_id,
-                        recording_id,
-                        self.db.get_camera(camera_id) or {},
                     )
                     clip_start_time = curr_time
                     clip_motion_detected = False
@@ -356,28 +448,32 @@ class RecordingManager:
                     clip_loudness = 0.0
                 start_time = curr_time
 
-            if frame is None:
-                ret, frame = cap.read()
-                if not ret:
-                    time.sleep(0.05)
-                    continue
-            else:
-                last_frame_seq = frame_seq
-
-            out.write(frame)
-
-            next_write_at += target_interval
-            sleep_for = next_write_at - time.time()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            else:
-                next_write_at = time.time()
+            # Write frame if available, always try to write audio if available
+            if frame is not None:
+                writer.write_frame_with_timing(frame, None)  # Don't pass audio here
+            
+            # Write audio chunk separately if available - this prevents missing audio
+            if audio_chunk and len(audio_chunk) > 0:
+                success = writer.write_audio(audio_chunk)
+                if not success:
+                    logger.warning(f"Failed to write audio chunk for camera {camera_id}")
+            elif audio_enabled and frame is not None:
+                # Log when we have video but no audio (debugging)
+                if hasattr(self, '_audio_debug_counter'):
+                    self._audio_debug_counter += 1
+                    if self._audio_debug_counter % 30 == 0:  # Log every 30 frames without audio
+                        logger.debug(f"Camera {camera_id}: No audio chunk available (frame seq: {frame_seq})")
+                else:
+                    self._audio_debug_counter = 1
+            
+            # Small sleep to prevent busy waiting when no new data
+            if frame is None and audio_chunk is None:
+                time.sleep(0.01)
 
         self.process_recorded_clip(
             recording_id,
             file_path,
-            out,
-            audio_session,
+            writer,
             clip_motion_detected,
             clip_start_time,
             curr_time,
@@ -389,7 +485,7 @@ class RecordingManager:
     def start_recording(self, camera_id: str) -> Optional[str]:
         db_camera = self.db.get_camera(camera_id)
         if camera_id in self.active_recordings:
-            logger.info(f"Camera {camera_id} is already recording")
+            pass  # Camera already recording
             return self.active_recordings[camera_id]['recording_id']
 
         if camera_id not in self.camera_service._camera_streams:
@@ -398,11 +494,10 @@ class RecordingManager:
                 return None
         cap = self.camera_service._camera_streams.get(camera_id)
 
-        recording_id, file_path, out = self.init_recording(camera_id, db_camera, cap)
-        audio_session = self.audio_utils.start_audio_capture(camera_id, recording_id, db_camera)
+        recording_id, file_path, writer = self.init_recording(camera_id, db_camera, cap)
         recording_thread = threading.Thread(
             target=self.record_worker,
-            args=(file_path, recording_id, camera_id, cap, out, audio_session),
+            args=(file_path, recording_id, camera_id, cap, writer),
             daemon=True,
         )
 
@@ -415,7 +510,6 @@ class RecordingManager:
         recording_thread.start()
         self.db.update_camera(camera_id, {'status': CameraStatus.RECORDING.value})
 
-        logger.info(f"Started recording: {db_camera['name']} -> {file_path}")
         return recording_id
 
     def stop_recording(self, camera_id: str):
@@ -429,7 +523,8 @@ class RecordingManager:
         recording_info = self.active_recordings.pop(camera_id)
         recording_info['thread'].join(timeout=5)
         self.db.update_camera(camera_id, {'status': CameraStatus.ONLINE.value})
-        logger.info(f"Stopped recording: {db_camera['name']}")
+        pass  # Recording stopped
+        
 
     def get_recordings(self, camera_id: Optional[str] = None) -> List[Recording]:
         db_recordings = self.db.get_recordings_by_camera(camera_id) if camera_id else self.db.get_all_recordings()

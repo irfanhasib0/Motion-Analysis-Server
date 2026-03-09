@@ -365,12 +365,13 @@ class StreamingService:
         self._latest_res_video: Dict[str, Dict[str, Any]] = {}
         self._latest_res_audio: Dict[str, Dict[str, Any]] = {}
         self._fps_stats: Dict[str, Dict[str, float]] = {}
-        self._background_camera_threads: Dict[str, threading.Thread] = {}
+        # Removed: _background_camera_threads - no longer needed (simplified architecture)
         self._hls_manager = HLSManager(
             get_recordings_dir=lambda: getattr(self, 'recordings_dir', os.path.abspath('./recordings')),
             get_camera_config=lambda camera_id: self.db.get_camera(camera_id) if hasattr(self, 'db') else None,
-            ensure_background_stream=self.ensure_background_camera_stream,
+            ensure_background_stream=self.start_av_stream,
             get_latest_frame=self._get_latest_frame_for_hls,
+            get_latest_audio_chunk=self.get_latest_audio_chunk,  # Enable shared audio chunks for HLS
         )
         self._hls_pipe_threads: Dict[str, threading.Thread] = {}
         self._hls_pipe_stop_events: Dict[str, threading.Event] = {}
@@ -384,6 +385,19 @@ class StreamingService:
         self._audio_chunk_index: Dict[str, int] = {}
         self._latest_pts_payload: Dict[str, Dict[Any, Dict[str, Any]]] = {}
         self._overlay_masks: Dict[str, np.ndarray] = {}
+        
+        # Simple audio streaming with background threads
+        self._audio_background_threads: Dict[str, threading.Thread] = {}
+        self._audio_stop_events: Dict[str, threading.Event] = {}
+        self._latest_audio_chunk: Dict[str, bytes] = {}
+        self._latest_audio_chunk_seq: Dict[str, int] = {}
+        self._audio_thread_locks: Dict[str, threading.Lock] = {}
+        
+        # Simple video streaming with background threads
+        self._video_background_threads: Dict[str, threading.Thread] = {}
+        self._video_stop_events: Dict[str, threading.Event] = {}
+        self._latest_video_frame: Dict[str, bytes] = {}
+        self._video_thread_locks: Dict[str, threading.Lock] = {}
 
     def set_camera_sensitivity(self, camera_id: str, sensitivity: int) -> int:
         safe_sensitivity = max(0, min(int(self.sensitivity_level), int(sensitivity)))
@@ -423,27 +437,36 @@ class StreamingService:
         return analyzer
 
     def get_latest_audio_chunk_analysis(self, camera_id: str) -> Optional[Dict[str, Any]]:
+        """Get latest audio analysis from background thread."""
         return self._latest_audio_chunk_analysis.get(camera_id)
 
-    def ensure_background_camera_stream(self, camera_id: str):
-        existing = self._background_camera_threads.get(camera_id)
-        if existing and existing.is_alive():
-            return
+    def get_latest_audio_chunk(self, camera_id: str) -> Optional[bytes]:
+        """Get the latest audio chunk from background thread for HLS distribution."""
+        audio_lock = self._audio_thread_locks.get(camera_id)
+        if audio_lock:
+            with audio_lock:
+                return self._latest_audio_chunk.get(camera_id)
+        return self._latest_audio_chunk.get(camera_id)
 
-        def _worker():
-            try:
-                stream_iter = self.generate_live_video_stream(camera_id, emit_stream=False)
-                next(stream_iter)
-            except StopIteration:
-                pass
-            except Exception as error:
-                logger.warning(f"Background camera stream worker stopped for {camera_id}: {error}")
-            finally:
-                self._background_camera_threads.pop(camera_id, None)
-
-        thread = threading.Thread(target=_worker, daemon=True, name=f"bg-camera-stream-{camera_id}")
-        self._background_camera_threads[camera_id] = thread
-        thread.start()
+    def start_av_stream(self, camera_id: str):
+        """Start background video and audio streams directly (checks audio_enabled setting)."""
+        try:
+            # Start video background thread if not already running
+            if camera_id not in self._video_background_threads:
+                self.start_video_stream(camera_id)
+            
+            # Start audio background thread only if audio is enabled for this camera
+            db_camera = self.db.get_camera(camera_id)
+            audio_enabled = bool(db_camera.get('audio_enabled', False)) if db_camera else False
+            
+            if audio_enabled and camera_id not in self._audio_background_threads:
+                self.start_audio_stream(camera_id)
+            
+            # Wait briefly for threads to initialize and start producing frames
+            time.sleep(0.5)
+                
+        except Exception as error:
+            logger.warning(f"Failed to start AV streams for {camera_id}: {error}")
 
     def _get_latest_frame_for_hls(self, camera_id: str) -> Optional[np.ndarray]:
         lock = self.stream_locks.get(camera_id)
@@ -621,233 +644,462 @@ class StreamingService:
             b'data', 0xFFFFFFFF,   # data sub-chunk size — unknown/streaming
         )
 
-    def generate_live_audio_stream(self, camera_id: str, chunk_size: Optional[int] = None):
+    def start_audio_stream(self, camera_id: str) -> bool:
+        """Start background audio stream thread for camera."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            raise ValueError(f"Camera not found: {camera_id}")
+            logger.warning(f"Camera not found: {camera_id}")
+            return False
 
-        if chunk_size is None:
-            try:
-                chunk_size = int(db_camera.get('audio_chunk_size'))
-            except (TypeError, ValueError):
-                chunk_size = int(os.getenv('AUDIO_CHUNK_SIZE', '512'))
-        chunk_size = max(128, min(16384, int(chunk_size)))
+        if not bool(db_camera.get('audio_enabled', False)):
+            logger.info(f"Audio not enabled for camera: {camera_id}")
+            return False
 
-        stream_token = f"{time.time_ns()}:{threading.get_ident()}"
-        previous_token = self.active_audio_streams.get(camera_id)
-        if previous_token:
-            logger.info(f"Taking over existing audio stream for camera {camera_id}")
-        self.active_audio_streams[camera_id] = stream_token
+        # Check if thread is already running and alive
+        existing_thread = self._audio_background_threads.get(camera_id)
+        if existing_thread and existing_thread.is_alive():
+            logger.debug(f"Audio Thread:: Audio background thread already running for camera {camera_id}")
+            return True
 
-        # Start audio capture if not already running (mirrors generate_live_video_stream)
-        cap = self._audio_streams.get(camera_id)
-        if cap is None or not cap.is_audio_stream_opened():
-            started = self.start_audio(camera_id)
-            if not started:
-                self.active_audio_streams.pop(camera_id, None)
-                raise ValueError(f"Audio stream failed to start for camera: {camera_id}")
-            cap = self._audio_streams.get(camera_id)
-
-        if cap is None:
-            self.active_audio_streams.pop(camera_id, None)
-            raise ValueError(f"Audio capture unavailable for camera: {camera_id}")
-
-        try:
-            # Yield a streaming WAV header so the browser / Web Audio API gets a
-            # properly typed audio stream without any extra encoding overhead.
-            yield self._make_wav_header(cap.audio_sample_rate, cap.audio_channels)
-
-            has_emitted_audio = False
-            while cap.is_audio_stream_opened() and self.active_audio_streams.get(camera_id) == stream_token:
-                ret, samples = cap.read_audio()
-                if not ret or samples is None or samples.size == 0:
+        # Stop existing thread if running
+        self.stop_audio_stream(camera_id)
+        
+        # Create thread-safe resources
+        stop_event = threading.Event()
+        audio_lock = threading.Lock()
+        self._audio_stop_events[camera_id] = stop_event
+        self._audio_thread_locks[camera_id] = audio_lock
+        
+        def _audio_thread():
+            """Background thread that continuously captures audio chunks."""
+            
+            # Start audio capture
+            cap = self.audio_capture(camera_id)
+            if not cap or not cap.is_audio_stream_opened():
+                logger.warning(f"Failed to start audio capture for camera {camera_id}")
+                return
+            
+            self._audio_streams[camera_id] = cap
+            analyzer = self._get_audio_chunk_analyzer(camera_id, db_camera)
+            
+            logger.info(f"Audio background thread started for camera {camera_id}")
+            
+            consecutive_failures = 0
+            max_failures = 10
+            audio_chunk_seq = 0
+            
+            while not stop_event.is_set() and cap.is_audio_stream_opened():
+                ret, chunk = cap.read_audio()
+                
+                if not ret or chunk is None or len(chunk) == 0:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        logger.warning(f"Too many audio read failures for {camera_id}, stopping thread")
+                        break
+                    time.sleep(0.01)
                     continue
-
-                # Convert float32 samples → raw s16le bytes for streaming
-                raw_chunk = (samples * 32768.0).clip(-32768, 32767).astype(np.int16).tobytes()
-
+                
+                consecutive_failures = 0
+                audio_chunk_seq += 1
+                
+                # Process audio analysis
+                samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
+                samples /= 32768.0
+                
                 self._audio_chunk_index[camera_id] = self._audio_chunk_index.get(camera_id, 0) + 1
                 audio_chunk_index = self._audio_chunk_index[camera_id]
                 effective_stride = self.get_camera_effective_stride(camera_id)
-                if effective_stride == int(self.sensitivity_level):
-                    should_run_audio_analysis = False
-                else:
-                    should_run_audio_analysis = (effective_stride == 1 or audio_chunk_index % effective_stride == 0)
-
-                if should_run_audio_analysis:
-                    analyzer = self._get_audio_chunk_analyzer(camera_id, db_camera)
+                
+                should_run_analysis = (effective_stride == 1 or audio_chunk_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
+                
+                if should_run_analysis:
                     analysis = analyzer.process_chunk(samples)
                     self._latest_audio_chunk_analysis[camera_id] = analysis
                     self._latest_res_audio[camera_id] = {
                         'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
                         'freq': float(analysis.get('peak_frequency_mean', 0.0) or 0.0),
                     }
+                
+                # Store latest chunk with sequence number (thread-safe)
+                with audio_lock:
+                    self._latest_audio_chunk[camera_id] = chunk
+                    self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
+            
+            logger.info(f"Audio Thread:: Audio background thread finished for camera {camera_id}, Stop event: {stop_event.is_set()}, Audio stream opened: {cap.is_audio_stream_opened()}")
+            # Cleanup
+            cap.release_audio()
+            self._audio_streams.pop(camera_id, None)
+        
+        # Start thread
+        thread = threading.Thread(target=_audio_thread, daemon=True, name=f'audio-bg-{camera_id}')
+        thread.start()
+        self._audio_background_threads[camera_id] = thread
+        
+        logger.info(f"Audio Thread:: Started audio background thread for camera {camera_id}")
+        return True
 
-                has_emitted_audio = True
-                yield raw_chunk
-
-            if not has_emitted_audio:
-                logger.warning(f"Live audio stream produced no data for camera {camera_id}")
-
-        except Exception as error:
-            logger.warning(f"Audio stream error for camera {camera_id}: {error}")
-
-        finally:
-            if self.active_audio_streams.get(camera_id) == stream_token:
-                self.active_audio_streams.pop(camera_id, None)
-
-    def stop_live_audio_stream(self, camera_id: str) -> bool:
+    def stop_audio_stream(self, camera_id: str) -> bool:
+        """Stop background audio stream thread for camera."""
+        # Check if there's actually a thread to stop
+        thread = self._audio_background_threads.get(camera_id)
+        thread_was_running = thread and thread.is_alive()
+        
+        # Signal stop
+        stop_event = self._audio_stop_events.get(camera_id)
+        if stop_event:
+            stop_event.set()
+        
+        # Wait for thread to finish
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+        
+        # Cleanup
+        self._audio_background_threads.pop(camera_id, None)
+        self._audio_stop_events.pop(camera_id, None)
+        self._audio_thread_locks.pop(camera_id, None)
+        self._latest_audio_chunk.pop(camera_id, None)
+        self._latest_audio_chunk_seq.pop(camera_id, None)
         self.active_audio_streams.pop(camera_id, None)
+        
+        # Legacy cleanup
         self._audio_chunk_analyzers.pop(camera_id, None)
         self._latest_audio_chunk_analysis.pop(camera_id, None)
         self._latest_res_audio.pop(camera_id, None)
         self._audio_chunk_index.pop(camera_id, None)
-        cap = self._audio_streams.pop(camera_id, None)
-        if not cap:
-            return False
-        try:
-            cap.release_audio()
-            return True
-        except Exception:
-            return True
-
-    def generate_live_video_stream(self, camera_id: str, emit_stream: bool = True) -> Generator[bytes, None, None]:
-        """Generate live video stream from camera."""
-        # Get camera from database
-        db_camera = self.db.get_camera(camera_id)
         
+        # Only log if we actually stopped a running thread
+        if thread_was_running:
+            logger.info(f"Audio Thread:: Stopped audio background thread for camera {camera_id}")
+        return True
+
+    def generate_audio_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
+        """Generate audio stream by reading from background thread data."""
+        db_camera = self.db.get_camera(camera_id)
         if not db_camera:
             logger.warning(f"Camera not found: {camera_id}")
-            return self.generate_failure_frame(f"Camera {camera_id} Not Found")
-        
-        logger.info(f"Generating stream for camera {camera_id}, status: {db_camera['status']}")
+            return
 
-        # Create stream token; if an old stream exists for this camera, this takes over.
-        # Old generator loop will exit when it sees token mismatch.
-        stream_token = f"{time.time_ns()}:{threading.get_ident()}"
-        previous_token = self.active_streams.get(camera_id)
-        if previous_token:
-            logger.info(f"Taking over existing stream for camera {camera_id}")
-        self.active_streams[camera_id] = stream_token
+        if not bool(db_camera.get('audio_enabled', False)):
+            logger.info(f"Audio not enabled for camera: {camera_id}")
+            return
         
-        # Initialize camera capture if not already done
+        audio_sample_rate = int(db_camera.get('audio_sample_rate') or os.getenv('AUDIO_SAMPLE_RATE', '16000'))
+        audio_channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
+        
+        # Create stream token
+        stream_token = f"{time.time_ns()}:{threading.get_ident()}"
+        previous_token = self.active_audio_streams.get(camera_id)
+        if previous_token:
+            logger.info(f"Audio Stream:: Taking over existing audio stream for camera {camera_id}")
+        self.active_audio_streams[camera_id] = stream_token
+        
+        # Yield WAV header first
+        yield self._make_wav_header(audio_sample_rate, audio_channels)
+        
+        # Background thread should already be running from /start endpoint
+        if camera_id not in self._audio_background_threads:
+            logger.warning(f"Audio Thread:: No background thread found for camera {camera_id} - user must start camera first")
+            return
+        
+        logger.info(f"Audio Stream:: Starting audio stream endpoint for camera {camera_id} with token {stream_token}")
+        
+        audio_lock = self._audio_thread_locks.get(camera_id)
+        last_chunk = None
+        consecutive_empty = 0
+        max_empty = 50  # About 5 seconds at 100ms chunks
+        
+        # Stream loop
+        while (self.active_audio_streams.get(camera_id) == stream_token and 
+               camera_id in self._audio_background_threads):
+            
+            current_chunk = None
+            if audio_lock:
+                with audio_lock:
+                    current_chunk = self._latest_audio_chunk.get(camera_id)
+            
+            if current_chunk and current_chunk != last_chunk:
+                yield current_chunk
+                last_chunk = current_chunk
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+                if consecutive_empty >= max_empty:
+                    logger.warning(f"Audio Stream::No new audio data for camera {camera_id}, ending stream")
+                    break
+                time.sleep(0.1)  # 100ms wait between checks
+        
+        # Cleanup token
+        if self.active_audio_streams.get(camera_id) == stream_token:
+            self.active_audio_streams.pop(camera_id, None)
+        
+        logger.info(f"Audio Stream:: Audio stream endpoint finished for camera {camera_id}")
+
+    def start_video_stream(self, camera_id: str) -> bool:
+        """Start background video stream thread for camera."""
+        db_camera = self.db.get_camera(camera_id)
+        if not db_camera:
+            logger.warning(f"Camera not found: {camera_id}")
+            return False
+
+        # Stop existing thread if running
+        self.stop_video_stream(camera_id)
+        
+        # Initialize camera capture if needed
         if camera_id not in self._camera_streams:
-            scc = self.start_camera(camera_id)
-            if not scc:
-                return self.generate_failure_frame("Camera Failed to Start")
+            success = self.start_camera(camera_id)
+            if not success:
+                logger.warning(f"Video Thread:: Failed to start camera for video stream: {camera_id}")
+                return False
         
         cap = self._camera_streams.get(camera_id)
         tracker = self._camera_trackers.get(camera_id)
-
-        # Get or create lock for this camera
+        
+        if not cap or not tracker:
+            logger.warning(f"Video Thread:: Camera or tracker not available for {camera_id}")
+            return False
+        
+        # Create thread-safe resources
+        stop_event = threading.Event()
+        video_lock = threading.Lock()
+        self._video_stop_events[camera_id] = stop_event
+        self._video_thread_locks[camera_id] = video_lock
+        
+        # Get or create stream lock for this camera
         if camera_id not in self.stream_locks:
             self.stream_locks[camera_id] = threading.Lock()
+        stream_lock = self.stream_locks[camera_id]
         
-        lock = self.stream_locks[camera_id]
+        def _video_thread():
+            """Background thread that continuously captures and processes video frames."""
+            logger.info(f"Video Thread:: Video background thread started for camera {camera_id}")
+            
+            consecutive_failures = 0
+            max_failures = 10
+            frame_index = 0
+            
+            while not stop_event.is_set() and cap.is_video_stream_opened():
+                with stream_lock:
+                    ret, frame = cap.read_video()
+                    
+                    if not ret:
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_failures:
+                            logger.warning(f"Video Thread:: Too many video read failures for {camera_id}, stopping thread")
+                            break
+                        time.sleep(0.01)
+                        continue
+                    
+                    consecutive_failures = 0
+                    
+                    # Store original frame for recording consumers
+                    self._latest_frames[camera_id] = frame
+                    self._latest_frame_seq[camera_id] = self._latest_frame_seq.get(camera_id, 0) + 1
+                    self._stream_frame_index[camera_id] = frame_index
+                    frame_index += 1
+                
+                # Resize frame for streaming performance
+                stream_frame = self._resize_frame_for_streaming(frame)
+                effective_stride = self.get_camera_effective_stride(camera_id)
+                
+                # Determine if we should run motion tracking on this frame
+                should_run_tracker = (effective_stride == 1 or frame_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
+                
+                if should_run_tracker:
+                    detect_output = tracker.detect(stream_frame, return_pts=True)
+                    stream_frame, points_dict, pts_payload = self._extract_detect_payload(detect_output, stream_frame)
+                    stream_frame = self._draw_pts_flow_for_stream(stream_frame, camera_id, pts_payload)
+                    viz_frame, _res = self._plot_dynamic_stream_data(stream_frame, points_dict, camera_id)
+                    res = self._aggregate_motion_result(_res)
+                    
+                    with stream_lock:
+                        self._latest_viz[camera_id] = viz_frame
+                        self._latest_res_video[camera_id] = res
+                        self._latest_pts_payload[camera_id] = pts_payload
+                        self._latest_hls_frames[camera_id] = stream_frame
+                else:
+                    with stream_lock:
+                        viz_frame = self._latest_viz.get(camera_id)
+                        res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time()})
+                        if viz_frame is None:
+                            viz_frame = stream_frame
+                            self._latest_viz[camera_id] = viz_frame
+                        latest_pts = self._latest_pts_payload.get(camera_id)
+                        stream_frame = self._draw_pts_flow_for_stream(stream_frame, camera_id, latest_pts)
+                        self._latest_hls_frames[camera_id] = stream_frame
+                
+                # Add FPS overlay
+                frame_fps = self._update_loop_fps(f"{camera_id}:primary")
+                stream_frame = self._draw_fps_overlay(stream_frame, frame_fps)
+                
+                # Convert to bytes and store (thread-safe)
+                frame_bytes = self.frame_to_bytes(stream_frame)
+                with video_lock:
+                    self._latest_video_frame[camera_id] = frame_bytes
+                
+                # Small delay to control frame rate
+                #time.sleep(1.0 / 30)  # Max 30 FPS processing
+            
+            logger.info(f"Video Thread:: Video background thread finished for camera {camera_id}, Stop event: {stop_event.is_set()}, Video stream opened: {cap.is_video_stream_opened()}")
+        
+        # Start thread
+        thread = threading.Thread(target=_video_thread, daemon=True, name=f'video-bg-{camera_id}')
+        thread.start()
+        self._video_background_threads[camera_id] = thread
+        
+        logger.info(f"Video Thread:: Started video background thread for camera {camera_id}")
+        return True
 
-        while cap.is_video_stream_opened() and self.active_streams.get(camera_id) == stream_token:
-            with lock:
-                ret, frame = cap.read()
+    def stop_video_stream(self, camera_id: str) -> bool:
+        """Stop background video stream thread for camera."""
+        # Signal stop
+        stop_event = self._video_stop_events.get(camera_id)
+        if stop_event:
+            stop_event.set()
+        
+        # Wait for thread to finish
+        thread = self._video_background_threads.get(camera_id)
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+        
+        # Cleanup
+        self._video_background_threads.pop(camera_id, None)
+        self._video_stop_events.pop(camera_id, None)
+        self._video_thread_locks.pop(camera_id, None)
+        self._latest_video_frame.pop(camera_id, None)
+        self.active_streams.pop(camera_id, None)
+        
+        logger.info(f"Video Thread:: Stopped video background thread for camera {camera_id}")
+        return True
 
-                if not ret:
-                    if emit_stream:
-                        yield self.generate_failure_frame("Failed to Read Frame")
-                    continue
-                # Store original frame for recording consumers
-                self._latest_frames[camera_id] = frame
-                self._latest_frame_seq[camera_id] = self._latest_frame_seq.get(camera_id, 0) + 1
-                self._stream_frame_index[camera_id] = self._stream_frame_index.get(camera_id, 0) + 1
-                frame_index = self._stream_frame_index[camera_id]
-
-            # Resize frame if needed for better streaming performance
-            frame  = self._resize_frame_for_streaming(frame)
-            effective_stride = self.get_camera_effective_stride(camera_id)
-            if effective_stride == int(self.sensitivity_level):
-                should_run_tracker = False
+    def generate_video_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
+        """Generate video stream by reading from background thread data."""
+        db_camera = self.db.get_camera(camera_id)
+        if not db_camera:
+            logger.warning(f"Video Stream:: Camera not found: {camera_id}")
+            return self.generate_failure_frame(f"Camera {camera_id} Not Found")
+        
+        # Create stream token
+        stream_token = f"{time.time_ns()}:{threading.get_ident()}"
+        previous_token = self.active_streams.get(camera_id)
+        if previous_token:
+            logger.info(f"Video Stream:: Taking over existing video stream for camera {camera_id}")
+        self.active_streams[camera_id] = stream_token
+        
+        # Background thread should already be running from /start endpoint
+        if camera_id not in self._video_background_threads:
+            logger.warning(f"Video Thread:: No background thread found for camera {camera_id} - user must start camera first")
+            yield self.generate_failure_frame("Camera not started - click start button first")
+            return
+        
+        logger.info(f"Video Stream:: Starting video stream endpoint for camera {camera_id} with token {stream_token}")
+        
+        video_lock = self._video_thread_locks.get(camera_id)
+        last_frame = None
+        consecutive_empty = 0
+        max_empty = 100  # About 3 seconds at 30 FPS
+        
+        # Stream loop
+        while (self.active_streams.get(camera_id) == stream_token and 
+               camera_id in self._video_background_threads):
+            
+            current_frame = None
+            if video_lock:
+                with video_lock:
+                    current_frame = self._latest_video_frame.get(camera_id)
+            
+            if current_frame and current_frame != last_frame:
+                yield current_frame
+                last_frame = current_frame
+                consecutive_empty = 0
+            elif current_frame:
+                # Re-yield same frame to maintain steady stream (prevents flickering)
+                yield current_frame
+                consecutive_empty = 0
             else:
-                should_run_tracker = (effective_stride == 1) or (frame_index % effective_stride == 0)
-
-            if should_run_tracker:
-                detect_output = tracker.detect(frame, return_pts=True)
-                frame, points_dict, pts_payload = self._extract_detect_payload(detect_output, frame)
-                frame = self._draw_pts_flow_for_stream(frame, camera_id, pts_payload)
-                viz1, _res = self._plot_dynamic_stream_data(frame, points_dict, camera_id)
-                res = self._aggregate_motion_result(_res)
-                with lock:
-                    self._latest_viz[camera_id] = viz1
-                    self._latest_res_video[camera_id] = res
-                    self._latest_pts_payload[camera_id] = pts_payload
-                    self._latest_hls_frames[camera_id] = frame
-            else:
-                with lock:
-                    viz1 = self._latest_viz.get(camera_id)
-                    res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time()})
-                    if viz1 is None:
-                        viz1 = frame
-                        self._latest_viz[camera_id] = viz1
-                    latest_pts = self._latest_pts_payload.get(camera_id)
-                    frame = self._draw_pts_flow_for_stream(frame, camera_id, latest_pts)
-                    self._latest_hls_frames[camera_id] = frame
-
-            frame_fps = self._update_loop_fps(f"{camera_id}:primary")
-            frame = self._draw_fps_overlay(frame, frame_fps)
-            buffer = self.frame_to_bytes(frame)
-
-            if emit_stream:
-                yield buffer
-
-        # Only clear if this stream is still the active owner
+                consecutive_empty += 1
+                if consecutive_empty >= max_empty:
+                    logger.warning(f"Video Stream:: No new video data for camera {camera_id}, ending stream")
+                    break
+                # Yield a placeholder frame to maintain stream continuity
+                yield self.generate_failure_frame("Waiting for frames...")
+                
+            time.sleep(1.0 / 30)  # 30 FPS target
+        
+        # Cleanup token
         if self.active_streams.get(camera_id) == stream_token:
             self.active_streams.pop(camera_id, None)
+        
+        logger.info(f"Video Stream:: Video stream endpoint finished for camera {camera_id}")
     
     def generate_processed_video_stream(self, camera_id: str) -> Generator[bytes, None, None]:
-        """Generate processed video stream from camera."""
-        # Get camera from database
+        """Generate processed video stream from camera (visualization overlay)."""
         db_camera = self.db.get_camera(camera_id)
-
         if not db_camera:
             logger.warning(f"Camera not found: {camera_id}")
-            return self.generate_failure_frame(f"Camera {camera_id} Not Found")
+            yield self.generate_failure_frame(f"Camera {camera_id} Not Found")
+            return
 
+        # Create stream token
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
         previous_token = self.active_processing_streams.get(camera_id)
         if previous_token:
-            logger.info(f"Taking over existing processing stream for camera {camera_id}")
+            logger.info(f"Processing Stream:: Taking over existing processing stream for camera {camera_id}")
         self.active_processing_streams[camera_id] = stream_token
         
-        lock = self.stream_locks.get(camera_id)
+        # Ensure video background thread is running
+        if camera_id not in self._video_background_threads:
+            logger.warning(f"Processing Stream:: No background thread found for camera {camera_id} - user must start camera first")
+            yield self.generate_failure_frame("Camera not started - click start button first")
+            return
 
-        while camera_id in self._camera_trackers and self.active_processing_streams.get(camera_id) == stream_token:
-            if lock is not None:
-                with lock:
-                    processed_frame = getattr(self, '_latest_viz', {}).get(camera_id, None)
+        logger.info(f"Processing Stream:: Starting processed video stream for camera {camera_id} with token {stream_token}")
+        
+        stream_lock = self.stream_locks.get(camera_id)
+        consecutive_empty = 0
+        max_empty = 100  # About 3 seconds at 30 FPS
+        last_processed_frame = None
+
+        while self.active_processing_streams.get(camera_id) == stream_token and camera_id in self._video_background_threads:
+            processed_frame = None
+            res = None
+            
+            if stream_lock is not None:
+                with stream_lock:
+                    processed_frame = self._latest_viz.get(camera_id)
+                    res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0})
             else:
-                processed_frame = getattr(self, '_latest_viz', {}).get(camera_id, None)
-            if processed_frame is None:
-                yield self.generate_failure_frame("No Processed Frame Available")
-                time.sleep(1.0 / 30)
-                continue
-
-            output_frame = processed_frame.copy()
-            processing_fps = self._update_loop_fps(f"{camera_id}:processing")
-            output_frame = self._draw_box_tracking_overlay(
-                output_frame,
-                camera_id,
-                processing_fps,
-                res=getattr(self, '_latest_res_video', {}).get(camera_id, {'vel': 0, 'bg_diff': 0}),
-            )
-
-            # Resize frame if needed for better streaming performance
-            #processed_frame = self._resize_frame_for_streaming(frame)
-            buffer = self.frame_to_bytes(output_frame)
+                processed_frame = self._latest_viz.get(camera_id)
+                res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0})
+                
+            if processed_frame is not None:
+                consecutive_empty = 0
+                output_frame = processed_frame.copy()
+                processing_fps = self._update_loop_fps(f"{camera_id}:processing")
+                output_frame = self._draw_box_tracking_overlay(output_frame, camera_id, processing_fps, res=res)
+                
+                buffer = self.frame_to_bytes(output_frame)
+                yield buffer
+                last_processed_frame = buffer
+            elif last_processed_frame is not None:
+                # Re-yield last frame to maintain stream continuity (prevents flickering)
+                yield last_processed_frame
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+                if consecutive_empty >= max_empty:
+                    logger.warning(f"Processing Stream:: No processed frame data for camera {camera_id}, ending stream")
+                    break
+                # Yield placeholder frame to maintain stream continuity
+                yield self.generate_failure_frame("Waiting for processed frames...")
             
-            yield buffer
-            
-            # Small delay to control frame rate
+            # Control frame rate
             time.sleep(1.0 / 30)  # 30 FPS max
 
+        # Cleanup token
         if self.active_processing_streams.get(camera_id) == stream_token:
-                self.active_processing_streams.pop(camera_id, None)
+            self.active_processing_streams.pop(camera_id, None)
+        
+        logger.info(f"Processing Stream:: Processed video stream finished for camera {camera_id}")
             
             
     def generate_recorded_video_stream(self, recording_id: str) -> Generator[bytes, None, None]:

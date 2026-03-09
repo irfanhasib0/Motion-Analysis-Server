@@ -27,24 +27,26 @@ cameras:
   processing_type: null
   processing_params: {}
   created_at: '2026-02-12T18:36:48.156743'
-  updated_at: '2026-03-05T23:31:05.032238'
+  updated_at: '2026-03-06T23:52:01.491826'
   audio_enabled: true
   audio_source: default
   audio_input_format: pulse
   audio_sample_rate: 16000
-  audio_chunk_size: 4096
+  audio_chunk_size: 512
 - id: cam3_webcam_1771887423
   name: cam3
   source: rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   camera_type: rtsp
   fps: 10
   resolution: 640x480
-  status: offline
+  status: online
   processing_active: false
   processing_type: null
   processing_params: {}
   created_at: '2026-02-23T22:57:03.300029'
-  updated_at: '2026-03-05T23:31:38.266278'
+  updated_at: '2026-03-09T13:04:31.105548'
   audio_enabled: true
   audio_source: rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   audio_input_format: rtsp
+  audio_sample_rate: 16000
+  audio_chunk_size: 512

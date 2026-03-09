@@ -186,14 +186,18 @@ class FrequencyIntensityAnalyzer:
         peak_frequency_mean = self._band_mean_frequency(top_band or "0-0Hz")
         self._append_series(overall_rms, peak_frequency_mean)
 
+        # Create copies of deques to avoid mutation during iteration
+        loudness_series_copy = list(self._loudness_series)
+        peak_frequency_mean_series_copy = list(self._peak_frequency_mean_series)
+
         return {
             "sample_rate": self.config.sample_rate,
             "num_samples": int(samples.size),
             "average_intensity_per_frequency": avg_by_band,
             "overall_intensity": overall_rms,
             "peak_frequency_mean": float(peak_frequency_mean),
-            "loudness_series": [[x, y] for x, y in self._loudness_series],
-            "peak_frequency_mean_series": [[x, y] for x, y in self._peak_frequency_mean_series],
+            "loudness_series": [[x, y] for x, y in loudness_series_copy],
+            "peak_frequency_mean_series": [[x, y] for x, y in peak_frequency_mean_series_copy],
             "anomaly": {
                 "intensity": bool(intensity_spike or intensity_drop),
                 "frequency": bool(frequency_spike),
