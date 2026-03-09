@@ -397,144 +397,55 @@ const CameraList = ({ cameras, setCameras }) => {
     const shouldRenderAudio = isOnline && Boolean(camera.audio_enabled) && !disabled;
     const [audioPlaybackFormat] = useState(AUDIO_STREAM_FORMAT);
     const [activeAudioUrl, setActiveAudioUrl] = useState('');
-    const [audioLoadFailed, setAudioLoadFailed] = useState(false);
 
-    const handleAudioSuccess = () => {
-      setAudioLoadFailed(false);
-    };
-
-    const handleAudioError = () => {
-      setAudioLoadFailed(true);
-    };
-
-    const handleAudioStalled = () => {
-      // Optionally, treat as error or ignore
-    };
-
-    const currentInputFormat = String(camera.audio_input_format || 'pulse').toLowerCase();
-    const currentInputSource = String(camera.audio_source || 'default').toLowerCase();
-    const suggestAlsa = currentInputFormat === 'pulse' || currentInputSource === 'default';
-    const suggestedInput = suggestAlsa ? 'alsa / hw:1,0' : 'pulse / default';
-
+    // Reset audio URL when camera changes
     useEffect(() => {
       setActiveAudioUrl('');
-      setAudioLoadFailed(false);
     }, [camera.id]);
 
-    useEffect(() => {
-      if (shouldRenderAudio) {
-        return;
-      }
-      setActiveAudioUrl('');
-      setAudioLoadFailed(false);
-      const audioEl = audioRef.current;
-      if (!audioEl) {
-        return;
-      }
-      try {
-        audioEl.pause();
-        audioEl.removeAttribute('src');
-        audioEl.load();
-      } catch {}
-    }, [shouldRenderAudio]);
-
-    // Only attempt to play audio once on mount or when camera changes
+    // Start audio when camera comes online
     useEffect(() => {
       if (!shouldRenderAudio) {
-        return undefined;
-      }
-
-      let cancelled = false;
-
-      const startAudio = async () => {
-        try {
-          // No longer auto-start camera - user must click start button first
-          // await api.startCamera(camera.id);
-
-          if (cancelled) {
-            return;
-          }
-
-          const streamUrl = api.getCameraAudioStreamUrl(camera.id, audioPlaybackFormat);
-          setActiveAudioUrl(streamUrl);
-          setAudioLoadFailed(false);
-
-          const audioEl = audioRef.current;
-          if (!audioEl || cancelled) {
-            return;
-          }
-
-          audioEl.autoplay = true;
-          audioEl.defaultMuted = true;
-          audioEl.muted = true;
-          audioEl.src = streamUrl;
-          audioEl.load();
-          try {
-            await audioEl.play();
-          } catch {
-            // Ignore autoplay errors
-          }
-        } catch {
-          if (!cancelled) {
-            setActiveAudioUrl('');
-            setAudioLoadFailed(true);
-          }
-        }
-      };
-
-      startAudio();
-
-      return () => {
-        cancelled = true;
+        // Stop audio if camera goes offline
+        setActiveAudioUrl('');
         const audioEl = audioRef.current;
         if (audioEl) {
-          try {
-            audioEl.pause();
-            audioEl.removeAttribute('src');
-            audioEl.load();
-          } catch {}
+          audioEl.pause();
+          audioEl.src = '';
         }
-        //api.stopCameraAudioStream(camera.id).catch(() => {});
-      };
-    }, [camera.id, shouldRenderAudio]);//camera.id, shouldRenderAudio, audioPlaybackFormat]);
+        return;
+      }
 
-    //if (!shouldRenderAudio) {
-    //  return null;
-    //}
+      // Camera is online and audio enabled - start audio stream
+      const streamUrl = api.getCameraAudioStreamUrl(camera.id, audioPlaybackFormat);
+      setActiveAudioUrl(streamUrl);
+      
+      // Auto-play when audio source is set
+      setTimeout(() => {
+        const audioEl = audioRef.current;
+        if (audioEl && streamUrl) {
+          audioEl.play().catch(() => {
+            console.log('Audio autoplay blocked - user must click play');
+          });
+        }
+      }, 500);
+    }, [shouldRenderAudio, camera.id, audioPlaybackFormat]);
+
+    if (!shouldRenderAudio) {
+      return null;
+    }
 
     return (
       <div style={AUDIO_PANEL_STYLE}>
         <audio
           ref={audioRef}
-          key={`${camera.id}:controls:audio`}
           src={activeAudioUrl}
-          autoPlay={true}
-          muted={true}
-          defaultMuted={true}
           controls={true}
-          preload="auto"
-          playsInline={true}
+          autoPlay={true}
+          muted={false}
+          preload="metadata"
           style={AUDIO_PLAYER_STYLE}
-          onCanPlay={handleAudioSuccess}
-          onLoadedData={handleAudioSuccess}
-          onPlaying={handleAudioSuccess}
-          onError={handleAudioError}
-          onStalled={handleAudioStalled}
-          onAbort={handleAudioError}
         />
-        {audioLoadFailed && (
-          <button onClick={() => {
-            setAudioLoadFailed(false);
-            // Re-run the audio start logic
-            const audioEl = audioRef.current;
-            if (audioEl) {
-              audioEl.load();
-              audioEl.play().catch(() => {});
-            }
-          }} style={{ marginTop: 8 }}>
-            Retry Audio
-          </button>
-        )}
       </div>
     );
   };
