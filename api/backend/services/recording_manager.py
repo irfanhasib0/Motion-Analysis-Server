@@ -274,28 +274,31 @@ class RecordingManager:
         self.send_notification_to_app()
         
     def get_latest_data_packets(self, camera_id: str, last_frame_seq: int, last_audio_chunk_seq: int):
-
-        # Use unified packet access functions that return (data, sequence) tuples
-        frame_result = self.streaming_service.get_latest_video_frame(camera_id, last_frame_seq)
-        audio_result = self.streaming_service.get_latest_audio_chunk(camera_id, last_audio_chunk_seq)
-        results = self.streaming_service.get_latest_results(camera_id)
+        # Register as consumer if not already registered
+        consumer_id = f"recorder_{camera_id}"
         
-        # Extract data and updated sequences from tuple results
-        if frame_result[0] is not None:
-            frame, last_frame_seq = frame_result
-        else:
-            frame, last_frame_seq = None, frame_result[1]
-            
-        if audio_result[0] is not None:
-            audio_chunk, last_audio_chunk_seq = audio_result
-        else:
-            audio_chunk, last_audio_chunk_seq = None, audio_result[1]
+        # Use SPMC functions for data access
+        frame = self.streaming_service.get_latest_video_frame_spmc(camera_id, consumer_id)
+        results = self.streaming_service.get_latest_results_spmc(camera_id, consumer_id)
         
         # Extract results components with defaults
         res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
         audio_res = results.get('audio', {}) if results else {}
         
-        return frame, res, last_frame_seq, audio_chunk, audio_res, last_audio_chunk_seq
+        # Debug logging for motion values
+        if res.get('vel', 0) > 0 or res.get('bg_diff', 0) > 0:
+            logger.debug(f"Motion detected for {camera_id}: vel={res.get('vel', 0)}, bg_diff={res.get('bg_diff', 0)}")
+        
+        # Update sequences (for compatibility with existing code)
+        if frame is not None:
+            last_frame_seq += 1
+        
+        return frame, res, last_frame_seq, audio_res, last_audio_chunk_seq
+    
+    def get_latest_audio_chunk_only(self, camera_id: str):
+        """Get audio chunk independently of video frames to avoid dropping chunks"""
+        consumer_id = f"recorder_{camera_id}"
+        return self.streaming_service.get_latest_audio_chunk_spmc(camera_id, consumer_id)
 
 
     def record_worker(self, file_path, recording_id, camera_id, cap, writer):
@@ -317,19 +320,29 @@ class RecordingManager:
         # Debug: Check if audio is enabled
         audio_enabled = db_camera.get('audio_enabled', False)
         logger.info(f"Recording worker started for camera {camera_id}, audio enabled: {audio_enabled}")
+        
+        # Track last motion check time
+        last_motion_check = start_time
 
         while camera_id in self.active_recordings:
-            lock = self.camera_service.stream_locks.get(camera_id)
+            loop_start = time.time()
             
-            # Minimize lock hold time by checking sequences inside lock
+            # Get video frame and results (less frequent)
+            lock = self.camera_service.stream_locks.get(camera_id)
+            frame = None
+            res = {'vel': 0.0, 'bg_diff': 0}
+            audio_res = {}
+            
             if lock is not None:
                 with lock:
-                    frame, res, last_frame_seq, audio_chunk, audio_res, last_audio_chunk_seq = self.get_latest_data_packets(camera_id, last_frame_seq, last_audio_chunk_seq)
+                    frame, res, last_frame_seq, audio_res, last_audio_chunk_seq = self.get_latest_data_packets(camera_id, last_frame_seq, last_audio_chunk_seq)
             else:
-                frame, res, last_frame_seq, audio_chunk, audio_res, last_audio_chunk_seq = self.get_latest_data_packets(camera_id, last_frame_seq, last_audio_chunk_seq)
-
+                frame, res, last_frame_seq, audio_res, last_audio_chunk_seq = self.get_latest_data_packets(camera_id, last_frame_seq, last_audio_chunk_seq)
+            audio_chunk = self.get_latest_audio_chunk_only(camera_id)
             curr_time = time.time()
-            if curr_time - start_time > self.motion_check_interval:
+            
+            # Motion detection check (less frequent to avoid blocking audio)
+            if curr_time - last_motion_check > self.motion_check_interval:
                 recent_motion_detected = False
 
                 res_timestamp = float(res.get('ts', 0.0) or 0.0)
@@ -372,21 +385,18 @@ class RecordingManager:
                     clip_vel = 0.0
                     clip_bg_diff = 0
                     clip_loudness = 0.0
-                start_time = curr_time
+                last_motion_check = curr_time
 
-            # Write frame if available, always try to write audio if available
+            # Write video frame if available (but don't wait for it)
             if frame is not None:
-                writer.write_frame_with_timing(frame, audio_chunk)  # Pass audio chunk here
-            
-            # Write audio chunk separately if available - this prevents missing audio
-            #if audio_chunk and len(audio_chunk) > 0:
-            #    success = writer.write_audio(audio_chunk)
-            #    if not success:
-            #        logger.warning(f"Failed to write audio chunk for camera {camera_id}")
-            
-            # Small sleep to prevent busy waiting when no new data
-            if frame is None and audio_chunk is None:
-                time.sleep(0.01)
+                writer.write_frame_with_timing(frame, audio_chunk)  # Audio already written above
+                        
+            # Very short sleep to allow audio thread to produce more data
+            # but yield CPU to prevent busy waiting
+            loop_duration = time.time() - loop_start
+            target_loop_time = 1.0 / 50  # 50Hz loop for responsive audio consumption
+            if loop_duration < target_loop_time:
+                time.sleep(target_loop_time - loop_duration)
 
         self.process_recorded_clip(
             recording_id,
@@ -410,6 +420,13 @@ class RecordingManager:
             if not success:
                 return None
         cap = self.camera_service._camera_streams.get(camera_id)
+
+        # Register as consumer for this camera
+        consumer_id = f"recorder_{camera_id}"
+        data_types = ['frames', 'results']
+        if db_camera and db_camera.get('audio_enabled', False):
+            data_types.append('audio')
+        self.streaming_service.register_consumer(camera_id, consumer_id, data_types)
 
         recording_id, file_path, writer = self.init_recording(camera_id, db_camera, cap)
         recording_thread = threading.Thread(

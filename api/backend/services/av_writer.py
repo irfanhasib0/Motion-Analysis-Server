@@ -238,13 +238,14 @@ class AVWriterV2:
     def write_frame_with_timing(self, frame: np.ndarray, audio_chunk: bytes = None) -> bool:
         """Write frame with frame rate control and optional audio chunk."""
         self.write_audio(audio_chunk)
+        '''
         # Handle frame rate timing first - this prevents flickering
         current_time = time.time()
         if current_time < self.next_write_at:
             sleep_time = self.next_write_at - current_time
             if sleep_time > 0.001:  # Only sleep if meaningful (>1ms)
                 time.sleep(sleep_time)
-            
+        '''
         # Write video frame
         self.write_video(frame)
         

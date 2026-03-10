@@ -9,11 +9,12 @@ import numpy as np
 import asyncio
 import threading
 import time
-from typing import Generator, Dict, Optional, Any, Union
+from typing import Generator, Dict, Optional, Any, Union, List
 import logging
 #from services.database_service import DatabaseService
 from services.config_manager import ConfigManager
-from services.hls_manager import HLSManager
+from services.hls_manager import HLSManager  
+from services.frame_buffer import FrameRingBuffer, AudioRingBuffer, ResultsRingBuffer, FrameBufferManager
 
 PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
 if PROJECT_SRC_PATH not in sys.path:
@@ -179,7 +180,18 @@ class StreamDrawingHelper:
         max_pts = max(1, w - graph_x0 - left_pad)
 
         points_items = list(points_dict.items())
+        
+        # Extract background difference from any trajectory (they should all have the same bg_diff)
         bg_diff_int = 0
+        if points_items:
+            # Get bg_diff from the first trajectory that has it
+            for _id, payload in points_items:
+                if isinstance(payload, dict) and 'bg_diff' in payload:
+                    bg_diff_int = int(payload.get('bg_diff', 0))
+                    logger.debug(f"Extracted bg_diff={bg_diff_int} for camera {camera_id} from trajectory {_id}")
+                    break
+            if bg_diff_int == 0:
+                logger.debug(f"No bg_diff found in motion data for camera {camera_id}, using default 0")
         colors = self.TRAJECTORY_COLORS
         n_colors = max(1, len(colors))
 
@@ -365,14 +377,15 @@ class StreamingService:
         self._latest_res_video: Dict[str, Dict[str, Any]] = {}
         self._latest_res_audio: Dict[str, Dict[str, Any]] = {}
         self._fps_stats: Dict[str, Dict[str, float]] = {}
-        # Removed: _background_camera_threads - no longer needed (simplified architecture)
+        # Initialize HLS manager
         self._hls_manager = HLSManager(
             get_recordings_dir=lambda: getattr(self, 'recordings_dir', os.path.abspath('./recordings')),
             get_camera_config=lambda camera_id: self.db.get_camera(camera_id) if hasattr(self, 'db') else None,
             ensure_background_stream=self.start_av_stream,
-            get_latest_video_frame=self.get_latest_video_frame,  # Unified video frame access
-            get_latest_audio_chunk=self.get_latest_audio_chunk,  # Unified audio chunk access 
-            get_latest_results=self.get_latest_results,  # Unified results access
+            get_latest_video_frame_spmc=self.get_latest_video_frame_spmc,  # SPMC video frame access
+            get_latest_audio_chunk_spmc=self.get_latest_audio_chunk_spmc,  # SPMC audio chunk access 
+            get_latest_results_spmc=self.get_latest_results_spmc,  # SPMC results access
+            register_consumer=self.register_consumer,  # Consumer registration
         )
         self._hls_pipe_threads: Dict[str, threading.Thread] = {}
         self._hls_pipe_stop_events: Dict[str, threading.Event] = {}
@@ -398,9 +411,23 @@ class StreamingService:
         self._video_background_threads: Dict[str, threading.Thread] = {}
         self._video_stop_events: Dict[str, threading.Event] = {}
         self._latest_video_frame: Dict[str, bytes] = {}
+        
+        # SPMC Ring Buffers for efficient multi-consumer data distribution
+        self._frame_ring_buffers: Dict[str, FrameRingBuffer] = {}  # camera_id -> frame buffer
+        self._audio_ring_buffers: Dict[str, AudioRingBuffer] = {}  # camera_id -> audio buffer  
+        self._results_ring_buffers: Dict[str, ResultsRingBuffer] = {}  # camera_id -> results buffer
+        self._viz_ring_buffers: Dict[str, FrameRingBuffer] = {}  # camera_id -> visualization buffer (reuse FrameRingBuffer)
+        self._ring_buffer_lock = threading.RLock()  # For buffer management
         self._video_thread_locks: Dict[str, threading.Lock] = {}
 
+        # Current results state for combining video and audio results
+        self._current_video_results: Dict[str, Dict[str, Any]] = {}
+        self._current_audio_results: Dict[str, Dict[str, Any]] = {}
+
         self.max_sequence_number = 2**32 -1  # Prevent unbounded growth of sequence numbers
+        
+        # Initialize frame buffer manager for smooth streaming
+        self._frame_buffer_manager = FrameBufferManager()
 
     def _sequence_has_new_data(self, current_seq, last_seq, max_val=2**32):
         """Check if current sequence indicates new data, handling wrap-around"""
@@ -498,6 +525,167 @@ class StreamingService:
     def get_latest_audio_chunk_analysis(self, camera_id: str) -> Optional[Dict[str, Any]]:
         """Get latest audio analysis from background thread."""
         return self._latest_audio_chunk_analysis.get(camera_id)
+    
+    # SPMC Ring Buffer Management Methods
+    
+    def _initialize_ring_buffers(self, camera_id: str):
+        """Initialize ring buffers for a specific camera."""
+        self._ensure_ring_buffers(camera_id)
+        
+        # Also initialize frame buffer for smooth streaming
+        self._frame_buffer_manager.create_buffer(camera_id, max_size=15, target_fps=30)
+        logger.info(f"Initialized ring buffers and frame buffer for camera {camera_id}")
+    
+    def _ensure_ring_buffers(self, camera_id: str) -> None:
+        """Ensure ring buffers exist for camera"""
+        with self._ring_buffer_lock:
+            if camera_id not in self._frame_ring_buffers:
+                self._frame_ring_buffers[camera_id] = FrameRingBuffer(capacity=50)
+                logger.info(f"Created frame ring buffer for camera {camera_id}")
+            
+            if camera_id not in self._audio_ring_buffers:
+                self._audio_ring_buffers[camera_id] = AudioRingBuffer(capacity=500)  # Increased capacity to prevent dropping
+                logger.info(f"Created audio ring buffer for camera {camera_id}")
+            
+            if camera_id not in self._results_ring_buffers:
+                self._results_ring_buffers[camera_id] = ResultsRingBuffer(capacity=100)
+                logger.info(f"Created results ring buffer for camera {camera_id}")
+            
+            if camera_id not in self._viz_ring_buffers:
+                self._viz_ring_buffers[camera_id] = FrameRingBuffer(capacity=30)  # Smaller capacity for viz frames
+                logger.info(f"Created visualization ring buffer for camera {camera_id}")
+    
+    def register_consumer(self, camera_id: str, consumer_id: str, 
+                         data_types: List[str] = ['frames', 'audio', 'results']) -> bool:
+        """Register consumer for specific data types from camera
+        
+        Args:
+            camera_id: Camera to consume from
+            consumer_id: Unique consumer identifier (e.g., 'recorder_cam1', 'streamer_cam1')
+            data_types: List of data types to consume ['frames', 'audio', 'results', 'viz']
+        """
+        self._ensure_ring_buffers(camera_id)
+        
+        success = True
+        
+        if 'frames' in data_types:
+            success &= self._frame_ring_buffers[camera_id].register_consumer(f"{consumer_id}_frames")
+        
+        if 'audio' in data_types:
+            success &= self._audio_ring_buffers[camera_id].register_consumer(f"{consumer_id}_audio")
+        
+        if 'results' in data_types:
+            success &= self._results_ring_buffers[camera_id].register_consumer(f"{consumer_id}_results")
+        
+        if 'viz' in data_types:
+            success &= self._viz_ring_buffers[camera_id].register_consumer(f"{consumer_id}_viz")
+        
+        logger.info(f"Registered consumer {consumer_id} for camera {camera_id}, data_types: {data_types}")
+        return success
+    
+    def unregister_consumer(self, camera_id: str, consumer_id: str, 
+                           data_types: List[str] = ['frames', 'audio', 'results', 'viz']) -> bool:
+        """Unregister consumer from specific data types"""
+        if camera_id not in self._frame_ring_buffers:
+            return False
+        
+        success = True
+        
+        if 'frames' in data_types:
+            success &= self._frame_ring_buffers[camera_id].unregister_consumer(f"{consumer_id}_frames")
+        
+        if 'audio' in data_types:
+            success &= self._audio_ring_buffers[camera_id].unregister_consumer(f"{consumer_id}_audio")
+        
+        if 'results' in data_types:
+            success &= self._results_ring_buffers[camera_id].unregister_consumer(f"{consumer_id}_results")
+        
+        if 'viz' in data_types:
+            success &= self._viz_ring_buffers[camera_id].unregister_consumer(f"{consumer_id}_viz")
+        
+        logger.info(f"Unregistered consumer {consumer_id} from camera {camera_id}")
+        return success
+    
+    # New SPMC-based access methods (ring buffer versions)
+    
+    def get_latest_video_frame_spmc(self, camera_id: str, consumer_id: str) -> Optional[np.ndarray]:
+        """Get latest video frame for specific consumer using SPMC ring buffer"""
+        if camera_id not in self._frame_ring_buffers:
+            return None
+        
+        consumer_key = f"{consumer_id}_frames"
+        return self._frame_ring_buffers[camera_id].get(consumer_key)
+    
+    def get_latest_audio_chunk_spmc(self, camera_id: str, consumer_id: str) -> Optional[bytes]:
+        """Get latest audio chunk for specific consumer using SPMC ring buffer"""
+        if camera_id not in self._audio_ring_buffers:
+            return None
+        
+        consumer_key = f"{consumer_id}_audio"
+        return self._audio_ring_buffers[camera_id].get(consumer_key)
+    
+    def get_latest_results_spmc(self, camera_id: str, consumer_id: str) -> Optional[Dict[str, Any]]:
+        """Get latest results for specific consumer using SPMC ring buffer"""
+        if camera_id not in self._results_ring_buffers:
+            return None
+        
+        consumer_key = f"{consumer_id}_results"
+        return self._results_ring_buffers[camera_id].get(consumer_key)
+    
+    def get_latest_viz_frame_spmc(self, camera_id: str, consumer_id: str) -> Optional[np.ndarray]:
+        """Get latest visualization frame for specific consumer using SPMC ring buffer"""
+        if camera_id not in self._viz_ring_buffers:
+            return None
+        
+        consumer_key = f"{consumer_id}_viz"
+        return self._viz_ring_buffers[camera_id].get(consumer_key)
+    
+    def peek_latest_video_frame_spmc(self, camera_id: str, consumer_id: str) -> Optional[np.ndarray]:
+        """Peek at latest video frame without consuming it"""
+        if camera_id not in self._frame_ring_buffers:
+            return None
+        
+        consumer_key = f"{consumer_id}_frames"
+        return self._frame_ring_buffers[camera_id].peek(consumer_key)
+    
+    def get_ring_buffer_stats(self, camera_id: str) -> Dict[str, Any]:
+        """Get ring buffer statistics for debugging and monitoring"""
+        if camera_id not in self._frame_ring_buffers:
+            return {}
+        
+        return {
+            'frames': self._frame_ring_buffers[camera_id].get_stats(),
+            'audio': self._audio_ring_buffers[camera_id].get_stats(),
+            'results': self._results_ring_buffers[camera_id].get_stats(),
+            'viz': self._viz_ring_buffers[camera_id].get_stats()
+        }
+    
+    def get_spmc_migration_status(self) -> Dict[str, Any]:
+        """Get status of SPMC ring buffer migration for monitoring and debugging"""
+        status = {
+            'ring_buffers_initialized': {},
+            'producer_publishing': True,
+            'legacy_methods_active': True,
+            'migration_phase': 'parallel_operation',
+            'total_cameras': len(self._camera_streams)
+        }
+        
+        for camera_id in self._camera_streams.keys():
+            status['ring_buffers_initialized'][camera_id] = {
+                'frames': camera_id in self._frame_ring_buffers,
+                'audio': camera_id in self._audio_ring_buffers,
+                'results': camera_id in self._results_ring_buffers,
+                'viz': camera_id in self._viz_ring_buffers
+            }
+        
+        return status
+    
+    def get_frame_buffer_stats(self) -> Dict[str, Any]:
+        """Get frame buffer statistics for monitoring and debugging"""
+        return {
+            'all_camera_stats': self._frame_buffer_manager.get_all_stats(),
+            'health_check': self._frame_buffer_manager.health_check()
+        }
 
 
 
@@ -761,11 +949,22 @@ class StreamingService:
                         'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
                         'freq': float(analysis.get('peak_frequency_mean', 0.0) or 0.0),
                     }
+                    
+                    # Update current audio results and publish combined results to ring buffer
+                    if camera_id in self._results_ring_buffers:
+                        self._current_audio_results[camera_id] = self._latest_res_audio[camera_id]
+                        video_res = self._current_video_results.get(camera_id, {})
+                        audio_res = self._current_audio_results[camera_id]
+                        self._results_ring_buffers[camera_id].put(video_res, audio_res)
                 
                 # Store latest chunk with sequence number (thread-safe)
                 with audio_lock:
                     self._latest_audio_chunk[camera_id] = chunk
                     self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
+                    
+                    # Publish to ring buffer for SPMC consumers
+                    if camera_id in self._audio_ring_buffers:
+                        self._audio_ring_buffers[camera_id].put(chunk)
             
             logger.info(f"Audio Thread:: Audio background thread finished for camera {camera_id}, Stop event: {stop_event.is_set()}, Audio stream opened: {cap.is_audio_stream_opened()}")
             # Cleanup
@@ -944,6 +1143,10 @@ class StreamingService:
                     self._latest_frame_seq[camera_id] = (self._latest_frame_seq.get(camera_id, 0) + 1) % self.max_sequence_number
                     self._stream_frame_index[camera_id] = frame_index
                     frame_index += 1
+                    
+                    # Publish to ring buffer for SPMC consumers
+                    if camera_id in self._frame_ring_buffers:
+                        self._frame_ring_buffers[camera_id].put(frame)
                 
                 # Resize frame for streaming performance
                 stream_frame = self._resize_frame_for_streaming(frame)
@@ -962,6 +1165,17 @@ class StreamingService:
                     with stream_lock:
                         self._latest_viz[camera_id] = viz_frame
                         self._latest_res_video[camera_id] = res
+                        
+                        # Publish viz frame to ring buffer for SPMC consumers
+                        if camera_id in self._viz_ring_buffers:
+                            self._viz_ring_buffers[camera_id].put(viz_frame)
+                        
+                        # Update current video results and publish combined results to ring buffer
+                        if camera_id in self._results_ring_buffers:
+                            self._current_video_results[camera_id] = res
+                            video_res = self._current_video_results[camera_id]
+                            audio_res = self._current_audio_results.get(camera_id, {})
+                            self._results_ring_buffers[camera_id].put(video_res, audio_res)
                         self._latest_pts_payload[camera_id] = pts_payload
                         self._latest_hls_frames[camera_id] = stream_frame
                 else:
@@ -978,6 +1192,11 @@ class StreamingService:
                 # Add FPS overlay
                 frame_fps = self._update_loop_fps(f"{camera_id}:primary")
                 stream_frame = self._draw_fps_overlay(stream_frame, frame_fps)
+                
+                # Add frame to buffer for smooth streaming
+                frame_buffer = self._frame_buffer_manager.get_buffer(camera_id)
+                if frame_buffer:
+                    frame_buffer.add_frame(stream_frame)
                 
                 # Convert to bytes and store (thread-safe)
                 frame_bytes = self.frame_to_bytes(stream_frame)
@@ -1020,6 +1239,13 @@ class StreamingService:
         self._latest_video_frame.pop(camera_id, None)
         self.active_streams.pop(camera_id, None)
         
+        # Clean up frame buffer
+        self._frame_buffer_manager.remove_buffer(camera_id)
+        
+        # Clean up results tracking
+        self._current_video_results.pop(camera_id, None)
+        self._current_audio_results.pop(camera_id, None)
+        
         logger.info(f"Video Thread:: Stopped video background thread for camera {camera_id}")
         return True
 
@@ -1045,6 +1271,8 @@ class StreamingService:
                 logger.error(f"Video Stream:: Failed to start background thread for camera {camera_id}")
                 yield self.generate_failure_frame("Failed to start video processing")
                 return
+            # Give the thread a moment to start producing frames
+            time.sleep(0.5)
         
         logger.info(f"Video Stream:: Starting video stream endpoint for camera {camera_id} with token {stream_token}")
         
@@ -1086,6 +1314,22 @@ class StreamingService:
                 if consecutive_empty >= max_empty:
                     logger.warning(f"Video Stream:: No video data for camera {camera_id}, ending stream")
                     break
+                
+                # Try to get frame from frame buffer before showing placeholder
+                frame_buffer = self._frame_buffer_manager.get_buffer(camera_id)
+                if frame_buffer:
+                    buffer_frame_bytes = frame_buffer.get_latest_frame_bytes(jpeg_quality=int(getattr(self, 'jpeg_quality', 70) or 70))
+                    if buffer_frame_bytes:
+                        # Convert buffer bytes to proper streaming format
+                        if not buffer_frame_bytes.startswith(b'--frame'):
+                            # Frame buffer returns raw JPEG, need to add streaming headers
+                            buffer_frame_bytes = (b'--frame\r\n'
+                                                 b'Content-Type: image/jpeg\r\n\r\n' + 
+                                                 buffer_frame_bytes + b'\r\n')
+                        yield buffer_frame_bytes
+                        consecutive_empty = 0
+                        continue
+                
                 # Only yield placeholder when no frame has been captured yet
                 yield self.generate_failure_frame("Waiting for frames...")
                 

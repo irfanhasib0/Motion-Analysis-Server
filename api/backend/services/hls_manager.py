@@ -76,16 +76,18 @@ class HLSManager:
         get_recordings_dir: Callable[[], str],
         get_camera_config: Callable[[str], Optional[dict]],
         ensure_background_stream: Callable[[str], None],
-        get_latest_video_frame: Callable[[str, int], tuple],  # Returns (frame, sequence) or (None, last_seq)
-        get_latest_audio_chunk: Callable[[str, Optional[int]], Any] = None,  # Returns chunk or (chunk, seq)
-        get_latest_results: Callable[[str], dict] = None,  # Returns {'video': {}, 'audio': {}}
+        get_latest_video_frame_spmc: Callable[[str, str], Optional[Any]],  # (camera_id, consumer_id) -> frame
+        get_latest_audio_chunk_spmc: Callable[[str, str], Optional[bytes]] = None,  # (camera_id, consumer_id) -> chunk
+        get_latest_results_spmc: Callable[[str, str], Optional[dict]] = None,  # (camera_id, consumer_id) -> results
+        register_consumer: Callable[[str, str, list], bool] = None,  # (camera_id, consumer_id, data_types) -> success
     ):
         self._get_recordings_dir = get_recordings_dir
         self._get_camera_config = get_camera_config
         self._ensure_background_stream = ensure_background_stream
-        self._get_latest_video_frame = get_latest_video_frame
-        self._get_latest_audio_chunk = get_latest_audio_chunk
-        self._get_latest_results = get_latest_results
+        self._get_latest_video_frame_spmc = get_latest_video_frame_spmc
+        self._get_latest_audio_chunk_spmc = get_latest_audio_chunk_spmc
+        self._get_latest_results_spmc = get_latest_results_spmc
+        self._register_consumer = register_consumer
 
         self.active_streams: Dict[str, Dict[str, Any]] = {}
         self.last_errors: Dict[str, str] = {}
@@ -93,9 +95,8 @@ class HLSManager:
         self._pipe_stop_events: Dict[str, threading.Event] = {}
         self._audio_pipes: Dict[str, Any] = {}  # Audio pipes for shared chunks
         
-        # Sequence tracking for unified packet access
-        self._last_video_seq: Dict[str, int] = {}
-        self._last_audio_seq: Dict[str, int] = {}
+        # Consumer ID for SPMC access
+        self._consumer_id_base = "hls_manager"
 
     def _hls_root_dir(self) -> str:
         path = os.path.join(self._get_recordings_dir(), 'hls')
@@ -144,7 +145,7 @@ class HLSManager:
 
         has_hls_audio = False
         if bool(db_camera.get('audio_enabled', False)):
-            if use_shared_audio and self._get_latest_audio_chunk:
+            if use_shared_audio and self._get_latest_audio_chunk_spmc:
                 # Use shared audio chunks from background thread
                 sample_rate = AudioRecordingUtils._resolve_sample_rate(db_camera)
                 command += [
@@ -216,16 +217,15 @@ class HLSManager:
         audio_pipe = self._audio_pipes.get(camera_id) if audio_enabled else None
 
         def _writer():
+            consumer_id = f"{self._consumer_id_base}_{camera_id}"
             next_tick = time.time()
-            last_video_seq = self._last_video_seq.get(camera_id, -1)
-            last_audio_seq = self._last_audio_seq.get(camera_id, -1)
             
             while not stop_event.is_set():
                 if process.poll() is not None or process.stdin is None:
                     break
 
-                # Write video frame using unified packet access
-                frame, last_video_seq = self._get_latest_video_frame(camera_id, last_video_seq)
+                # Write video frame using SPMC
+                frame = self._get_latest_video_frame_spmc(camera_id, f"{self._consumer_id_base}_{camera_id}")
                 if frame is None:
                     time.sleep(min(0.02, frame_interval))
                     continue
@@ -238,18 +238,12 @@ class HLSManager:
                 except Exception:
                     break
 
-                # Write audio chunk if available and enabled using unified packet access
-                if audio_enabled and audio_pipe and self._get_latest_audio_chunk:
+                # Write audio chunk if available and enabled using SPMC
+                if audio_enabled and audio_pipe and self._get_latest_audio_chunk_spmc:
                     try:
-                        audio_result = self._get_latest_audio_chunk(camera_id, last_audio_seq)
-                        if audio_result:
-                            if isinstance(audio_result, tuple):
-                                audio_chunk, last_audio_seq = audio_result
-                            else:
-                                audio_chunk = audio_result
-                            
-                            if audio_chunk and len(audio_chunk) > 0:
-                                audio_pipe.write(audio_chunk)
+                        audio_chunk = self._get_latest_audio_chunk_spmc(camera_id, f"{self._consumer_id_base}_{camera_id}")
+                        if audio_chunk and len(audio_chunk) > 0:
+                            audio_pipe.write(audio_chunk)
                     except Exception as e:
                                 logger.debug(f"Audio pipe write failed for {camera_id}: {e}")
 
@@ -260,10 +254,7 @@ class HLSManager:
                 else:
                     next_tick = time.time()
             
-            # Update sequence tracking before cleanup
-            self._last_video_seq[camera_id] = last_video_seq
-            self._last_audio_seq[camera_id] = last_audio_seq
-
+            # Cleanup pipes
             try:
                 if process.stdin:
                     process.stdin.close()
@@ -288,6 +279,14 @@ class HLSManager:
         db_camera = self._get_camera_config(camera_id)
         if not db_camera:
             raise ValueError(f'Camera not found: {camera_id}')
+
+        # Register as consumer for this camera
+        consumer_id = f"{self._consumer_id_base}_{camera_id}"
+        if self._register_consumer:
+            data_types = ['frames']
+            if db_camera.get('audio_enabled', False) and self._get_latest_audio_chunk_spmc:
+                data_types.append('audio')
+            self._register_consumer(camera_id, consumer_id, data_types)
 
         existing = self.active_streams.get(camera_id)
         if existing:
@@ -316,7 +315,7 @@ class HLSManager:
         use_shared_audio = False
         
         # Temporarily disable shared audio to debug the 404 issue
-        # if bool(db_camera.get('audio_enabled', False)) and self._get_latest_audio_chunk:
+        # if bool(db_camera.get('audio_enabled', False)) and self._get_latest_audio_chunk_spmc:
         if False:  # Temporarily disabled for debugging
             try:
                 audio_r_fd, audio_w_fd = os.pipe()

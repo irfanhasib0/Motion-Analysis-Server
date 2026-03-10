@@ -949,6 +949,9 @@ class CameraService(StreamingService):
             camera_started = True
             self._camera_streams[camera_id] = cap
             self._camera_trackers[camera_id] = tracker
+            
+            # Initialize ring buffers for SPMC data distribution
+            self._initialize_ring_buffers(camera_id)
         else:
             logger.warning(f"Camera {camera_id} opened but failed to read frames")
             cap.release_video()
