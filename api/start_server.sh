@@ -24,6 +24,7 @@ fi
 echo "Building frontend..."
 cd "$FRONTEND_DIR"
 if command -v npm >/dev/null 2>&1; then
+    npm install
     npm run build
 else
     echo "Warning: 'npm' not found. Skipping frontend build step."
