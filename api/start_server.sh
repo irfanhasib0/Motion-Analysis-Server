@@ -45,6 +45,7 @@ LOG_FILE="$API_DIR/nvr.log"
 LOGROTATE_CONF="/etc/logrotate.d/nvr"
 RUN_USER="${USER:-$(id -un)}"
 RUN_GROUP="${GROUP:-$(id -gn)}"
+START_SCRIPT_NAME="start_server"
 
 if command -v sudo >/dev/null 2>&1; then
     SUDO_CMD="sudo"
@@ -76,11 +77,11 @@ else
 fi
 
 echo "Stopping existing backend process (if any)..."
-pkill -f "python3 start_server.py" || true
+pgrep -f "$START_SCRIPT_NAME" || true
 
 echo "Starting backend and writing logs to: $LOG_FILE"
 cd "$BACKEND_DIR"
-nohup python3 start_server.py >> "$LOG_FILE" 2>&1 &
+nohup python3 "$START_SCRIPT_NAME".py >> "$LOG_FILE" 2>&1 &
 
 echo "Installing daily logrotate config at $LOGROTATE_CONF"
 if [ -n "$SUDO_CMD" ]; then
