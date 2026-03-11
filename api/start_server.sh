@@ -1,6 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Parse command line arguments
+DO_INSTALL=false
+DO_BUILD=false
+
+show_usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo "Options:"
+    echo "  -i, --install       Install npm dependencies"
+    echo "  -b, --build         Build frontend"
+    echo "  -h, --help          Show this help message"
+    echo ""
+    echo "By default, neither install nor build steps are performed."
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -i|--install)
+            DO_INSTALL=true
+            shift
+            ;;
+        -b|--build)
+            DO_BUILD=true
+            shift
+            ;;
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
 # Root of the api folder (this script lives in api/)
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$API_DIR/backend"
@@ -21,13 +57,22 @@ if [ ! -d "$FRONTEND_DIR" ] || [ ! -d "$BACKEND_DIR" ]; then
     exit 1
 fi
 
-echo "Building frontend..."
-cd "$FRONTEND_DIR"
-if command -v npm >/dev/null 2>&1; then
-    npm install
-    npm run build
+if [ "$DO_INSTALL" = true ] || [ "$DO_BUILD" = true ]; then
+    cd "$FRONTEND_DIR"
+    if command -v npm >/dev/null 2>&1; then
+        if [ "$DO_INSTALL" = true ]; then
+            echo "Installing npm dependencies..."
+            npm install
+        fi
+        if [ "$DO_BUILD" = true ]; then
+            echo "Building frontend..."
+            npm run build
+        fi
+    else
+        echo "Warning: 'npm' not found. Cannot perform install/build steps."
+    fi
 else
-    echo "Warning: 'npm' not found. Skipping frontend build step."
+    echo "Skipping frontend install and build (use -i and/or -b flags to enable)..."
 fi
 
 echo "Stopping existing backend process (if any)..."
