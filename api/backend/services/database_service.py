@@ -52,6 +52,23 @@ class DatabaseService:
                 conn.execute('ALTER TABLE cameras ADD COLUMN camera_type TEXT DEFAULT "webcam"')
                 logger.info("Added camera_type column to existing cameras table")
             
+            # Ensure audio-related columns exist (migration for audio settings)
+            if "audio_enabled" not in columns:
+                conn.execute('ALTER TABLE cameras ADD COLUMN audio_enabled BOOLEAN DEFAULT 0')
+                logger.info("Added audio_enabled column to existing cameras table")
+            if "audio_source" not in columns:
+                conn.execute('ALTER TABLE cameras ADD COLUMN audio_source TEXT')
+                logger.info("Added audio_source column to existing cameras table")
+            if "audio_input_format" not in columns:
+                conn.execute('ALTER TABLE cameras ADD COLUMN audio_input_format TEXT')
+                logger.info("Added audio_input_format column to existing cameras table")
+            if "audio_sample_rate" not in columns:
+                conn.execute('ALTER TABLE cameras ADD COLUMN audio_sample_rate INTEGER DEFAULT 16000')
+                logger.info("Added audio_sample_rate column to existing cameras table")
+            if "audio_chunk_size" not in columns:
+                conn.execute('ALTER TABLE cameras ADD COLUMN audio_chunk_size INTEGER DEFAULT 512')
+                logger.info("Added audio_chunk_size column to existing cameras table")
+            
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS recordings (
                     id TEXT PRIMARY KEY,
@@ -152,8 +169,9 @@ class DatabaseService:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO cameras (id, name, source, camera_type, fps, resolution, status, processing_params)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO cameras (id, name, source, camera_type, fps, resolution, status, processing_params,
+                                   audio_enabled, audio_source, audio_input_format, audio_sample_rate, audio_chunk_size)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 camera_data['id'],
                 camera_data['name'],
@@ -162,7 +180,12 @@ class DatabaseService:
                 camera_data.get('fps', 30),
                 camera_data.get('resolution', '1920x1080'),
                 camera_data.get('status', 'offline'),
-                json.dumps(camera_data.get('processing_params', {}))
+                json.dumps(camera_data.get('processing_params', {})),
+                1 if camera_data.get('audio_enabled', False) else 0,
+                camera_data.get('audio_source'),
+                camera_data.get('audio_input_format'),
+                camera_data.get('audio_sample_rate', 16000),
+                camera_data.get('audio_chunk_size', 512)
             ))
             
             conn.commit()

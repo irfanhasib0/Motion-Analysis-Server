@@ -3,15 +3,15 @@ cameras:
   name: cam-1
   source: rtsp://admin:L2CD8412@192.168.0.103:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   camera_type: rtsp
-  fps: 5
+  fps: 15
   resolution: 320x240
   status: offline
   processing_active: false
   processing_type: null
   processing_params: {}
   created_at: '2026-02-12T17:34:42.774322'
-  updated_at: '2026-03-04T10:32:02.031658'
-  audio_enabled: true
+  updated_at: '2026-03-10T20:02:50.244879'
+  audio_enabled: false
   audio_source: null
   audio_input_format: null
   audio_sample_rate: 16000
@@ -20,15 +20,15 @@ cameras:
   name: cam-2
   source: '0'
   camera_type: webcam
-  fps: 30
+  fps: 15
   resolution: 640x480
   status: offline
   processing_active: false
   processing_type: null
   processing_params: {}
   created_at: '2026-02-12T18:36:48.156743'
-  updated_at: '2026-03-09T14:16:23.843673'
-  audio_enabled: true
+  updated_at: '2026-03-10T20:02:50.302673'
+  audio_enabled: false
   audio_source: default
   audio_input_format: pulse
   audio_sample_rate: 16000
@@ -37,14 +37,14 @@ cameras:
   name: cam3
   source: rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   camera_type: rtsp
-  fps: 10
+  fps: 15
   resolution: 640x480
-  status: online
+  status: offline
   processing_active: false
   processing_type: null
   processing_params: {}
   created_at: '2026-02-23T22:57:03.300029'
-  updated_at: '2026-03-10T01:58:35.782115'
+  updated_at: '2026-03-10T20:20:18.041675'
   audio_enabled: true
   audio_source: rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   audio_input_format: rtsp

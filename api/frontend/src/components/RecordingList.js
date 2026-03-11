@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Download, Trash2, Clock, HardDrive, Camera, Search } from 'lucide-react';
+import { Play, Download, Trash2, Clock, HardDrive, Camera, Search, Archive, Calendar } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../api';
 
@@ -12,6 +12,18 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [storageInfo, setStorageInfo] = useState(null);
   const [playbackMode, setPlaybackMode] = useState(api.getRecordingPlaybackMode());
+  
+  // Archive functionality state
+  const [archiveSettings, setArchiveSettings] = useState({
+    camera_ids: [],
+    date_from: '',
+    date_to: '',
+    min_duration: '',
+    delete_after: false
+  });
+  const [isArchiving, setIsArchiving] = useState(false);
+  const [archives, setArchives] = useState([]);
+  const [loadedArchives, setLoadedArchives] = useState(new Set());
 
   const loadStorageInfo = async () => {
     try {
@@ -22,8 +34,18 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     }
   };
 
+  const loadArchives = async () => {
+    try {
+      const response = await api.get('/recordings/archive/list');
+      setArchives(response.data.archives || []);
+    } catch (error) {
+      console.error('Failed to load archives:', error);
+    }
+  };
+
   useEffect(() => {
     loadStorageInfo();
+    loadArchives();
   }, [recordings.length]);
 
   const handleDeleteRecording = async (recordingId) => {
@@ -48,6 +70,64 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleExportArchive = async () => {
+    if (!window.confirm('Export selected recordings to archive? This operation cannot be undone.')) {
+      return;
+    }
+    
+    setIsArchiving(true);
+    try {
+      const payload = {
+        ...archiveSettings,
+        camera_ids: archiveSettings.camera_ids.length > 0 ? archiveSettings.camera_ids : null,
+        min_duration: archiveSettings.min_duration ? parseFloat(archiveSettings.min_duration) : null
+      };
+      
+      const response = await api.post('/recordings/archive/export', payload);
+      toast.success(`Archive exported: ${response.data.archive_path}`);
+      
+      if (archiveSettings.delete_after) {
+        setRecordings(prev => prev.filter(r => !response.data.exported_ids.includes(r.id)));
+      }
+      
+      loadArchives();
+    } catch (error) {
+      toast.error('Failed to export archive: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
+  const handleLoadArchive = async (archivePath) => {
+    try {
+      const response = await api.post('/recordings/archive/load', { archive_path: archivePath });
+      setRecordings(prev => [...prev, ...response.data.recordings]);
+      setLoadedArchives(prev => new Set([...prev, archivePath]));
+      toast.success(`Loaded ${response.data.loaded_count} recordings from archive`);
+    } catch (error) {
+      toast.error('Failed to load archive: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
+  const handleUnloadArchive = async (archivePath) => {
+    if (!window.confirm('Remove archive recordings from database? Archive files will remain on disk.')) {
+      return;
+    }
+    
+    try {
+      const response = await api.post('/recordings/archive/unload', { archive_path: archivePath });
+      setRecordings(prev => prev.filter(r => !r.filename.includes(archivePath.split('/').pop())));
+      setLoadedArchives(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(archivePath);
+        return newSet;
+      });
+      toast.success(`Unloaded ${response.data.unloaded_count} recordings from database`);
+    } catch (error) {
+      toast.error('Failed to unload archive: ' + (error.response?.data?.detail || error.message));
+    }
   };
 
   const formatBytes = (bytes) => {
@@ -301,6 +381,152 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Archive Management */}
+        <div className="card" style={{ marginBottom: '24px', backgroundColor: '#f8f9fa' }}>
+          <h3 style={{ marginBottom: '16px', color: '#004d40', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Archive size={20} />
+            Archive Management
+          </h3>
+          
+          {/* Archive Export */}
+          <div style={{ marginBottom: '20px', paddingBottom: '20px', borderBottom: '1px solid #e0e0e0' }}>
+            <h4 style={{ marginBottom: '12px', fontSize: '16px' }}>Export Archive</h4>
+            <div className="grid grid-4" style={{ marginBottom: '16px' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Camera Selection</label>
+                <select 
+                  className="form-control form-select"
+                  value={archiveSettings.camera_ids.length === 0 ? 'all' : archiveSettings.camera_ids.length === 1 ? archiveSettings.camera_ids[0] : 'multiple'}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (value === 'all') {
+                      setArchiveSettings(prev => ({ ...prev, camera_ids: [] }));
+                    } else {
+                      setArchiveSettings(prev => ({ ...prev, camera_ids: [value] }));
+                    }
+                  }}
+                >
+                  <option value="all">All Cameras</option>
+                  {cameras.map(camera => (
+                    <option key={camera.id} value={camera.id}>
+                      {camera.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">From Date</label>
+                <input
+                  type="date"
+                  className="form-control"
+                  value={archiveSettings.date_from}
+                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, date_from: e.target.value }))}
+                />
+              </div>
+              
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">To Date</label>
+                <input
+                  type="date"
+                  className="form-control"
+                  value={archiveSettings.date_to}
+                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, date_to: e.target.value }))}
+                />
+              </div>
+              
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Min Duration (seconds)</label>
+                <input
+                  type="number"
+                  className="form-control"
+                  placeholder="Optional"
+                  value={archiveSettings.min_duration}
+                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, min_duration: e.target.value }))}
+                />
+              </div>
+            </div>
+            
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <input
+                  type="checkbox"
+                  checked={archiveSettings.delete_after}
+                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, delete_after: e.target.checked }))}
+                />
+                Delete originals after export
+              </label>
+              
+              <button 
+                className="btn btn-primary"
+                onClick={handleExportArchive}
+                disabled={isArchiving}
+                style={{ marginLeft: 'auto' }}
+              >
+                <Archive size={14} />
+                {isArchiving ? 'Exporting...' : 'Export Archive'}
+              </button>
+            </div>
+          </div>
+          
+          {/* Archive List */}
+          <div>
+            <h4 style={{ marginBottom: '12px', fontSize: '16px' }}>Available Archives ({archives.length})</h4>
+            {archives.length === 0 ? (
+              <p style={{ color: '#666', fontStyle: 'italic' }}>No archives found</p>
+            ) : (
+              <div style={{ display: 'grid', gap: '8px' }}>
+                {archives.map(archive => (
+                  <div key={archive} style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'space-between',
+                    padding: '12px', 
+                    border: '1px solid #e0e0e0', 
+                    borderRadius: '4px',
+                    backgroundColor: '#fff'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Calendar size={16} />
+                      <span>{archive}</span>
+                      {loadedArchives.has(archive) && (
+                        <span style={{ 
+                          fontSize: '12px', 
+                          backgroundColor: '#d4edda', 
+                          color: '#155724', 
+                          padding: '2px 6px', 
+                          borderRadius: '3px' 
+                        }}>
+                          Loaded
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      {!loadedArchives.has(archive) ? (
+                        <button 
+                          className="btn btn-secondary"
+                          onClick={() => handleLoadArchive(archive)}
+                          style={{ fontSize: '12px', padding: '4px 8px' }}
+                        >
+                          Load
+                        </button>
+                      ) : (
+                        <button 
+                          className="btn btn-secondary"
+                          onClick={() => handleUnloadArchive(archive)}
+                          style={{ fontSize: '12px', padding: '4px 8px' }}
+                        >
+                          Unload
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

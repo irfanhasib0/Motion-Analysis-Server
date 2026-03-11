@@ -156,11 +156,6 @@ export const api = {
   },
   getProcessingStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/processing_stream`),
   getResultStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/result_stream`),
-  // Processing endpoints
-  getProcessingTypes: () => apiClient.get('/processing/types'),
-  startProcessing: (cameraId, processorType, params = {}) => 
-    apiClient.post(`/cameras/${cameraId}/processing/${processorType}/start`, params),
-  stopProcessing: (cameraId) => apiClient.post(`/cameras/${cameraId}/processing/stop`),
   
   // System endpoints
   getSystemInfo: () => apiClient.get('/system/info'),

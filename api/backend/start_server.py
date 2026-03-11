@@ -22,6 +22,10 @@ from services.dashboard_service import DashboardService
 from models.camera import Camera, CameraCreate, CameraUpdate
 from models.recording import Recording, RecordingCreate
 
+# =====================================================================
+# CONFIGURATION AND INITIALIZATION
+# =====================================================================
+
 user = os.popen('uname -n').read().strip()
 if user == 'irfan-linux':
     configs = 'pc'
@@ -112,6 +116,7 @@ class RecordingMetaUpdate(BaseModel):
 class ArchiveExportRequest(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
+    camera_ids: Optional[List[str]] = None
     min_vel: Optional[float] = None
     min_diff: Optional[float] = None
     min_duration: Optional[float] = None
@@ -165,6 +170,14 @@ def verify_access_token(token: str) -> bool:
 async def legacy_auth_header_valid(request: Request) -> bool:
     password_header = await api_key_scheme(request)
     return bool(password_header and password_header == AUTH_PASSWORD)
+
+# =====================================================================
+# MIDDLEWARE AND AUTHENTICATION
+# =====================================================================
+
+# =====================================================================
+# MIDDLEWARE AND AUTHENTICATION
+# =====================================================================
 
 # CORS middleware
 app.add_middleware(
@@ -280,7 +293,9 @@ async def broadcast_message(message: dict):
         except:
             pass
 
-# Camera management endpoints
+# =====================================================================
+# AUTHENTICATION ENDPOINTS
+# =====================================================================
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest):
     if not AUTH_ENABLED:
@@ -301,6 +316,9 @@ async def login(payload: LoginRequest):
         "auth_enabled": True,
     }
 
+# =====================================================================
+# CAMERA MANAGEMENT ENDPOINTS
+# =====================================================================
 
 @app.get("/api/cameras", response_model=List[Camera])
 async def get_cameras():
@@ -359,7 +377,6 @@ async def start_camera(camera_id: str):
         return {"message": "Camera and streaming started successfully on retry"}
     else:
         raise HTTPException(status_code=400, detail="Failed to start camera - camera may be unavailable or in use")
-    
 
 @app.post("/api/cameras/{camera_id}/stop")
 async def stop_camera(camera_id: str):
@@ -368,7 +385,9 @@ async def stop_camera(camera_id: str):
     #await broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
     return {"message": "Camera and all streams stopped successfully"}
 
-# Recording management endpoints
+# =====================================================================
+# RECORDING MANAGEMENT ENDPOINTS
+# =====================================================================
 @app.post("/api/cameras/{camera_id}/start-recording")
 async def start_recording(camera_id: str, background_tasks: BackgroundTasks):
     """Start recording from a camera"""
@@ -400,6 +419,10 @@ async def stop_recording(camera_id: str):
 async def get_recordings(camera_id: Optional[str] = None):
     """Get all recordings, optionally filtered by camera"""
     return camera_service.get_recordings(camera_id)
+
+# =====================================================================
+# SYSTEM CONFIGURATION ENDPOINTS
+# =====================================================================
 
 @app.get("/api/system/info")
 async def get_system_info():
@@ -512,6 +535,10 @@ async def set_live_stream_mode(payload: LiveStreamModeRequest):
         "supported_modes": ["mjpeg", "hls"],
     }
 
+# =====================================================================
+# RECORDING STORAGE AND ARCHIVE ENDPOINTS
+# =====================================================================
+
 @app.get("/api/recordings/storage")
 async def get_recording_storage():
     """Get recording storage stats and enforce low-space cleanup policy."""
@@ -562,7 +589,6 @@ async def update_recording_meta(recording_id: str, request: RecordingMetaUpdate)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Archive endpoints
 @app.post("/api/recordings/archive/export")
 async def export_archive(request: ArchiveExportRequest):
     """Export filtered completed recordings to a timestamped archive folder with recordings.yaml."""
@@ -570,6 +596,7 @@ async def export_archive(request: ArchiveExportRequest):
         result = camera_service.recording_manager.export_archive(
             date_from=request.date_from,
             date_to=request.date_to,
+            camera_ids=request.camera_ids,
             min_vel=request.min_vel,
             min_diff=request.min_diff,
             min_duration=request.min_duration,
@@ -624,7 +651,9 @@ async def unload_archive(request: ArchivePathRequest):
         logger.error(f"Failed to unload archive: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Video streaming endpoints
+# =====================================================================
+# LIVE STREAMING ENDPOINTS
+# =====================================================================
 @app.get("/api/cameras/{camera_id}/stream")
 async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
     """Get live stream entrypoint; supports MJPEG (default) and HLS descriptor mode."""
@@ -634,14 +663,14 @@ async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
             camera_service.start_av_stream(camera_id)
         except Exception as worker_error:
             logger.warning(f"Failed to ensure background camera stream for {camera_id}: {worker_error}")
-        camera_service.start_hls_stream(camera_id)
+        camera_service._hls_manager.start_stream(camera_id)
         return {
             "mode": "hls",
             "manifest_url": f"/api/cameras/{camera_id}/hls/index.m3u8",
         }
     elif selected_mode == "mjpeg":
         # MJPEG mode requested: stop any HLS process for this camera first
-        camera_service.stop_hls_stream(camera_id)
+        camera_service._hls_manager.stop_stream(camera_id)
         return StreamingResponse(
             camera_service.generate_video_stream_endpoint(camera_id),
             media_type="multipart/x-mixed-replace; boundary=frame",
@@ -660,7 +689,7 @@ async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
 async def get_camera_hls_manifest(camera_id: str, request: Request):
     """Serve HLS manifest for a live camera stream."""
     try:
-        manifest_path = camera_service.get_hls_manifest_path(camera_id)
+        manifest_path = camera_service._hls_manager.get_manifest_path(camera_id)
         token = request.query_params.get("access_token")
 
         if not token:
@@ -705,7 +734,7 @@ async def get_camera_hls_manifest(camera_id: str, request: Request):
 async def get_camera_hls_segment(camera_id: str, segment_name: str):
     """Serve HLS segment for a live camera stream."""
     try:
-        segment_path = camera_service.get_hls_segment_path(camera_id, segment_name)
+        segment_path = camera_service._hls_manager.get_segment_path(camera_id, segment_name)
         media_type = "video/mp2t" if segment_name.endswith(".ts") else "application/octet-stream"
         return FileResponse(
             segment_path,
@@ -723,14 +752,18 @@ async def get_camera_hls_segment(camera_id: str, segment_name: str):
 @app.post("/api/cameras/{camera_id}/hls/stop")
 async def stop_camera_hls_stream(camera_id: str):
     """Stop HLS process for a camera."""
-    camera_service.stop_hls_stream(camera_id)
+    camera_service._hls_manager.stop_stream(camera_id)
     return {"message": "Camera HLS stream stopped successfully"}
+
+# =====================================================================
+# PROCESSING AND ANALYSIS ENDPOINTS
+# =====================================================================
 
 @app.get("/api/cameras/{camera_id}/processing_stream")
 async def get_processing_stream(camera_id: str):
     """Get processed video stream from camera"""
     return StreamingResponse(
-        camera_service.generate_processed_video_stream(camera_id),
+        camera_service.generate_processing_stream_endpoint(camera_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -759,24 +792,6 @@ async def get_camera_audio_stream(camera_id: str, request: Request, fmt: Optiona
             "X-Accel-Buffering": "no",
         },
     )
-
-@app.post("/api/cameras/{camera_id}/video_stream/start")
-async def start_camera_video_stream(camera_id: str):
-    """Start video background processing thread for a camera.
-    
-    NOTE: This endpoint is redundant - the main /cameras/{id}/start endpoint 
-    now starts both video and audio streams. Maintained for backward compatibility.
-    """
-    started = await asyncio.to_thread(camera_service.start_video_stream, camera_id)
-    if not started:
-        logger.warning(f"Video stream for camera {camera_id} is already running or failed to start")
-    return {"started": True, "camera_id": camera_id}
-
-@app.post("/api/cameras/{camera_id}/video_stream/stop")
-async def stop_camera_video_stream(camera_id: str):
-    """Stop video background processing thread for a camera."""
-    stopped = await asyncio.to_thread(camera_service.stop_video_stream, camera_id)
-    return {"stopped": stopped, "camera_id": camera_id}
 
 @app.post("/api/cameras/{camera_id}/audio_stream/start")
 async def start_camera_audio_stream(camera_id: str, fmt: Optional[str] = 'wav'):
@@ -849,7 +864,6 @@ async def get_camera_sensitivity(camera_id: str):
 
 
 @app.put("/api/cameras/{camera_id}/sensitivity")
-@app.post("/api/cameras/{camera_id}/sensitivity")
 async def set_camera_sensitivity(camera_id: str, payload: CameraSensitivityRequest):
     try:
         db_camera = camera_service.db.get_camera(camera_id)
@@ -878,6 +892,9 @@ async def set_camera_sensitivity(camera_id: str, payload: CameraSensitivityReque
         logger.error(f"Failed to set camera sensitivity: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# =====================================================================
+# UTILITY STREAMING ENDPOINTS
+# =====================================================================
 
 @app.post("/api/cameras/{camera_id}/stream/close")
 async def close_camera_stream(camera_id: str):
@@ -943,7 +960,9 @@ async def download_recording(recording_id: str):
         logger.error(f"Failed to download recording: {e}")
         raise HTTPException(status_code=404, detail=str(e))
 
-# Serve React app
+# =====================================================================
+# FRONTEND SERVING ENDPOINTS
+# =====================================================================
 @app.get("/")
 async def serve_react_app():
     if os.path.exists("../frontend/build/index.html"):
@@ -963,6 +982,10 @@ async def serve_react_routes(path: str):
         return FileResponse("../frontend/build/index.html")
     else:
         return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
+
+# =====================================================================
+# APPLICATION STARTUP
+# =====================================================================
 
 if __name__ == "__main__":
     import uvicorn

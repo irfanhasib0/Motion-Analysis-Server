@@ -76,17 +76,13 @@ class HLSManager:
         get_recordings_dir: Callable[[], str],
         get_camera_config: Callable[[str], Optional[dict]],
         ensure_background_stream: Callable[[str], None],
-        get_latest_video_frame_spmc: Callable[[str, str], Optional[Any]],  # (camera_id, consumer_id) -> frame
-        get_latest_audio_chunk_spmc: Callable[[str, str], Optional[bytes]] = None,  # (camera_id, consumer_id) -> chunk
-        get_latest_results_spmc: Callable[[str, str], Optional[dict]] = None,  # (camera_id, consumer_id) -> results
+        streaming_service: Any,  # Direct reference to streaming service for _get_spmc_data calls
         register_consumer: Callable[[str, str, list], bool] = None,  # (camera_id, consumer_id, data_types) -> success
     ):
         self._get_recordings_dir = get_recordings_dir
         self._get_camera_config = get_camera_config
         self._ensure_background_stream = ensure_background_stream
-        self._get_latest_video_frame_spmc = get_latest_video_frame_spmc
-        self._get_latest_audio_chunk_spmc = get_latest_audio_chunk_spmc
-        self._get_latest_results_spmc = get_latest_results_spmc
+        self._streaming_service = streaming_service
         self._register_consumer = register_consumer
 
         self.active_streams: Dict[str, Dict[str, Any]] = {}
@@ -224,8 +220,8 @@ class HLSManager:
                 if process.poll() is not None or process.stdin is None:
                     break
 
-                # Write video frame using SPMC
-                frame = self._get_latest_video_frame_spmc(camera_id, f"{self._consumer_id_base}_{camera_id}")
+                # Write video frame using SPMC - direct call to _get_spmc_data
+                frame = self._streaming_service._get_spmc_data(camera_id, f"{self._consumer_id_base}_{camera_id}", 'overlay')
                 if frame is None:
                     time.sleep(min(0.02, frame_interval))
                     continue
@@ -239,9 +235,9 @@ class HLSManager:
                     break
 
                 # Write audio chunk if available and enabled using SPMC
-                if audio_enabled and audio_pipe and self._get_latest_audio_chunk_spmc:
+                if audio_enabled and audio_pipe and hasattr(self._streaming_service, '_get_spmc_data'):
                     try:
-                        audio_chunk = self._get_latest_audio_chunk_spmc(camera_id, f"{self._consumer_id_base}_{camera_id}")
+                        audio_chunk = self._streaming_service._get_spmc_data(camera_id, f"{self._consumer_id_base}_{camera_id}", 'audio')
                         if audio_chunk and len(audio_chunk) > 0:
                             audio_pipe.write(audio_chunk)
                     except Exception as e:
@@ -283,8 +279,8 @@ class HLSManager:
         # Register as consumer for this camera
         consumer_id = f"{self._consumer_id_base}_{camera_id}"
         if self._register_consumer:
-            data_types = ['frames']
-            if db_camera.get('audio_enabled', False) and self._get_latest_audio_chunk_spmc:
+            data_types = ['overlay']  # Use overlay frames for HLS (includes FPS/overlays)
+            if db_camera.get('audio_enabled', False) and hasattr(self._streaming_service, '_get_spmc_data'):
                 data_types.append('audio')
             self._register_consumer(camera_id, consumer_id, data_types)
 

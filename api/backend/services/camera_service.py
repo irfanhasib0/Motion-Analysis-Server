@@ -19,6 +19,7 @@ from services.audio_recording_utils import AudioRecordingUtils
 import sys
 sys.path.append('../../src')
 from improc.optical_flow import OpticalFlowTracker
+from audioproc import FrequencyIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -520,13 +521,22 @@ class Capture:
 
 class CameraService(StreamingService):
     def __init__(self, configs: Optional[str] = 'default'):
-        super().__init__()
         self.ram_auto_low_power_enabled = True
         self.low_power_ram_threshold_bytes = 1 * 1024 * 1024 * 1024
         self.rtsp_unified_demux_enabled = str(os.getenv('RTSP_UNIFIED_DEMUX', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self.low_power_mode = self._should_auto_enable_low_power()
         self.root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
         self.db = ConfigManager(configs_dir=os.path.join(self.root_dir, 'configs', configs))  # Use same YAML-backed DB as recording service
+        
+        # Load persisted system settings (fall back to in-code defaults)
+        _sys = self.db.get_system_settings()
+        
+        # Initialize streaming service with ring buffer settings
+        frame_rbf_len = int(_sys.get('frame_rbf_len', 10))
+        audio_rbf_len = int(_sys.get('audio_rbf_len', 10))
+        results_rbf_len = int(_sys.get('results_rbf_len', 10))
+        super().__init__(frame_rbf_len=frame_rbf_len, audio_rbf_len=audio_rbf_len, results_rbf_len=results_rbf_len)
+        
         self.recordings_dir = os.path.join(self.root_dir, "recordings")
         self.archive_dir = os.path.join(self.root_dir, "archive")
         self.start_time = datetime.now()
@@ -537,8 +547,8 @@ class CameraService(StreamingService):
         
         self._camera_streams = {}
         self._camera_trackers = {}
-        # Load persisted system settings (fall back to in-code defaults)
-        _sys = self.db.get_system_settings()
+        self._audio_chunk_analyzers = {}
+        
         self.motion_check_interval = int(_sys.get('motion_check_interval', 10))
         self.max_clip_length = int(_sys.get('max_clip_length', 60))
         self.max_velocity = float(_sys.get('max_vel', 0.1))
@@ -551,6 +561,12 @@ class CameraService(StreamingService):
         self.jpeg_quality = int(_sys.get('jpeg_quality', 55 if self.low_power_mode else 70))
         self.pipe_buffer_size = int(_sys.get('pipe_buffer_size', 10**6 if self.low_power_mode else 10**8))
         self.rtsp_unified_demux_enabled = bool(_sys.get('rtsp_unified_demux_enabled', self.rtsp_unified_demux_enabled))
+        
+        # Store ring buffer settings for runtime updates
+        self.frame_rbf_len = frame_rbf_len
+        self.audio_rbf_len = audio_rbf_len
+        self.results_rbf_len = results_rbf_len
+        self.mux_realtime = bool(_sys.get('mux_realtime', False))
 
         self.default_sensitivity = int(self.sensitivity)
 
@@ -571,6 +587,7 @@ class CameraService(StreamingService):
             max_bg_diff=self.max_bg_diff,
             motion_result_max_age_sec=self.motion_result_max_age_sec,
             archive_dir=self.archive_dir,
+            mux_realtime=self.mux_realtime,
         )
         self.active_recordings = self.recording_manager.active_recordings
         self._load_existing_recordings()
@@ -602,6 +619,12 @@ class CameraService(StreamingService):
             'ram_auto_low_power_enabled': bool(self.ram_auto_low_power_enabled),
             'low_power_ram_threshold_bytes': int(self.low_power_ram_threshold_bytes),
             'total_memory_bytes': total_memory_bytes,
+            # Advanced Performance Settings
+            'frame_rbf_len': int(self.frame_rbf_len),
+            'audio_rbf_len': int(self.audio_rbf_len),
+            'results_rbf_len': int(self.results_rbf_len),
+            # Recording Settings
+            'mux_realtime': bool(self.mux_realtime),
         }
 
     def update_runtime_settings(
@@ -616,6 +639,12 @@ class CameraService(StreamingService):
         motion_check_interval: Optional[int] = None,
         min_free_storage_bytes: Optional[int] = None,
         rtsp_unified_demux_enabled: Optional[bool] = None,
+        # Advanced Performance Settings
+        frame_rbf_len: Optional[int] = None,
+        audio_rbf_len: Optional[int] = None,
+        results_rbf_len: Optional[int] = None,
+        # Recording Settings
+        mux_realtime: Optional[bool] = None,
     ) -> Dict[str, Union[bool, int, float]]:
         low_power_changed = False
 
@@ -667,6 +696,20 @@ class CameraService(StreamingService):
         if rtsp_unified_demux_enabled is not None:
             self.rtsp_unified_demux_enabled = bool(rtsp_unified_demux_enabled)
 
+        # Handle advanced performance settings
+        if frame_rbf_len is not None:
+            self.frame_rbf_len = max(1, min(100, int(frame_rbf_len)))
+
+        if audio_rbf_len is not None:
+            self.audio_rbf_len = max(1, min(100, int(audio_rbf_len)))
+
+        if results_rbf_len is not None:
+            self.results_rbf_len = max(1, min(100, int(results_rbf_len)))
+
+        # Handle recording settings
+        if mux_realtime is not None:
+            self.mux_realtime = bool(mux_realtime)
+
         try:
             self.default_sensitivity = int(self.sensitivity)
         except Exception:
@@ -687,6 +730,7 @@ class CameraService(StreamingService):
             self.recording_manager.max_clip_length = int(self.max_clip_length)
             self.recording_manager.motion_check_interval = int(self.motion_check_interval)
             self.recording_manager.min_free_storage_bytes = int(self.min_free_storage_bytes)
+            self.recording_manager.mux_realtime = bool(self.mux_realtime)
         except Exception:
             pass
 
@@ -703,6 +747,12 @@ class CameraService(StreamingService):
                 'motion_check_interval': int(self.motion_check_interval),
                 'min_free_storage_bytes': int(self.min_free_storage_bytes),
                 'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
+                # Advanced Performance Settings
+                'frame_rbf_len': int(self.frame_rbf_len),
+                'audio_rbf_len': int(self.audio_rbf_len),
+                'results_rbf_len': int(self.results_rbf_len),
+                # Recording Settings
+                'mux_realtime': bool(self.mux_realtime),
             })
         except Exception:
             pass
@@ -941,6 +991,18 @@ class CameraService(StreamingService):
             
         tracker = OpticalFlowTracker()
         
+        # Initialize audio analyzer if audio is enabled
+        db_camera = self.db.get_camera(camera_id)
+        audio_analyzer = None
+        if db_camera and bool(db_camera.get('audio_enabled', False)):
+            try:
+                sample_rate = int(db_camera.get('audio_sample_rate')) if db_camera.get('audio_sample_rate') else int(os.getenv('AUDIO_SAMPLE_RATE', '16000'))
+            except (TypeError, ValueError):
+                sample_rate = int(os.getenv('AUDIO_SAMPLE_RATE', '16000'))
+            channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
+            audio_analyzer = FrequencyIntensityAnalyzer(sample_rate=sample_rate, channels=channels)
+            logger.info(f"Created audio analyzer for camera {camera_id}: {sample_rate}Hz, {channels} channels")
+        
         ret, _ = cap.read_video()
             
         if ret:
@@ -949,9 +1011,11 @@ class CameraService(StreamingService):
             camera_started = True
             self._camera_streams[camera_id] = cap
             self._camera_trackers[camera_id] = tracker
+            if audio_analyzer is not None:
+                self._audio_chunk_analyzers[camera_id] = audio_analyzer
             
             # Initialize ring buffers for SPMC data distribution
-            self._initialize_ring_buffers(camera_id)
+            self._ensure_ring_buffers(camera_id)
         else:
             logger.warning(f"Camera {camera_id} opened but failed to read frames")
             cap.release_video()
@@ -973,7 +1037,7 @@ class CameraService(StreamingService):
             self.stop_recording(camera_id)
 
         try:
-            self.stop_hls_stream(camera_id)
+            self._hls_manager.stop_stream(camera_id)
         except Exception:
             pass
 
@@ -1002,6 +1066,14 @@ class CameraService(StreamingService):
         if tracker is not None:
             try:
                 del tracker
+            except Exception:
+                pass
+
+        audio_analyzer = self._audio_chunk_analyzers.pop(camera_id, None)
+        if audio_analyzer is not None:
+            logger.info(f"Cleaned up audio analyzer for camera {camera_id}")
+            try:
+                del audio_analyzer
             except Exception:
                 pass
 
@@ -1144,7 +1216,7 @@ class CameraService(StreamingService):
         """Return human-readable uptime string (HH:MM:SS)."""
         uptime = datetime.now() - self.start_time
         return str(uptime).split('.')[0]
-
+    '''
     # Properties to maintain compatibility
     @property
     def cameras(self) -> Dict[str, Camera]:
@@ -1157,3 +1229,4 @@ class CameraService(StreamingService):
         """Get recordings as dict for backward compatibility"""
         recordings = self.get_recordings()
         return {recording.id: recording for recording in recordings}
+    '''

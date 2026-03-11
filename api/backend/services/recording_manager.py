@@ -35,6 +35,7 @@ class RecordingManager:
         max_bg_diff: int,
         motion_result_max_age_sec: float,
         archive_dir: str = '',
+        mux_realtime: bool = False,
     ):
         self.camera_service = camera_service
         self.streaming_service = streaming_service
@@ -49,6 +50,7 @@ class RecordingManager:
         self.max_bg_diff = max_bg_diff
         self.motion_result_max_age_sec = motion_result_max_age_sec
         self.active_recordings: Dict[str, dict] = {}
+        self.mux_realtime = mux_realtime
 
     def load_existing_recordings(self):
         if not os.path.exists(self.recordings_dir):
@@ -122,7 +124,7 @@ class RecordingManager:
             camera_service=self.camera_service,
             camera_id=camera_id,
             camera_config=db_camera,
-            mux_realtime=False  # Start with separate files for testing
+            mux_realtime=self.mux_realtime  # Start with separate files for testing
         )
         
         return recording_id, file_path, writer
@@ -273,34 +275,6 @@ class RecordingManager:
         logger.info(f"Saving recording with motion: {final_file_path}")
         self.send_notification_to_app()
         
-    def get_latest_data_packets(self, camera_id: str, last_frame_seq: int, last_audio_chunk_seq: int):
-        # Register as consumer if not already registered
-        consumer_id = f"recorder_{camera_id}"
-        
-        # Use SPMC functions for data access
-        frame = self.streaming_service.get_latest_video_frame_spmc(camera_id, consumer_id)
-        results = self.streaming_service.get_latest_results_spmc(camera_id, consumer_id)
-        
-        # Extract results components with defaults
-        res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
-        audio_res = results.get('audio', {}) if results else {}
-        
-        # Debug logging for motion values
-        if res.get('vel', 0) > 0 or res.get('bg_diff', 0) > 0:
-            logger.debug(f"Motion detected for {camera_id}: vel={res.get('vel', 0)}, bg_diff={res.get('bg_diff', 0)}")
-        
-        # Update sequences (for compatibility with existing code)
-        if frame is not None:
-            last_frame_seq += 1
-        
-        return frame, res, last_frame_seq, audio_res, last_audio_chunk_seq
-    
-    def get_latest_audio_chunk_only(self, camera_id: str):
-        """Get audio chunk independently of video frames to avoid dropping chunks"""
-        consumer_id = f"recorder_{camera_id}"
-        return self.streaming_service.get_latest_audio_chunk_spmc(camera_id, consumer_id)
-
-
     def record_worker(self, file_path, recording_id, camera_id, cap, writer):
         start_time = time.time()
         clip_start_time = start_time
@@ -310,9 +284,6 @@ class RecordingManager:
         clip_bg_diff = 0
         clip_loudness = 0.0
         db_camera = self.db.get_camera(camera_id) or {}
-        target_fps = max(1, int(db_camera.get('fps', 10) or 10))
-        last_frame_seq = -1
-        last_audio_chunk_seq = -1
         
         # Add small delay before starting to allow system to stabilize
         time.sleep(0.1)
@@ -333,12 +304,11 @@ class RecordingManager:
             res = {'vel': 0.0, 'bg_diff': 0}
             audio_res = {}
             
-            if lock is not None:
-                with lock:
-                    frame, res, last_frame_seq, audio_res, last_audio_chunk_seq = self.get_latest_data_packets(camera_id, last_frame_seq, last_audio_chunk_seq)
-            else:
-                frame, res, last_frame_seq, audio_res, last_audio_chunk_seq = self.get_latest_data_packets(camera_id, last_frame_seq, last_audio_chunk_seq)
-            audio_chunk = self.get_latest_audio_chunk_only(camera_id)
+            frame = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'frames')
+            audio_chunk = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'audio') if audio_enabled else None
+            results = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'results')
+            res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
+            audio_res = results.get('audio', {}) if results else {}
             curr_time = time.time()
             
             # Motion detection check (less frequent to avoid blocking audio)

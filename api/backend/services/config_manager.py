@@ -17,6 +17,12 @@ _SYSTEM_DEFAULTS: Dict[str, Any] = {
     'motion_check_interval': 10,
     'min_free_storage_bytes': 1073741824,
     'rtsp_unified_demux_enabled': False,
+    # Advanced Performance Settings
+    'frame_rbf_len': 10,
+    'audio_rbf_len': 10,
+    'results_rbf_len': 10,
+    # Recording Settings
+    'mux_realtime': False,
 }
 
 
