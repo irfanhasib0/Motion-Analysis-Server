@@ -4,7 +4,7 @@ import { api } from '../api';
 
 const AUDIO_SAMPLE_RATE_OPTIONS = [8000, 16000, 22050, 32000, 44100, 48000];
 const AUDIO_CHUNK_SIZE_OPTIONS = [256, 512, 1024, 2048, 4096];
-const FPS_OPTIONS = [15, 20, 24, 25, 30, 50, 60];
+const FPS_OPTIONS = [5, 10, 15, 20, 25, 30];
 const RESOLUTION_OPTIONS = [
   { value: '640x480', label: '640x480 (VGA)' },
   { value: '1280x720', label: '1280x720 (HD)' },

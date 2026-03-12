@@ -237,25 +237,95 @@ class AVWriterV2:
     
     def write_frame_with_timing(self, frame: np.ndarray, audio_chunk: bytes = None) -> bool:
         """Write frame with frame rate control and optional audio chunk."""
-        self.write_audio(audio_chunk)
-        '''
+        if self.audio_recording and audio_chunk and len(audio_chunk) > 0:
+            self.write_audio(audio_chunk)
+        
         # Handle frame rate timing first - this prevents flickering
         current_time = time.time()
         if current_time < self.next_write_at:
             sleep_time = self.next_write_at - current_time
             if sleep_time > 0.001:  # Only sleep if meaningful (>1ms)
                 time.sleep(sleep_time)
-        '''
+        
         # Write video frame
         self.write_video(frame)
-        
-        ## Write synchronized audio chunk if provided
-        #if self.audio_recording and audio_chunk:
-        #    self.write_audio(audio_chunk)
         
         # Update next frame time
         self.next_write_at = max(time.time(), self.next_write_at + self.target_interval)
         return True
+    
+    def write_video_ffmpeg(self, frame: np.ndarray) -> bool:
+        """Alternative FFmpeg-based video writing method.
+        
+        Creates a separate FFmpeg process for video encoding if not already initialized.
+        Useful when OpenCV VideoWriter has compatibility issues or different codec requirements.
+        """
+        if self._closed:
+            return False
+            
+        # Initialize FFmpeg video process if not already done
+        if not hasattr(self, '_ffmpeg_video_proc') or self._ffmpeg_video_proc is None:
+            self._init_ffmpeg_video_writer()
+        
+        if self._ffmpeg_video_proc is None or self._ffmpeg_video_proc.stdin is None:
+            return False
+            
+        try:
+            # Ensure frame is contiguous and correct format
+            frame = np.ascontiguousarray(frame, dtype=np.uint8)
+            expected_size = self.height * self.width * 3
+            frame_data = frame.tobytes()
+            
+            if len(frame_data) != expected_size:
+                logger.error(f"Frame size mismatch: expected {expected_size}, got {len(frame_data)}")
+                return False
+                
+            self._ffmpeg_video_proc.stdin.write(frame_data)
+            self._ffmpeg_video_proc.stdin.flush()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error writing video frame via FFmpeg: {e}")
+            return False
+    
+    def write_audio_ffmpeg(self, audio_chunk: bytes) -> bool:
+        """Alternative FFmpeg-based audio writing method.
+        
+        Creates a separate FFmpeg process for audio encoding if not already initialized.
+        Useful for advanced audio processing or codec requirements.
+        """
+        if self._closed or not audio_chunk:
+            return False
+            
+        # Initialize FFmpeg audio process if not already done
+        if not hasattr(self, '_ffmpeg_audio_proc') or self._ffmpeg_audio_proc is None:
+            self._init_ffmpeg_audio_writer()
+        
+        if self._ffmpeg_audio_proc is None or self._ffmpeg_audio_proc.stdin is None:
+            return False
+            
+        try:
+            self._ffmpeg_audio_proc.stdin.write(audio_chunk)
+            self._ffmpeg_audio_proc.stdin.flush()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error writing audio chunk via FFmpeg: {e}")
+            return False
+    
+    def get_ffmpeg_output_paths(self) -> dict:
+        """Get the output file paths that would be used by FFmpeg methods.
+        
+        Returns:
+            dict: Dictionary with 'ffmpeg_video' and 'ffmpeg_audio' paths
+        """
+        video_path = self.path.replace('.mp4', '_ffmpeg_video.mp4')
+        audio_path = self.path.replace('.mp4', '_ffmpeg_audio.wav')
+        
+        return {
+            'ffmpeg_video': video_path,
+            'ffmpeg_audio': audio_path
+        }
     
     def release(self) -> str:
         """Release writer and return final file path."""
@@ -263,6 +333,9 @@ class AVWriterV2:
             return self.path
         
         self._closed = True
+        
+        # Cleanup FFmpeg processes (both modes)
+        self._cleanup_ffmpeg_processes()
         
         if self.mux_realtime:
             # Real-time muxing mode cleanup
@@ -300,6 +373,50 @@ class AVWriterV2:
             # NOTE: No muxing in this mode - return video file path
             # Audio file stays separate for testing
             return final_path
+    
+    def _cleanup_ffmpeg_processes(self):
+        """Clean up FFmpeg video and audio processes."""
+        # Clean up FFmpeg video process
+        if hasattr(self, '_ffmpeg_video_proc') and self._ffmpeg_video_proc is not None:
+            try:
+                if self._ffmpeg_video_proc.stdin is not None:
+                    self._ffmpeg_video_proc.stdin.close()
+                
+                try:
+                    self._ffmpeg_video_proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning("FFmpeg video process timeout, killing...")
+                    self._ffmpeg_video_proc.kill()
+                    self._ffmpeg_video_proc.wait()
+                    
+                if hasattr(self, '_ffmpeg_video_path'):
+                    logger.info(f"FFmpeg video file written: {self._ffmpeg_video_path}")
+                    
+            except Exception as e:
+                logger.error(f"Error cleaning up FFmpeg video process: {e}")
+            finally:
+                self._ffmpeg_video_proc = None
+        
+        # Clean up FFmpeg audio process  
+        if hasattr(self, '_ffmpeg_audio_proc') and self._ffmpeg_audio_proc is not None:
+            try:
+                if self._ffmpeg_audio_proc.stdin is not None:
+                    self._ffmpeg_audio_proc.stdin.close()
+                
+                try:
+                    self._ffmpeg_audio_proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning("FFmpeg audio process timeout, killing...")
+                    self._ffmpeg_audio_proc.kill()
+                    self._ffmpeg_audio_proc.wait()
+                    
+                if hasattr(self, '_ffmpeg_audio_path'):
+                    logger.info(f"FFmpeg audio file written: {self._ffmpeg_audio_path}")
+                    
+            except Exception as e:
+                logger.error(f"Error cleaning up FFmpeg audio process: {e}")
+            finally:
+                self._ffmpeg_audio_proc = None
 
     def _write_wav_header(self):
         """Write initial WAV header (will be updated in _finalize_wav_file)."""
@@ -356,6 +473,97 @@ class AVWriterV2:
         # Return to end of file
         self.audio_file.seek(0, 2)
         self.audio_file.flush()
+    
+    def _init_ffmpeg_video_writer(self):
+        """Initialize FFmpeg process for video writing."""
+        try:
+            # Generate video output path with _ffmpeg suffix
+            video_path = self.path.replace('.mp4', '_ffmpeg_video.mp4')
+            
+            cmd = [
+                'ffmpeg', '-y',
+                '-hide_banner',
+                '-loglevel', 'warning',
+                '-f', 'rawvideo',
+                '-pix_fmt', 'bgr24',
+                '-s', f'{self.width}x{self.height}',
+                '-r', str(self.fps),
+                '-i', 'pipe:0',
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+                '-c:v', 'libx264',
+                '-crf', '23',
+                '-preset', 'medium',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                video_path
+            ]
+            
+            self._ffmpeg_video_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            
+            self._ffmpeg_video_path = video_path
+            
+            # Small delay to ensure process starts properly
+            time.sleep(0.1)
+            if self._ffmpeg_video_proc.poll() is not None:
+                stderr_data = self._ffmpeg_video_proc.stderr.read() if self._ffmpeg_video_proc.stderr else b''
+                raise RuntimeError(f'FFmpeg video process failed to start: {stderr_data.decode(errors="replace")[:500]}')
+                
+            logger.info(f"Initialized FFmpeg video writer: {video_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize FFmpeg video writer: {e}")
+            self._ffmpeg_video_proc = None
+    
+    def _init_ffmpeg_audio_writer(self):
+        """Initialize FFmpeg process for audio writing."""
+        try:
+            # Get audio parameters from camera config
+            sample_rate = int(self.camera_config.get('audio_sample_rate', 16000))
+            channels = int(self.camera_config.get('audio_channels', 1))
+            
+            # Generate audio output path with _ffmpeg suffix
+            audio_path = self.path.replace('.mp4', '_ffmpeg_audio.wav')
+            
+            cmd = [
+                'ffmpeg', '-y',
+                '-hide_banner',
+                '-loglevel', 'warning',
+                '-f', 's16le',
+                '-ar', str(sample_rate),
+                '-ac', str(channels),
+                '-i', 'pipe:0',
+                '-c:a', 'pcm_s16le',
+                '-af', 'volume=1.0',
+                audio_path
+            ]
+            
+            self._ffmpeg_audio_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            
+            self._ffmpeg_audio_path = audio_path
+            
+            # Small delay to ensure process starts properly
+            time.sleep(0.1)
+            if self._ffmpeg_audio_proc.poll() is not None:
+                stderr_data = self._ffmpeg_audio_proc.stderr.read() if self._ffmpeg_audio_proc.stderr else b''
+                raise RuntimeError(f'FFmpeg audio process failed to start: {stderr_data.decode(errors="replace")[:500]}')
+                
+            logger.info(f"Initialized FFmpeg audio writer: {audio_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize FFmpeg audio writer: {e}")
+            self._ffmpeg_audio_proc = None
         
     def cancel(self) -> None:
         """Cancel recording and clean up files."""
@@ -363,6 +571,9 @@ class AVWriterV2:
             return
             
         self._closed = True
+        
+        # Cleanup FFmpeg processes (both modes) and remove their output files
+        self._cancel_ffmpeg_processes()
         
         if self.mux_realtime:
             # Real-time muxing mode cleanup
@@ -397,6 +608,46 @@ class AVWriterV2:
                 os.remove(self.path)
             except Exception:
                 pass
+    
+    def _cancel_ffmpeg_processes(self):
+        """Clean up FFmpeg processes and remove their output files during cancellation."""
+        # Kill and clean up FFmpeg video process
+        if hasattr(self, '_ffmpeg_video_proc') and self._ffmpeg_video_proc is not None:
+            try:
+                self._ffmpeg_video_proc.kill()
+                self._ffmpeg_video_proc.wait()
+                
+                # Remove video output file
+                if hasattr(self, '_ffmpeg_video_path') and os.path.exists(self._ffmpeg_video_path):
+                    try:
+                        os.remove(self._ffmpeg_video_path)
+                        logger.info(f"Removed cancelled FFmpeg video file: {self._ffmpeg_video_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove FFmpeg video file: {e}")
+                        
+            except Exception as e:
+                logger.error(f"Error cancelling FFmpeg video process: {e}")
+            finally:
+                self._ffmpeg_video_proc = None
+        
+        # Kill and clean up FFmpeg audio process
+        if hasattr(self, '_ffmpeg_audio_proc') and self._ffmpeg_audio_proc is not None:
+            try:
+                self._ffmpeg_audio_proc.kill()
+                self._ffmpeg_audio_proc.wait()
+                
+                # Remove audio output file
+                if hasattr(self, '_ffmpeg_audio_path') and os.path.exists(self._ffmpeg_audio_path):
+                    try:
+                        os.remove(self._ffmpeg_audio_path)
+                        logger.info(f"Removed cancelled FFmpeg audio file: {self._ffmpeg_audio_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove FFmpeg audio file: {e}")
+                        
+            except Exception as e:
+                logger.error(f"Error cancelling FFmpeg audio process: {e}")
+            finally:
+                self._ffmpeg_audio_proc = None
 
 
 class AVFileWriterV1:
@@ -432,6 +683,7 @@ class AVFileWriterV1:
             '-crf', str(crf),
             '-preset', 'ultrafast',
             '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',  # Add faststart for better browser compatibility
             self._video_path
         ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         # Open ffmpeg process for audio (if needed)

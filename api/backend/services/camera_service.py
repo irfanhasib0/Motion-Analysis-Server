@@ -1216,7 +1216,7 @@ class CameraService(StreamingService):
         """Return human-readable uptime string (HH:MM:SS)."""
         uptime = datetime.now() - self.start_time
         return str(uptime).split('.')[0]
-    '''
+    
     # Properties to maintain compatibility
     @property
     def cameras(self) -> Dict[str, Camera]:
@@ -1229,4 +1229,4 @@ class CameraService(StreamingService):
         """Get recordings as dict for backward compatibility"""
         recordings = self.get_recordings()
         return {recording.id: recording for recording in recordings}
-    '''
+    

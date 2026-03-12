@@ -17,6 +17,19 @@ from models.recording import Recording, RecordingStatus
 from services.av_writer import AVWriterV2 as AVWriter  # Flexible writer - can switch between V2Flexible and V3
 from services.audio_recording_utils import AudioRecordingUtils
 
+# ANSI Color codes for log formatting
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'  # Reset to default
+
 logger = logging.getLogger(__name__)
 
 
@@ -231,7 +244,7 @@ class RecordingManager:
         if not clip_motion_detected:
             if os.path.exists(final_file_path):
                 os.system(f'rm -f {final_file_path}')
-                logger.info(f"Deleted no-motion recording: {final_file_path}")
+                logger.info(f"{Colors.RED}🗑️ Deleted no-motion recording:{Colors.RESET} {final_file_path}")
                 
             # Also clean up audio file if it exists
             audio_file_path = getattr(writer, 'audio_file_path', None)
@@ -239,7 +252,7 @@ class RecordingManager:
                 try:
                     os.remove(audio_file_path)
                 except Exception as e:
-                    logger.warning(f"Could not clean up audio file: {e}")
+                    logger.warning(f"{Colors.YELLOW}⚠️ Could not clean up audio file:{Colors.RESET} {e}")
                     
             self.db.delete_recording(recording_id)
             return
@@ -253,7 +266,8 @@ class RecordingManager:
         else:
             file_size = 0
         
-        # Recording clip processed (reduced logging)
+        # Log successful recording save
+        logger.info(f"{Colors.GREEN}💾 Saved recording:{Colors.RESET} {final_file_path} (duration: {clip_duration}s, size: {file_size} bytes, vel: {vel:.2f}, bg_diff: {bg_diff})")
         
         self.db.update_recording(
             recording_id,
@@ -272,7 +286,7 @@ class RecordingManager:
                 },
             },
         )
-        logger.info(f"Saving recording with motion: {final_file_path}")
+        logger.info(f"{Colors.MAGENTA}✨ Saving recording with motion:{Colors.RESET} {final_file_path}")
         self.send_notification_to_app()
         
     def record_worker(self, file_path, recording_id, camera_id, cap, writer):
@@ -290,11 +304,10 @@ class RecordingManager:
         
         # Debug: Check if audio is enabled
         audio_enabled = db_camera.get('audio_enabled', False)
-        logger.info(f"Recording worker started for camera {camera_id}, audio enabled: {audio_enabled}")
-        
+        logger.info(f"{Colors.BLUE}🎬 Recording worker started{Colors.RESET} for camera {camera_id}, audio enabled: {audio_enabled}")
         # Track last motion check time
         last_motion_check = start_time
-
+        
         while camera_id in self.active_recordings:
             loop_start = time.time()
             
@@ -333,8 +346,9 @@ class RecordingManager:
                     clip_vel = max(clip_vel, vel)
                     clip_bg_diff = max(clip_bg_diff, bg_diff)
                 clip_loudness = max(clip_loudness, float(audio_res.get('int', 0.0)))
-
+                logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {(curr_time - clip_start_time)},{self.max_clip_length}, {clip_motion_detected} - vel: {vel:.2f}, bg_diff: {bg_diff}, loudness: {clip_loudness:.2f}, stale: {is_stale_motion_sample}{Colors.RESET}")
                 if not recent_motion_detected or (curr_time - clip_start_time) > self.max_clip_length:
+                    logger.info(f"{Colors.CYAN}🎬 Clip ended{Colors.RESET} for camera {camera_id} - motion: {clip_motion_detected}, duration: {int(curr_time - clip_start_time)}s, vel: {clip_vel:.2f}, bg_diff: {clip_bg_diff}, loudness: {clip_loudness:.2f}")
                     self.process_recorded_clip(
                         recording_id,
                         writer,
@@ -345,6 +359,7 @@ class RecordingManager:
                         bg_diff=clip_bg_diff,
                         loudness=clip_loudness,
                     )
+
                     recording_id, file_path, writer = self.init_recording(
                         camera_id,
                         self.db.get_camera(camera_id),
@@ -356,17 +371,18 @@ class RecordingManager:
                     clip_bg_diff = 0
                     clip_loudness = 0.0
                 last_motion_check = curr_time
-
+            
             # Write video frame if available (but don't wait for it)
             if frame is not None:
-                writer.write_frame_with_timing(frame, audio_chunk)  # Audio already written above
-                        
+                writer.write_frame_with_timing(frame, None)  # Audio already written above
+            if audio_enabled and audio_chunk is not None:
+                writer.write_audio(audio_chunk)  # Write audio chunk immediately if enabled            
             # Very short sleep to allow audio thread to produce more data
             # but yield CPU to prevent busy waiting
-            loop_duration = time.time() - loop_start
-            target_loop_time = 1.0 / 50  # 50Hz loop for responsive audio consumption
-            if loop_duration < target_loop_time:
-                time.sleep(target_loop_time - loop_duration)
+            #loop_duration = time.time() - loop_start
+            #target_loop_time = 1.0 / 50  # 50Hz loop for responsive audio consumption
+            #if loop_duration < target_loop_time:
+            #    time.sleep(target_loop_time - loop_duration)
 
         self.process_recorded_clip(
             recording_id,
@@ -382,12 +398,13 @@ class RecordingManager:
     def start_recording(self, camera_id: str) -> Optional[str]:
         db_camera = self.db.get_camera(camera_id)
         if camera_id in self.active_recordings:
-            pass  # Camera already recording
-            return self.active_recordings[camera_id]['recording_id']
-
+            self.stop_recording(camera_id)
+            #return self.active_recordings[camera_id]['recording_id']
+        
         if camera_id not in self.camera_service._camera_streams:
             success = self.camera_service.start_camera(camera_id)
             if not success:
+                logger.error(f"{Colors.RED} Failed to start camera stream for recording:{Colors.RESET} {camera_id}")
                 return None
         cap = self.camera_service._camera_streams.get(camera_id)
 
@@ -410,7 +427,6 @@ class RecordingManager:
             'thread': recording_thread,
             'start_time': datetime.now(),
         }
-
         recording_thread.start()
         self.db.update_camera(camera_id, {'status': CameraStatus.RECORDING.value})
 
@@ -422,14 +438,14 @@ class RecordingManager:
             raise ValueError(f"Camera not found: {camera_id}")
 
         if camera_id not in self.active_recordings:
-            logger.error(f"Camera {camera_id} is not recording")
+            logger.error(f"{Colors.RED}❌ Camera is not recording:{Colors.RESET} {camera_id}")
 
         try:
             recording_info = self.active_recordings.pop(camera_id)
             recording_info['thread'].join(timeout=5)
             self.db.update_camera(camera_id, {'status': CameraStatus.ONLINE.value})
         except Exception as error:
-            logger.warning(f"Error stopping recording for camera {camera_id}: {error}")
+            logger.warning(f"{Colors.YELLOW}⚠️ Error stopping recording{Colors.RESET} for camera {camera_id}: {error}")
         
 
     def get_recordings(self, camera_id: Optional[str] = None) -> List[Recording]:
@@ -496,6 +512,77 @@ class RecordingManager:
                 return candidate_abs
 
         raise ValueError(f"Recording file not found: {recording_id}")
+
+    def _get_video_codec(self, file_path: str) -> str:
+        """Get the video codec of a video file using ffprobe."""
+        try:
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
+                '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
+                file_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                codec = result.stdout.strip().lower()
+                logger.debug(f"Detected video codec for {file_path}: {codec}")
+                return codec
+            else:
+                logger.warning(f"Could not detect codec for {file_path}: {result.stderr}")
+                return "unknown"
+        except subprocess.TimeoutExpired:
+            logger.error(f"ffprobe timeout while detecting codec for: {file_path}")
+            return "unknown"
+        except FileNotFoundError:
+            logger.error("ffprobe not found - install ffmpeg package")
+            return "unknown"
+        except Exception as e:
+            logger.error(f"Error detecting video codec for {file_path}: {e}")
+            return "unknown"
+
+    def get_browser_playable_recording_path(self, recording_id: str) -> str:
+        """Return recording path optimized for HTML5 video playback.
+
+        If source codec is not broadly browser-compatible, create and reuse a
+        transcoded H.264 version alongside the source file.
+        """
+        source_path = self.get_recording_path(recording_id)
+        codec = self._get_video_codec(source_path)
+
+        # Most reliable baseline for browser playback in MP4 containers
+        if codec in {"h264", "avc1"}:
+            return source_path
+
+        root, ext = os.path.splitext(source_path)
+        playable_path = f"{root}.browser{ext or '.mp4'}"
+
+        source_mtime = os.path.getmtime(source_path)
+        if os.path.exists(playable_path):
+            playable_mtime = os.path.getmtime(playable_path)
+            if playable_mtime >= source_mtime and os.path.getsize(playable_path) > 0:
+                return playable_path
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", source_path,
+            "-map", "0:v:0",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an",
+            playable_path,
+        ]
+
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.exists(playable_path) or os.path.getsize(playable_path) == 0:
+            stderr_tail = (result.stderr or "")[-500:]
+            logger.error(f"{Colors.RED}❌ Failed to transcode recording{Colors.RESET} {recording_id} for browser playback: {stderr_tail}")
+            return source_path
+
+        logger.info(f"{Colors.GREEN}✅ Transcoded recording for browser playback:{Colors.RESET} {playable_path}")
+        return playable_path
 
 
     # -------------------------------------------------------------------------

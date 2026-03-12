@@ -921,18 +921,14 @@ async def get_recording_stream(recording_id: str):
 @app.get("/api/recordings/{recording_id}/play")
 async def play_recording(recording_id: str):
     """Serve a recorded video file for browser playback"""
-    try:
-        file_path = camera_service.get_browser_playable_recording_path(recording_id)
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="Recording file not found")
-        
-        response = FileResponse(file_path, media_type="video/mp4")
-        response.headers["Content-Disposition"] = f'inline; filename="recording_{recording_id}.mp4"'
-        return response
-    except Exception as e:
-        logger.error(f"Failed to play recording: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
-
+    file_path = camera_service.get_browser_playable_recording_path(recording_id)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Recording file not found")
+    
+    response = FileResponse(file_path, media_type="video/mp4")
+    response.headers["Content-Disposition"] = f'inline; filename="recording_{recording_id}.mp4"'
+    return response
+    
 @app.get("/api/cameras/{camera_id}/result_stream")
 async def get_camera_results(camera_id: str):
     """Get JSON stream of processing results for a camera"""
