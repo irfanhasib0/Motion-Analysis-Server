@@ -39,12 +39,12 @@ cameras:
   camera_type: rtsp
   fps: 5
   resolution: 1920x1080
-  status: offline
+  status: online
   processing_active: false
   processing_type: null
   processing_params: {}
   created_at: '2026-02-23T22:57:03.300029'
-  updated_at: '2026-03-13T16:59:19.967147'
+  updated_at: '2026-03-13T19:27:12.389703'
   audio_enabled: true
   audio_source: rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif
   audio_input_format: rtsp

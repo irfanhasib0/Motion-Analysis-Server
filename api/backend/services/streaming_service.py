@@ -526,7 +526,7 @@ class StreamingService:
                 
                 # Process audio analysis
                 samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
-                samples /= (32768.0/100.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
+                samples /= (32768.0/25.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
                 
                 self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
                 audio_chunk_index = self._audio_chunk_index[camera_id]
