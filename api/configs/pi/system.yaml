@@ -23,7 +23,7 @@ system:
       mux_realtime: false
     low_power:
       live_stream_mode: mjpeg
-      uvicorn_reload: true
+      uvicorn_reload: false
       low_power_mode: true
       sensitivity: 2
       jpeg_quality: 55

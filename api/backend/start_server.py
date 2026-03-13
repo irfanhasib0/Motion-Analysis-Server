@@ -42,7 +42,7 @@ class PerformanceProfileUpdateRequest(BaseModel):
 user = os.popen('uname -n').read().strip()
 if user == 'irfan-linux':
     configs = 'pc'
-elif user == 'raspberrypi':
+elif user == 'raspberrypi' or 'pi' in user:
     configs = 'pi'
 else:
     configs = 'default'

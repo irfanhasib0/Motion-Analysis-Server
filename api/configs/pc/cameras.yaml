@@ -10,7 +10,7 @@ cameras:
   processing_type: null
   processing_params: {}
   created_at: '2026-02-12T17:34:42.774322'
-  updated_at: '2026-03-13T20:06:00.609225'
+  updated_at: '2026-03-13T20:07:26.254756'
   audio_enabled: false
   audio_source: null
   audio_input_format: null

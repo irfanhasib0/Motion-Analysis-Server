@@ -83,6 +83,7 @@ echo "Starting backend and writing logs to: $LOG_FILE"
 cd "$BACKEND_DIR"
 nohup python3 "$START_SCRIPT_NAME".py >> "$LOG_FILE" 2>&1 &
 
+echo '' > "$LOG_FILE"  # Clear log file on each start
 echo "Installing daily logrotate config at $LOGROTATE_CONF"
 if [ -n "$SUDO_CMD" ]; then
     sudo tee "$LOGROTATE_CONF" > /dev/null <<EOF
