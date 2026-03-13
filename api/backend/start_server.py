@@ -1110,7 +1110,22 @@ async def serve_react_routes(path: str):
 # =====================================================================
 # APPLICATION STARTUP
 # =====================================================================
-
+if 'pi' in user:
+    kwargs = { 'limit_max_requests': 500,
+              'limit_concurrency': 50,
+              'access_log': False,
+              'backlog': 512,
+              'log_level': 'warning' }
+else:
+    kwargs = {}
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("start_server:app", host="0.0.0.0", port=9001, reload=bool(UVICORN_RELOAD))
+    uvicorn.run(
+        "start_server:app", 
+        host="0.0.0.0", 
+        port=9001, 
+        reload=bool(UVICORN_RELOAD),
+        timeout_keep_alive=60,
+        timeout_graceful_shutdown=60,
+        **kwargs
+    )
