@@ -1,6 +1,6 @@
 system:
-  # System-level metadata only  
-  active_preset: low_power
+  # System-level metadata only
+  active_preset: default
   ram_auto_switch_enabled: true
   ram_threshold_bytes: 1073741824
   presets:
