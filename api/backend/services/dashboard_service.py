@@ -149,15 +149,14 @@ class StreamHealthMonitor:
                         if last_read:  # Only calculate lag if we have a valid read time
                             consumer_lag = now - last_read
                             lag_stats['consumer_lags'][consumer_id] = consumer_lag
-                        # Skip consumers with no valid read time to avoid false triggers
-                        
-                        # Special handling for recording consumer
-                        if consumer_id.startswith(f'recorder_{camera_id}'):
-                            lag_stats['recording_lag'] = max(lag_stats['recording_lag'], consumer_lag)
-                        if consumer_id == f'video_stream_{camera_id}_overlay':
-                            lag_stats['video_stream_lag'] = consumer_lag
-                        if consumer_id == f'audio_stream_{camera_id}_audio':
-                            lag_stats['audio_stream_lag'] = consumer_lag
+                            
+                            # Special handling for recording consumer (only when lag is valid)
+                            if consumer_id.startswith(f'recorder_{camera_id}'):
+                                lag_stats['recording_lag'] = max(lag_stats['recording_lag'], consumer_lag)
+                            if consumer_id == f'video_stream_{camera_id}_overlay':
+                                lag_stats['video_stream_lag'] = consumer_lag
+                            if consumer_id == f'audio_stream_{camera_id}_audio':
+                                lag_stats['audio_stream_lag'] = consumer_lag
         
         # Get audio ring buffer for audio lag
         audio_buffer = self.camera_service._audio_ring_buffers.get(camera_id)

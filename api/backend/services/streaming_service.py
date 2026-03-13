@@ -526,7 +526,7 @@ class StreamingService:
                 
                 # Process audio analysis
                 samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
-                samples /= (32768.0/10.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
+                samples /= (32768.0/100.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
                 
                 self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
                 audio_chunk_index = self._audio_chunk_index[camera_id]
@@ -558,12 +558,10 @@ class StreamingService:
                     if camera_id in self._audio_ring_buffers:
                         self._audio_ring_buffers[camera_id].put(chunk)
                         
-                    # Periodic audio stats logging
-                    #if audio_chunk_seq % (30* self.audio_io_stat_log_interval) == 0:  # Print stats every 1500 chunks (~30 seconds at 50Hz)
-                    #   audio_stats = self._audio_ring_buffers[camera_id].get_stats()
-                    #    if audio_stats.get('stats_enabled'):
-                    #        logger.info(f"Audio Thread:: Audio Buffer Stats for {camera_id}: Producer {audio_stats['producer_fps']} FPS, audio: {audio_fps} FPS, Consumer {audio_stats['consumer_fps']} FPS")
-                
+
+                if self._latest_res_video.get('det_ts', None) and (time.time() - self.latest_res_video['det_ts']) > self.no_motion_slow_down_thr_sec:
+                    time.sleep(self.no_motion_slow_down_delay_sec)
+
             logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
             # Cleanup
             cap.release_audio()
@@ -651,7 +649,7 @@ class StreamingService:
             return
         
         consecutive_empty = 0
-        max_empty = 50  # About 5 seconds at 100ms chunks
+        max_empty = 300  # 30 seconds timeout (300 * 0.1s)
         
         # Stream loop
         while (self.active_audio_streams.get(camera_id) == stream_token and 
@@ -666,9 +664,8 @@ class StreamingService:
             else:
                 consecutive_empty += 1
                 time.sleep(0.1)  # 100ms wait between checks
-                if consecutive_empty >= max_empty:
-                    logger.warning(f"{Colors.RED}No audio data for {camera_id}, ending stream{Colors.RESET}")
-                    yield b''
+                # Keep audio stream alive indefinitely - don't terminate on silence
+                # Audio streams naturally have gaps during silence
         
         # Cleanup token (consumer stays registered for other streams)
         if self.active_audio_streams.get(camera_id) == stream_token:
@@ -783,7 +780,7 @@ class StreamingService:
                             self._latest_viz[camera_id] = viz_frame
                         flow_pts = self._latest_pts_payload.get(camera_id)
                         
-                if time.time() - res['det_ts'] > self.no_motion_slow_down_thr_sec:
+                if res['det_ts'] and (time.time() - res['det_ts']) > self.no_motion_slow_down_thr_sec:
                     time.sleep(self.no_motion_slow_down_delay_sec)
                 # Primary video stream: clean frame with FPS and optical flow overlays
                 frame_fps = self._update_loop_fps(f"{camera_id}:primary")
@@ -885,7 +882,8 @@ class StreamingService:
         
         video_lock = self._video_thread_locks.get(camera_id)
         consecutive_empty = 0
-        max_empty = 1000  # About 3 seconds at 30 FPS
+        max_empty = 300  # 30 seconds timeout (300 * 0.1s)
+        last_yielded_frame = None
         
         # Stream loop
         while (self.active_streams.get(camera_id) == stream_token and 
@@ -897,18 +895,21 @@ class StreamingService:
             # Convert overlay frame to bytes if available
             if current_overlay_frame is not None:
                 current_frame_bytes = self.frame_to_bytes(current_overlay_frame)
-            
                 yield current_frame_bytes
+                last_yielded_frame = current_frame_bytes
                 consecutive_empty = 0
             
+            elif last_yielded_frame is not None:
+                # Re-yield last frame to keep stream alive
+                yield last_yielded_frame
+                consecutive_empty = 0
             else:
                 consecutive_empty += 1
-                time.sleep(0.1)  # Short wait before checking for next frame
                 if consecutive_empty >= max_empty:
                     logger.warning(f"{Colors.RED}No video data for {camera_id}, ending stream{Colors.RESET}")
-                    # Only yield placeholder when no frame has been captured yet
-                    yield self.generate_failure_frame("Waiting for frames...")
                     break
+                # Yield placeholder to keep connection alive
+                time.sleep(0.1)  # Short wait before checking for next frame
                 
         
         # Cleanup token (consumer stays registered for other streams)
@@ -942,7 +943,8 @@ class StreamingService:
             return
 
         consecutive_empty = 0
-        max_empty = 1000  # About 3 seconds at 30 FPS
+        max_empty = 300  # 30 seconds timeout (300 * 0.1s)
+        last_processed_frame = None
         
         while self.active_processing_streams.get(camera_id) == stream_token and camera_id in self._video_background_threads:
             # Use SPMC ring buffer access
@@ -958,14 +960,19 @@ class StreamingService:
                 
                 buffer = self.frame_to_bytes(output_frame)
                 yield buffer
+                last_processed_frame = buffer
                 
+            elif last_processed_frame is not None:
+                # Re-yield last frame to keep stream alive
+                yield last_processed_frame
+                consecutive_empty = 0
             else:
                 consecutive_empty += 1
-                time.sleep(0.1)  # Short wait before checking for next frame
                 if consecutive_empty >= max_empty:
                     logger.warning(f"{Colors.RED}No processed frames for {camera_id}, ending stream{Colors.RESET}")
-                    # Yield placeholder frame to maintain stream continuity
-                    yield self.generate_failure_frame("Waiting for processed frames...")
+                    break
+                # Keep connection alive with small delay
+                time.sleep(0.1)
 
         # Cleanup token (consumer stays registered for other streams)
         if self.active_processing_streams.get(camera_id) == stream_token:
