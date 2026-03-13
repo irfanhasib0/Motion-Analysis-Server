@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff, RotateCcw } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../api';
 import './CameraList.css';
@@ -112,6 +112,11 @@ const CameraList = ({ cameras, setCameras }) => {
   const [isTogglingLiveMode, setIsTogglingLiveMode] = useState(false);
   const [rtspUnifiedCaptureEnabled, setRtspUnifiedCaptureEnabled] = useState(false);
   const [isTogglingRtspUnifiedCapture, setIsTogglingRtspUnifiedCapture] = useState(false);
+
+  // Stream health monitoring state
+  const [streamHealth, setStreamHealth] = useState({}); // { [camera_id]: health_data }
+  const [refreshingStreams, setRefreshingStreams] = useState({}); // { [camera_id]: boolean }
+  const [startingCameras, setStartingCameras] = useState({}); // { [camera_id]: boolean }
 
   const isLiveHlsMode = liveStreamMode === 'hls';
 
@@ -242,20 +247,185 @@ const CameraList = ({ cameras, setCameras }) => {
     };
   }, [cameras]);
 
+  // Stream health monitoring
+  useEffect(() => {
+    let cancelled = false;
+    let monitorInterval = null;
+
+    const checkStreamHealth = async () => {
+      try {
+        const response = await api.getAllCamerasStreamHealth();
+        if (!cancelled) {
+          setStreamHealth(response.data.cameras || {});
+        }
+      } catch (error) {
+        console.warn('Failed to check stream health:', error);
+      }
+    };
+
+    // Initial health check
+    checkStreamHealth();
+
+    // Set up periodic monitoring every 30 seconds  
+    monitorInterval = setInterval(checkStreamHealth, 30000);
+
+    return () => {
+      cancelled = true;
+      if (monitorInterval) {
+        clearInterval(monitorInterval);
+      }
+    };
+  }, []);
+
+  // Refresh stream functionality
+  const handleRefreshStream = async (cameraId) => {
+    try {
+      setRefreshingStreams(prev => ({ ...prev, [cameraId]: true }));
+      
+      // Force stream refresh by requesting new stream URLs with cache busting
+      const timestamp = Date.now();
+      
+      // Find and refresh video stream elements
+      const videoElements = document.querySelectorAll(`img[src*="${cameraId}"]`);
+      videoElements.forEach(element => {
+        const currentSrc = element.src;
+        const baseUrl = currentSrc.split('?')[0];
+        element.src = `${baseUrl}?refresh=${timestamp}`;
+      });
+
+      // Find and refresh audio stream elements
+      const audioElements = document.querySelectorAll(`audio source[src*="${cameraId}"]`);
+      audioElements.forEach(source => {
+        const audio = source.parentElement;
+        const currentSrc = source.src;
+        const baseUrl = currentSrc.split('?')[0];
+        source.src = `${baseUrl}?refresh=${timestamp}`;
+        audio.load(); // Force reload of audio element
+      });
+
+      toast.success(`Refreshed streams for camera ${cameraId}`);
+      
+      // Check stream health after refresh
+      setTimeout(async () => {
+        try {
+          const response = await api.getCameraStreamHealth(cameraId);
+          setStreamHealth(prev => ({ ...prev, [cameraId]: response.data }));
+        } catch (error) {
+          console.warn('Failed to check stream health after refresh:', error);
+        }
+      }, 2000);
+      
+    } catch (error) {
+      toast.error(`Failed to refresh streams: ${error.message}`);
+    } finally {
+      setRefreshingStreams(prev => ({ ...prev, [cameraId]: false }));
+    }
+  };
+
   // -----------------------------
   // Subcomponents
   // -----------------------------
+
+  // Stream Health Indicator Component
+  const StreamHealthIndicator = ({ cameraId, health }) => {
+    if (!health) {
+      return (
+        <div style={{ fontSize: '8px', color: '#64748b' }}>
+          Health: --
+        </div>
+      );
+    }
+
+    const { lag_stats, health_issues, needs_manual_refresh } = health;
+    const hasIssues = health_issues.video_producer_frozen || health_issues.audio_producer_frozen || health_issues.recording_frozen;
+    
+    const getStatusColor = () => {
+      if (needs_manual_refresh) return '#ef4444'; // red
+      if (hasIssues) return '#f59e0b'; // amber
+      return '#10b981'; // green
+    };
+
+    const getStatusText = () => {
+      if (needs_manual_refresh) return 'Manual refresh needed';
+      if (hasIssues) return 'Stream issues detected';
+      return 'Healthy';
+    };
+
+    return (
+      <div style={{ 
+        fontSize: '8px', 
+        display: 'flex',
+        alignItems: 'center',
+        flex: 1
+      }}>
+        <div style={{ 
+          color: getStatusColor(),
+          fontWeight: '500',
+          fontSize: '8px'
+        }}>
+          {getStatusText()}
+        </div>
+      </div>
+    );
+  };
   
   const CameraCard = ({ camera }) => {
     return (
       <div className="camera-card">
-        <div className="camera-header">
+        <div className="camera-header" style={{ position: 'relative' }}>
           <div className="camera-title">{camera.name}</div>
-          <div className="camera-info">
+          <div className="camera-info" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
             <span className={`status status-${camera.status}`}>{camera.status}</span>
             <span>{camera.resolution}</span>
             <span>{camera.fps ? `${camera.fps} FPS` : 'FPS N/A'}</span>
+            <span>{camera.audio_sample_rate ? `${camera.audio_sample_rate} Hz` : 'Audio N/A'}</span>
             <span>{camera.camera_type}</span>
+            
+            {/* Health Status - Inline with camera info */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '2px 6px',
+              borderRadius: '4px',
+              background: 'rgba(10,14,20,0.35)',
+              border: '1px solid rgba(148,163,184,0.15)',
+              fontSize: '8px',
+              minWidth: 'fit-content',
+              maxWidth: '120px'
+            }}>
+              <StreamHealthIndicator cameraId={camera.id} health={streamHealth[camera.id]} />
+            </div>
+            
+            {/* Reload Button - Inline with camera info */}
+            <button
+              onClick={() => handleRefreshStream(camera.id)}
+              disabled={refreshingStreams[camera.id] || camera.status !== 'online'}
+              title="Refresh streams if having connection issues"
+              style={{
+                background: 'rgba(10,14,20,0.7)',
+                border: '1px solid rgba(148,163,184,0.3)',
+                borderRadius: '6px',
+                width: '20px',
+                height: '20px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: camera.status !== 'online' ? 'not-allowed' : 'pointer',
+                opacity: camera.status !== 'online' ? 0.5 : (refreshingStreams[camera.id] ? 0.7 : 1),
+                color: '#d6deea',
+                transition: 'opacity 0.2s ease',
+                flexShrink: 0
+              }}
+            >
+              <RotateCcw 
+                size={10} 
+                style={{
+                  transform: refreshingStreams[camera.id] ? 'rotate(360deg)' : 'none',
+                  transition: refreshingStreams[camera.id] ? 'transform 1s linear infinite' : 'transform 0.2s ease'
+                }} 
+              />
+            </button>
           </div>
         </div>
 
@@ -270,10 +440,21 @@ const CameraList = ({ cameras, setCameras }) => {
                 <button
                   className="btn btn-success"
                   onClick={() => handleStartCamera(camera.id)}
-                  style={COMPACT_BUTTON_STYLE}
+                  disabled={startingCameras[camera.id]}
+                  style={{
+                    ...COMPACT_BUTTON_STYLE,
+                    animation: startingCameras[camera.id] ? 'pulse 1.5s ease-in-out infinite' : 'none',
+                    opacity: startingCameras[camera.id] ? 0.8 : 1,
+                  }}
                 >
-                  <Power size={14} />
-                  Start
+                  <Power 
+                    size={14} 
+                    style={{
+                      transform: startingCameras[camera.id] ? 'scale(1.2)' : 'scale(1)',
+                      transition: 'transform 0.3s ease'
+                    }} 
+                  />
+                  {startingCameras[camera.id] ? 'Starting...' : 'Start'}
                 </button>
               ) : (
                 <button
@@ -646,6 +827,7 @@ const CameraList = ({ cameras, setCameras }) => {
   
   const handleStartCamera = async (cameraId) => {
     try {
+      setStartingCameras(prev => ({ ...prev, [cameraId]: true }));
       await api.startCamera(cameraId);
       // Give background threads time to start before UI shows streams
       await new Promise(resolve => setTimeout(resolve, 750));
@@ -654,13 +836,15 @@ const CameraList = ({ cameras, setCameras }) => {
     } catch (error) {
       console.error('Start camera error:', error);
       toast.error('Failed to start camera: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setStartingCameras(prev => ({ ...prev, [cameraId]: false }));
     }
   };
 
   const handleStopCamera = async (cameraId) => {
     try {
       await api.stopCamera(cameraId);
-      try { await api.closeCameraStream(cameraId); } catch {}
+      try { await api.stopCamera(cameraId); } catch {}
       patchCameraInState(cameraId, { status: 'offline' });
       toast.success('Camera stopped');
     } catch (error) {

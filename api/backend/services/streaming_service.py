@@ -23,6 +23,18 @@ from audioproc import FrequencyIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
 
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'  # Reset to default
+
 class StreamingService:
     def __init__(self, frame_rbf_len: int = 10, audio_rbf_len: int = 10, results_rbf_len: int = 10):
         #self.db = DatabaseService()  # Original database service for cameras and recordings
@@ -82,18 +94,14 @@ class StreamingService:
         self._ring_buffer_lock = threading.RLock()  # For buffer management
         self._video_thread_locks: Dict[str, threading.Lock] = {}
 
-        # Current results state for combining video and audio results
-        self._current_video_results: Dict[str, Dict[str, Any]] = {}
-        self._current_audio_results: Dict[str, Dict[str, Any]] = {}
-
         self.max_sequence_number = 2**32 -1  # Prevent unbounded growth of sequence numbers
         self.frame_rbf_len = frame_rbf_len  # Ring buffer length for frames (from config)
         self.audio_rbf_len = audio_rbf_len  # Ring buffer length for audio chunks (from config)
         self.results_rbf_len = results_rbf_len  # Ring buffer length for results (from config)
-        self.video_io_stat_log_interval = 60  # Log video I/O stats every 60 seconds
-        self.audio_io_stat_log_interval = 60  # Log audio I/O stats every 60 seconds
+        self.no_motion_slow_down_thr_sec = 300
+        self.no_motion_slow_down_delay_sec = 0.3
 
-        logger.info(f"Initialized StreamingService with ring buffer lengths - frames: {frame_rbf_len}, audio: {audio_rbf_len}, results: {results_rbf_len}")
+        # Initialize StreamingService - ready for camera management
     
     # =====================================================================
     # UTILITY AND HELPER METHODS
@@ -147,23 +155,18 @@ class StreamingService:
         with self._ring_buffer_lock:
             if camera_id not in self._frame_ring_buffers:
                 self._frame_ring_buffers[camera_id] = FrameRingBuffer(capacity=self.frame_rbf_len, enable_stats=True)
-                logger.info(f"Created frame ring buffer for camera {camera_id}")
             
             if camera_id not in self._overlay_frame_ring_buffers:
                 self._overlay_frame_ring_buffers[camera_id] = FrameRingBuffer(capacity=self.frame_rbf_len, enable_stats=True)
-                logger.info(f"Created overlay frame ring buffer for camera {camera_id}")
 
             if camera_id not in self._audio_ring_buffers:
-                self._audio_ring_buffers[camera_id] = AudioRingBuffer(capacity=self.audio_rbf_len, enable_stats=True)  # Increased capacity to prevent dropping
-                logger.info(f"Created audio ring buffer for camera {camera_id}")
+                self._audio_ring_buffers[camera_id] = AudioRingBuffer(capacity=self.audio_rbf_len, enable_stats=True)
             
             if camera_id not in self._results_ring_buffers:
                 self._results_ring_buffers[camera_id] = ResultsRingBuffer(capacity=self.results_rbf_len, enable_stats=True)
-                logger.info(f"Created results ring buffer for camera {camera_id}")
             
             if camera_id not in self._viz_ring_buffers:
-                self._viz_ring_buffers[camera_id] = FrameRingBuffer(capacity=self.frame_rbf_len, enable_stats=True)  # Smaller capacity for viz frames
-                logger.info(f"Created visualization ring buffer for camera {camera_id}")
+                self._viz_ring_buffers[camera_id] = FrameRingBuffer(capacity=self.frame_rbf_len, enable_stats=True)
             
 
     def register_consumer(self, camera_id: str, consumer_id: str, 
@@ -194,7 +197,7 @@ class StreamingService:
         if 'overlay' in data_types:
             success &= self._overlay_frame_ring_buffers[camera_id].register_consumer(f"{consumer_id}_overlay")
         
-        logger.info(f"Registered consumer {consumer_id} for camera {camera_id}, data_types: {data_types}, success: {success}")
+        logger.info(f"Registered consumer {consumer_id} for camera {camera_id} ({data_types})")
         return success
     
     def unregister_consumer(self, camera_id: str, consumer_id: str, 
@@ -220,7 +223,7 @@ class StreamingService:
         if 'overlay' in data_types:
             success &= self._overlay_frame_ring_buffers[camera_id].unregister_consumer(f"{consumer_id}_overlay")
         
-        logger.info(f"Unregistered consumer {consumer_id} from camera {camera_id}")
+        logger.info(f"Unregistered consumer {consumer_id} from {camera_id}")
         return success
     
     # =====================================================================
@@ -270,6 +273,9 @@ class StreamingService:
     def start_av_stream(self, camera_id: str):
         """Start background video and audio streams directly (checks audio_enabled setting)."""
         try:
+            # Ensure ring buffers exist
+            self._ensure_ring_buffers(camera_id)
+            
             # Start video background thread if not already running
             if camera_id not in self._video_background_threads:
                 self.start_video_stream(camera_id)
@@ -285,7 +291,7 @@ class StreamingService:
             time.sleep(0.5)
                 
         except Exception as error:
-            logger.warning(f"Failed to start AV streams for {camera_id}: {error}")
+            logger.warning(f"{Colors.RED}Failed to start AV streams for {camera_id}: {error}{Colors.RESET}")
 
 
 
@@ -316,12 +322,25 @@ class StreamingService:
             stats["window_start"] = now
         return stats["fps"]
 
-    @staticmethod
-    def _aggregate_motion_result(raw_result: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        merged = {'vel': 0.0, 'bg_diff': 0, 'ts': time.time()}
+    def _aggregate_motion_result(self, raw_result: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        merged = {'vel': 0.0, 'bg_diff': 0, 'ts': time.time(), 'det_ts': None, 'detected_vel': False, 'detection_bg_diff': False}
         for item in raw_result.values():
             merged['vel'] = max(float(item.get('vel', 0.0) or 0.0), merged['vel'])
             merged['bg_diff'] = max(int(item.get('bg_diff', 0) or 0), merged['bg_diff'])
+        
+        # Check for stale motion data
+        curr_time = time.time()
+        res_timestamp = float(merged.get('ts', 0.0) or 0.0)
+        is_stale_motion_sample = (res_timestamp <= 0.0) or ((curr_time - res_timestamp) > self.motion_result_max_age_sec)
+        
+        # Add motion detection threshold checking with staleness check
+        if not is_stale_motion_sample:
+            merged['detected_vel'] = merged['vel'] > self.max_velocity
+            merged['detection_bg_diff'] = merged['bg_diff'] >= self.max_bg_diff
+
+        if merged['detected_vel'] or merged['detection_bg_diff']:
+            merged['det_ts'] = time.time()  # Update timestamp to now if motion is detected
+            
         return merged
 
     def _extract_detect_payload(
@@ -449,17 +468,21 @@ class StreamingService:
             return False
 
         if not bool(db_camera.get('audio_enabled', False)):
-            logger.info(f"Audio not enabled for camera: {camera_id}")
+            logger.warning(f"{Colors.RED}Audio not enabled for {camera_id}{Colors.RESET}")
             return False
 
         # Check if thread is already running and alive
         existing_thread = self._audio_background_threads.get(camera_id)
         if existing_thread and existing_thread.is_alive():
-            logger.debug(f"Audio Thread:: Audio background thread already running for camera {camera_id}")
+            logger.warning(f"{Colors.RED}Audio thread already running for {camera_id}{Colors.RESET}")
             return True
 
         # Stop existing thread if running
         self.stop_audio_stream(camera_id)
+        
+        # Ensure ring buffers and register consumer
+        self._ensure_ring_buffers(camera_id)
+        self.register_consumer(camera_id, f"audio_stream_{camera_id}", ['audio'])
         
         # Create thread-safe resources
         stop_event = threading.Event()
@@ -471,31 +494,29 @@ class StreamingService:
             """Background thread that continuously captures audio chunks."""
             
             # Start audio capture
-            cap = self.audio_capture(camera_id)
+            success = self.start_audio(camera_id)
+            if not success:
+                logger.warning(f"{Colors.RED}Failed to start audio for {camera_id}{Colors.RESET}")
+                return
+            
+            cap = self._audio_streams.get(camera_id)
             if not cap or not cap.is_audio_stream_opened():
-                logger.warning(f"Failed to start audio capture for camera {camera_id}")
+                logger.warning(f"{Colors.RED}Audio capture unavailable for {camera_id}{Colors.RESET}")
                 return
             
-            self._audio_streams[camera_id] = cap
             analyzer = self._get_audio_chunk_analyzer(camera_id)
-            
-            if analyzer is None:
-                logger.warning(f"No audio analyzer available for camera {camera_id} - audio analysis will be skipped")
-                return
-            
-            logger.info(f"Audio background thread started for camera {camera_id}")
-            
             consecutive_failures = 0
             max_failures = 10
             audio_chunk_seq = 0
             
+            logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
             while not stop_event.is_set() and cap.is_audio_stream_opened():
                 ret, chunk = cap.read_audio()
                 
                 if not ret or chunk is None or len(chunk) == 0:
                     consecutive_failures += 1
                     if consecutive_failures >= max_failures:
-                        logger.warning(f"Too many audio read failures for {camera_id}, stopping thread")
+                        logger.warning(f"{Colors.RED}Too many audio failures for {camera_id}, stopping{Colors.RESET}")
                         break
                     time.sleep(0.01)
                     continue
@@ -505,7 +526,7 @@ class StreamingService:
                 
                 # Process audio analysis
                 samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
-                samples /= 32768.0
+                samples /= (32768.0/10.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
                 
                 self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
                 audio_chunk_index = self._audio_chunk_index[camera_id]
@@ -519,15 +540,15 @@ class StreamingService:
                     self._latest_res_audio[camera_id] = {
                         'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
                         'freq': float(analysis.get('peak_frequency_mean', 0.0) or 0.0),
+                        'detected_loudness': float(analysis.get('overall_intensity', 0.0) or 0.0) > 0.0  # Threshold set to 0.0 for now
                     }
                     
-                    # Update current audio results and publish combined results to ring buffer
+                    # Update current audio results and publish only audio to ring buffer
                     if camera_id in self._results_ring_buffers:
-                        self._current_audio_results[camera_id] = self._latest_res_audio[camera_id]
-                        video_res = self._current_video_results.get(camera_id, {})
-                        audio_res = self._current_audio_results[camera_id]
-                        self._results_ring_buffers[camera_id].put(video_res, audio_res)
+                        self._results_ring_buffers[camera_id].put_audio_only(self._latest_res_audio[camera_id])
                 
+                _ = self._update_loop_fps(f"{camera_id}:audio")
+
                 # Store latest chunk with sequence number (thread-safe)
                 with audio_lock:
                     self._latest_audio_chunk[camera_id] = chunk
@@ -538,12 +559,12 @@ class StreamingService:
                         self._audio_ring_buffers[camera_id].put(chunk)
                         
                     # Periodic audio stats logging
-                    if audio_chunk_seq % (30* self.audio_io_stat_log_interval) == 0:  # Print stats every 1500 chunks (~30 seconds at 50Hz)
-                        audio_stats = self._audio_ring_buffers[camera_id].get_stats()
-                        if audio_stats.get('stats_enabled'):
-                            logger.info(f"Audio Buffer Stats for {camera_id}: Producer {audio_stats['producer_fps']} FPS, Consumer {audio_stats['consumer_fps']} FPS")
-            
-            logger.info(f"Audio Thread:: Audio background thread finished for camera {camera_id}, Stop event: {stop_event.is_set()}, Audio stream opened: {cap.is_audio_stream_opened()}")
+                    #if audio_chunk_seq % (30* self.audio_io_stat_log_interval) == 0:  # Print stats every 1500 chunks (~30 seconds at 50Hz)
+                    #   audio_stats = self._audio_ring_buffers[camera_id].get_stats()
+                    #    if audio_stats.get('stats_enabled'):
+                    #        logger.info(f"Audio Thread:: Audio Buffer Stats for {camera_id}: Producer {audio_stats['producer_fps']} FPS, audio: {audio_fps} FPS, Consumer {audio_stats['consumer_fps']} FPS")
+                
+            logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
             # Cleanup
             cap.release_audio()
             self._audio_streams.pop(camera_id, None)
@@ -553,7 +574,7 @@ class StreamingService:
         thread.start()
         self._audio_background_threads[camera_id] = thread
         
-        logger.info(f"Audio Thread:: Started audio background thread for camera {camera_id}")
+        logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
         return True
 
     def stop_audio_stream(self, camera_id: str) -> bool:
@@ -571,6 +592,9 @@ class StreamingService:
         if thread and thread.is_alive():
             thread.join(timeout=2)
         
+        # Unregister consumer
+        self.unregister_consumer(camera_id, f"audio_stream_{camera_id}", ['audio'])
+        
         # Cleanup
         self._audio_background_threads.pop(camera_id, None)
         self._audio_stop_events.pop(camera_id, None)
@@ -584,9 +608,12 @@ class StreamingService:
         self._latest_res_audio.pop(camera_id, None)
         self._audio_chunk_index.pop(camera_id, None)
         
-        # Only log if we actually stopped a running thread
         if thread_was_running:
-            logger.info(f"Audio Thread:: Stopped audio background thread for camera {camera_id}")
+            logger.info(f"{Colors.YELLOW}Audio stream stopped for {camera_id}{Colors.RESET}")
+        
+        # Stop audio capture
+        self.stop_audio(camera_id)
+        
         return True
 
     def generate_audio_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
@@ -597,34 +624,32 @@ class StreamingService:
             return
 
         if not bool(db_camera.get('audio_enabled', False)):
-            logger.info(f"Audio not enabled for camera: {camera_id}")
+            logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
             return
         
         audio_sample_rate = int(db_camera.get('audio_sample_rate') or os.getenv('AUDIO_SAMPLE_RATE', '16000'))
         audio_channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
         
-        # Create stream token and register as consumer
+        # Create stream token and use pre-registered consumer
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
-        consumer_id = f"audio_stream_{stream_token[-8:]}"
+        consumer_id = f"audio_stream_{camera_id}"  # Use camera-specific consumer ID
         previous_token = self.active_audio_streams.get(camera_id)
         if previous_token:
-            logger.info(f"Audio Stream:: Taking over existing audio stream for camera {camera_id}")
+            logger.info(f"{Colors.GREEN}Audio stream connected for {camera_id}{Colors.RESET}")
+        else:
+            logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
         self.active_audio_streams[camera_id] = stream_token
         
-        # Register as consumer for audio data
-        self.register_consumer(camera_id, consumer_id, ['audio'])
+        # Consumer already registered in start_av_stream - just use it
         
         # Yield WAV header first
         yield self._make_wav_header(audio_sample_rate, audio_channels)
         
         # Background thread should already be running from /start endpoint
         if camera_id not in self._audio_background_threads:
-            logger.warning(f"Audio Thread:: No background thread found for camera {camera_id} - user must start camera first")
+            logger.warning(f"{Colors.RED}No audio thread for {camera_id} - start camera first{Colors.RESET}")
             return
         
-        logger.info(f"Audio Stream:: Starting audio stream endpoint for camera {camera_id} with token {stream_token}, consumer_id: {consumer_id}")
-        
-        last_audio_chunk_seq = -1
         consecutive_empty = 0
         max_empty = 50  # About 5 seconds at 100ms chunks
         
@@ -638,20 +663,18 @@ class StreamingService:
             if current_chunk and len(current_chunk) > 0:
                 yield current_chunk
                 consecutive_empty = 0
-                last_audio_chunk_seq += 1
             else:
                 consecutive_empty += 1
-                if consecutive_empty >= max_empty:
-                    logger.warning(f"Audio Stream::No new audio data for camera {camera_id}, ending stream")
-                    break
                 time.sleep(0.1)  # 100ms wait between checks
+                if consecutive_empty >= max_empty:
+                    logger.warning(f"{Colors.RED}No audio data for {camera_id}, ending stream{Colors.RESET}")
+                    yield b''
         
-        # Cleanup token and unregister consumer
+        # Cleanup token (consumer stays registered for other streams)
         if self.active_audio_streams.get(camera_id) == stream_token:
             self.active_audio_streams.pop(camera_id, None)
-        self.unregister_consumer(camera_id, consumer_id, ['audio'])
         
-        logger.info(f"Audio Stream:: Audio stream endpoint finished for camera {camera_id}")
+        logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
 
     def start_video_stream(self, camera_id: str) -> bool:
         """Start background video stream thread for camera."""
@@ -663,18 +686,23 @@ class StreamingService:
         # Stop existing thread if running
         self.stop_video_stream(camera_id)
         
+        # Ensure ring buffers and register consumers
+        self._ensure_ring_buffers(camera_id)
+        self.register_consumer(camera_id, f"video_stream_{camera_id}", ['overlay'])
+        self.register_consumer(camera_id, f"proc_stream_{camera_id}", ['viz', 'results'])
+        
         # Initialize camera capture if needed
         if camera_id not in self._camera_streams:
-            success = self.start_camera(camera_id)
+            success = self.start_video(camera_id)
             if not success:
-                logger.warning(f"Video Thread:: Failed to start camera for video stream: {camera_id}")
+                logger.warning(f"{Colors.RED}Failed to start video for {camera_id}{Colors.RESET}")
                 return False
         
         cap = self._camera_streams.get(camera_id)
         tracker = self._camera_trackers.get(camera_id)
         
         if not cap or not tracker:
-            logger.warning(f"Video Thread:: Camera or tracker not available for {camera_id}")
+            logger.warning(f"{Colors.RED}Camera unavailable for {camera_id}{Colors.RESET}")
             return False
         
         # Create thread-safe resources
@@ -690,7 +718,7 @@ class StreamingService:
         
         def _video_thread():
             """Background thread that continuously captures and processes video frames."""
-            logger.info(f"Video Thread:: Video background thread started for camera {camera_id}")
+            logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
             
             consecutive_failures = 0
             max_failures = 10
@@ -703,10 +731,11 @@ class StreamingService:
                     if not ret:
                         consecutive_failures += 1
                         if consecutive_failures >= max_failures:
-                            logger.warning(f"Video Thread:: Too many video read failures for {camera_id}, stopping thread")
+                            logger.warning(f"{Colors.RED}Too many video failures for {camera_id}, stopping{Colors.RESET}")
                             break
-                        time.sleep(0.01)
-                        continue
+                        else:
+                            time.sleep(0.1)
+                            continue
                     
                     consecutive_failures = 0
                     
@@ -740,58 +769,42 @@ class StreamingService:
                         if camera_id in self._viz_ring_buffers:
                             self._viz_ring_buffers[camera_id].put(viz_frame)
                         
-                        # Update current video results and publish combined results to ring buffer
+                        # Update current video results and publish only video to ring buffer
                         if camera_id in self._results_ring_buffers:
-                            self._current_video_results[camera_id] = res
-                            video_res = self._current_video_results[camera_id]
-                            audio_res = self._current_audio_results.get(camera_id, {})
-                            self._results_ring_buffers[camera_id].put(video_res, audio_res)
+                            self._results_ring_buffers[camera_id].put_video_only(res)
                         self._latest_pts_payload[camera_id] = flow_pts
                         
                 else:
                     with stream_lock:
                         viz_frame = self._latest_viz.get(camera_id)
-                        res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time()})
+                        res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time(), 'detected_vel': False, 'detection_bg_diff': False})
                         if viz_frame is None:
                             viz_frame = stream_frame
                             self._latest_viz[camera_id] = viz_frame
                         flow_pts = self._latest_pts_payload.get(camera_id)
                         
-                        
-                        
-                
-                # Add FPS overlay
+                if time.time() - res['det_ts'] > self.no_motion_slow_down_thr_sec:
+                    time.sleep(self.no_motion_slow_down_delay_sec)
+                # Primary video stream: clean frame with FPS and optical flow overlays
                 frame_fps = self._update_loop_fps(f"{camera_id}:primary")
-                stream_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps)
-                stream_frame = self._draw_optical_flow_overlay(stream_frame, camera_id, flow_pts)
-                self._overlay_frame_ring_buffers[camera_id].put(stream_frame)
+                primary_frame = self._drawing.draw_fps_overlay(stream_frame.copy(), frame_fps)
+                primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
+                self._overlay_frame_ring_buffers[camera_id].put(primary_frame)
                 # Convert to bytes and store (thread-safe)
-                frame_bytes = self.frame_to_bytes(stream_frame)
+                frame_bytes = self.frame_to_bytes(primary_frame)
                 with video_lock:
                     self._latest_video_frame[camera_id] = frame_bytes
                     
-                # Periodic debug logging and stats
-                if frame_index % 30 == 0:  # Log every 30 frames (about once per second at 30 FPS)
-                    logger.debug(f"Video Thread:: {camera_id} processed frame {frame_index}, bytes length: {len(frame_bytes)}")
-                    
-                    # Print ring buffer FPS stats periodically (safe check for frame_fps > 0 to avoid ZeroDivisionError)
-                    stats_interval = int(frame_fps * self.video_io_stat_log_interval) if frame_fps > 0 else 900  # Fallback to 900 frames (~30 seconds at 30 FPS)
-                    if frame_index % stats_interval == 0:
-                        stats = self.get_ring_buffer_stats(camera_id)
-                        logger.info(f"Ring Buffer Stats for {camera_id}:")
-                        for buffer_type, buffer_stats in stats.items():
-                            if buffer_stats.get('stats_enabled'):
-                                logger.info(f"  {buffer_type}: Producer {buffer_stats['producer_fps']} FPS, Consumer {buffer_stats['consumer_fps']} FPS")
-                
-                
-            logger.info(f"Video Thread:: Video background thread finished for camera {camera_id}, Stop event: {stop_event.is_set()}, Video stream opened: {cap.is_video_stream_opened()}")
+                    # Log every 30 frames for debugging
+                    if frame_index % 30 == 0:
+                        logger.debug(f"Video {camera_id} frame {frame_index}, bytes: {len(frame_bytes)}")
         
         # Start thread
         thread = threading.Thread(target=_video_thread, daemon=True, name=f'video-bg-{camera_id}')
         thread.start()
         self._video_background_threads[camera_id] = thread
         
-        logger.info(f"Video Thread:: Started video background thread for camera {camera_id}")
+        logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
         return True
 
     def stop_video_stream(self, camera_id: str) -> bool:
@@ -806,6 +819,10 @@ class StreamingService:
         if thread and thread.is_alive():
             thread.join(timeout=2)
         
+        # Unregister consumers
+        self.unregister_consumer(camera_id, f"video_stream_{camera_id}", ['overlay'])
+        self.unregister_consumer(camera_id, f"proc_stream_{camera_id}", ['viz', 'results'])
+        
         # Cleanup
         self._video_background_threads.pop(camera_id, None)
         self._video_stop_events.pop(camera_id, None)
@@ -813,12 +830,24 @@ class StreamingService:
         self._latest_video_frame.pop(camera_id, None)
         self.active_streams.pop(camera_id, None)
         
-        # Clean up results tracking
-        self._current_video_results.pop(camera_id, None)
-        self._current_audio_results.pop(camera_id, None)
+        logger.info(f"{Colors.YELLOW}Video stream stopped for {camera_id}{Colors.RESET}")
         
-        logger.info(f"Video Thread:: Stopped video background thread for camera {camera_id}")
+        # Stop video capture
+        self.stop_video(camera_id)
+        
         return True
+
+    def stop_av_stream(self, camera_id: str):
+        """Stop background video and audio streams."""
+        try:
+            # Stop background threads (they handle their own consumer cleanup)
+            self.stop_video_stream(camera_id)
+            self.stop_audio_stream(camera_id)
+            
+            logger.info(f"{Colors.YELLOW}Stopped AV streams for {camera_id}{Colors.RESET}")
+                
+        except Exception as error:
+            logger.warning(f"{Colors.RED}Failed to stop AV streams for {camera_id}: {error}{Colors.RESET}")
 
     # =====================================================================
     # STREAM ENDPOINT GENERATORS
@@ -828,38 +857,35 @@ class StreamingService:
         """Generate video stream by reading from background thread data."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            logger.warning(f"Video Stream:: Camera not found: {camera_id}")
+            logger.warning(f"{Colors.RED}Camera not found: {camera_id}{Colors.RESET}")
             return self.generate_failure_frame(f"Camera {camera_id} Not Found")
         
-        # Create stream token and register as consumer
+        # Create stream token and use pre-registered consumer
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
-        consumer_id = f"video_stream_{stream_token[-8:]}"
+        consumer_id = f"video_stream_{camera_id}"  # Use camera-specific consumer ID
         previous_token = self.active_streams.get(camera_id)
         if previous_token:
-            logger.info(f"Video Stream:: Taking over existing video stream for camera {camera_id}")
+            logger.info(f"{Colors.GREEN}Video stream connected for {camera_id}{Colors.RESET}")
+        else:
+            logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
         self.active_streams[camera_id] = stream_token
         
-        # Register as consumer for overlay frames (frames with FPS and optical flow overlays)
-        self.register_consumer(camera_id, consumer_id, ['overlay'])
+        # Consumer already registered in start_av_stream - just use it
         
         # Background thread should already be running from /start endpoint
         if camera_id not in self._video_background_threads:
-            logger.warning(f"Video Thread:: No background thread found for camera {camera_id} - starting one...")
+            logger.warning(f"{Colors.RED}No video thread for {camera_id} - starting one...{Colors.RESET}")
             success = self.start_video_stream(camera_id)
             if not success:
-                logger.error(f"Video Stream:: Failed to start background thread for camera {camera_id}")
+                logger.error(f"{Colors.RED}Failed to start video thread for {camera_id}{Colors.RESET}")
                 yield self.generate_failure_frame("Failed to start video processing")
                 return
             # Give the thread a moment to start producing frames
             time.sleep(0.5)
         
-        logger.info(f"Video Stream:: Starting video stream endpoint for camera {camera_id} with token {stream_token}, consumer_id: {consumer_id}")
-        
         video_lock = self._video_thread_locks.get(camera_id)
-        last_frame_seq = -1
-        last_yielded_frame = None
         consecutive_empty = 0
-        max_empty = 100  # About 3 seconds at 30 FPS
+        max_empty = 1000  # About 3 seconds at 30 FPS
         
         # Stream loop
         while (self.active_streams.get(camera_id) == stream_token and 
@@ -869,78 +895,62 @@ class StreamingService:
             current_overlay_frame = self._get_spmc_data(camera_id, consumer_id, 'overlay')
             
             # Convert overlay frame to bytes if available
-            current_frame_bytes = None
             if current_overlay_frame is not None:
                 current_frame_bytes = self.frame_to_bytes(current_overlay_frame)
-                last_frame_seq += 1
             
-            if current_frame_bytes is not None:
                 yield current_frame_bytes
-                last_yielded_frame = current_frame_bytes
                 consecutive_empty = 0
-                # Periodic debug logging for successful frames
-                if last_frame_seq % 30 == 0:
-                    logger.debug(f"Video Stream:: {camera_id} yielded overlay frame seq {last_frame_seq}, bytes length: {len(current_frame_bytes)}")
-            elif last_yielded_frame is not None:
-                # Re-yield last frame to maintain stream continuity (prevents flickering)
-                yield last_yielded_frame
-                consecutive_empty = 0
+            
             else:
                 consecutive_empty += 1
+                time.sleep(0.1)  # Short wait before checking for next frame
                 if consecutive_empty >= max_empty:
-                    logger.warning(f"Video Stream:: No video data for camera {camera_id}, ending stream")
+                    logger.warning(f"{Colors.RED}No video data for {camera_id}, ending stream{Colors.RESET}")
+                    # Only yield placeholder when no frame has been captured yet
+                    yield self.generate_failure_frame("Waiting for frames...")
                     break
                 
-                # Only yield placeholder when no frame has been captured yet
-                yield self.generate_failure_frame("Waiting for frames...")
-                
-            time.sleep(1.0 / 30)  # 30 FPS target
         
-        # Cleanup token and unregister consumer
+        # Cleanup token (consumer stays registered for other streams)
         if self.active_streams.get(camera_id) == stream_token:
             self.active_streams.pop(camera_id, None)
-        self.unregister_consumer(camera_id, consumer_id, ['overlay'])
         
-        logger.info(f"Video Stream:: Video stream endpoint finished for camera {camera_id}")
+        logger.info(f"{Colors.YELLOW}Video stream finished for {camera_id}{Colors.RESET}")
     
     def generate_processing_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
         """Generate processed video stream from camera (visualization overlay)."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            logger.warning(f"Camera not found: {camera_id}")
+            logger.warning(f"{Colors.RED}Camera not found: {camera_id}{Colors.RESET}")
             yield self.generate_failure_frame(f"Camera {camera_id} Not Found")
             return
 
-        # Create stream token and register as consumer
+        # Create stream token and use pre-registered consumer
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
-        consumer_id = f"proc_stream_{stream_token[-8:]}"
+        consumer_id = f"proc_stream_{camera_id}"  # Use camera-specific consumer ID
         previous_token = self.active_processing_streams.get(camera_id)
         if previous_token:
-            logger.info(f"Processing Stream:: Taking over existing processing stream for camera {camera_id}")
+            logger.info(f"{Colors.GREEN}Processing stream connected for {camera_id}{Colors.RESET}")
+        else:
+            logger.info(f"{Colors.GREEN}Processing stream started for {camera_id}{Colors.RESET}")
         self.active_processing_streams[camera_id] = stream_token
-        
-        # Register as consumer for visualization data
-        self.register_consumer(camera_id, consumer_id, ['viz', 'results'])
         
         # Ensure video background thread is running
         if camera_id not in self._video_background_threads:
-            logger.warning(f"Processing Stream:: No background thread found for camera {camera_id} - user must start camera first")
+            logger.warning(f"{Colors.RED}No processing thread for {camera_id} - start camera first{Colors.RESET}")
             yield self.generate_failure_frame("Camera not started - click start button first")
             return
 
-        logger.info(f"Processing Stream:: Starting processed video stream for camera {camera_id} with token {stream_token}, consumer_id: {consumer_id}")
-        
         consecutive_empty = 0
-        max_empty = 100  # About 3 seconds at 30 FPS
-        last_processed_frame = None
-
+        max_empty = 1000  # About 3 seconds at 30 FPS
+        
         while self.active_processing_streams.get(camera_id) == stream_token and camera_id in self._video_background_threads:
             # Use SPMC ring buffer access
             processed_frame = self._get_spmc_data(camera_id, consumer_id, 'viz')
             
             if processed_frame is not None:
                 results = self._get_spmc_data(camera_id, consumer_id, 'results')
-                res = results.get('video', {'vel': 0, 'bg_diff': 0}) if results else {'vel': 0, 'bg_diff': 0}
+                res = results.get('video', {'vel': 0, 'bg_diff': 0, 'detected_vel': False, 'detection_bg_diff': False}) if results else {'vel': 0, 'bg_diff': 0, 'detected_vel': False, 'detection_bg_diff': False}
                 consecutive_empty = 0
                 output_frame = processed_frame.copy()
                 processing_fps = self._update_loop_fps(f"{camera_id}:processing")
@@ -948,29 +958,20 @@ class StreamingService:
                 
                 buffer = self.frame_to_bytes(output_frame)
                 yield buffer
-                last_processed_frame = buffer
-
-            elif last_processed_frame is not None:
-                # Re-yield last frame to maintain stream continuity (prevents flickering)
-                yield last_processed_frame
-                consecutive_empty = 0
+                
             else:
                 consecutive_empty += 1
+                time.sleep(0.1)  # Short wait before checking for next frame
                 if consecutive_empty >= max_empty:
-                    logger.warning(f"Processing Stream:: No processed frame data for camera {camera_id}, ending stream")
-                    break
-                # Yield placeholder frame to maintain stream continuity
-                yield self.generate_failure_frame("Waiting for processed frames...")
-            
-            # Control frame rate
-            time.sleep(1.0 / 30)  # 30 FPS max
+                    logger.warning(f"{Colors.RED}No processed frames for {camera_id}, ending stream{Colors.RESET}")
+                    # Yield placeholder frame to maintain stream continuity
+                    yield self.generate_failure_frame("Waiting for processed frames...")
 
-        # Cleanup token and unregister consumer
+        # Cleanup token (consumer stays registered for other streams)
         if self.active_processing_streams.get(camera_id) == stream_token:
             self.active_processing_streams.pop(camera_id, None)
-        self.unregister_consumer(camera_id, consumer_id, ['viz', 'results'])
         
-        logger.info(f"Processing Stream:: Processed video stream finished for camera {camera_id}")
+        logger.info(f"{Colors.YELLOW}Processing stream finished for {camera_id}{Colors.RESET}")
             
             
     def generate_recorded_video_stream(self, recording_id: str) -> Generator[bytes, None, None]:

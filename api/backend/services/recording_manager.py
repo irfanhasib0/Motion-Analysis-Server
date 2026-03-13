@@ -328,25 +328,22 @@ class RecordingManager:
             if curr_time - last_motion_check > self.motion_check_interval:
                 recent_motion_detected = False
 
-                res_timestamp = float(res.get('ts', 0.0) or 0.0)
-                is_stale_motion_sample = (res_timestamp <= 0.0) or (
-                    (curr_time - res_timestamp) > self.motion_result_max_age_sec
-                )
+                # Read detection flags directly from streaming service (staleness already handled)
+                detected_vel = bool(res.get('detected_vel', False))
+                detection_bg_diff = bool(res.get('detection_bg_diff', False))
+                vel = float(res.get('vel', 0.0))
+                bg_diff = int(res.get('bg_diff', 0))
 
-                if is_stale_motion_sample:
-                    vel = 0.0
-                    bg_diff = 0
-                else:
-                    vel = float(res.get('vel', 0.0))
-                    bg_diff = int(res.get('bg_diff', 0))
-
-                if vel > self.max_velocity or bg_diff >= self.max_bg_diff:
+                if detected_vel or detection_bg_diff:
                     recent_motion_detected = True
                     clip_motion_detected = True
                     clip_vel = max(clip_vel, vel)
                     clip_bg_diff = max(clip_bg_diff, bg_diff)
+                
+                # Read detected loudness flag from audio results
+                detected_loudness = bool(audio_res.get('detected_loudness', False))
                 clip_loudness = max(clip_loudness, float(audio_res.get('int', 0.0)))
-                logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {(curr_time - clip_start_time)},{self.max_clip_length}, {clip_motion_detected} - vel: {vel:.2f}, bg_diff: {bg_diff}, loudness: {clip_loudness:.2f}, stale: {is_stale_motion_sample}{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {(curr_time - clip_start_time)},{self.max_clip_length}, {clip_motion_detected} - vel: {vel:.2f}, bg_diff: {bg_diff}, loudness: {clip_loudness:.2f}{Colors.RESET}")
                 if not recent_motion_detected or (curr_time - clip_start_time) > self.max_clip_length:
                     logger.info(f"{Colors.CYAN}🎬 Clip ended{Colors.RESET} for camera {camera_id} - motion: {clip_motion_detected}, duration: {int(curr_time - clip_start_time)}s, vel: {clip_vel:.2f}, bg_diff: {clip_bg_diff}, loudness: {clip_loudness:.2f}")
                     self.process_recorded_clip(
@@ -402,7 +399,7 @@ class RecordingManager:
             #return self.active_recordings[camera_id]['recording_id']
         
         if camera_id not in self.camera_service._camera_streams:
-            success = self.camera_service.start_camera(camera_id)
+            success = self.camera_service.start_video(camera_id)
             if not success:
                 logger.error(f"{Colors.RED} Failed to start camera stream for recording:{Colors.RESET} {camera_id}")
                 return None

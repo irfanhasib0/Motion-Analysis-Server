@@ -23,6 +23,18 @@ from audioproc import FrequencyIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
 
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    GRAY = '\033[90m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'  # Reset to default
+
 class Capture:
     def __init__(
         self,
@@ -221,8 +233,7 @@ class Capture:
             stderr=subprocess.DEVNULL,
             bufsize=pipe_buffer_size,
         )
-        if self.is_video_stream_opened():
-            logger.info(f"Webcam video stream opened successfully: {self.source}")
+        
         return self
 
     def open_video_stream_rtsp(self):
@@ -232,7 +243,7 @@ class Capture:
         if self._rtsp_unified_demux_enabled and self.cam_type in {'rtsp', 'http'}:
             if self._open_rtsp_av_stream_unified():
                 return self
-            logger.warning(f"Falling back to split RTSP capture for source: {self.source}")
+            logger.warning(f"{Colors.RED}OpenVideo:: Falling back to split RTSP capture for source: {self.source}{Colors.RESET}")
 
         cmd = [
             "ffmpeg",
@@ -290,9 +301,7 @@ class Capture:
             input_source = os.getenv('AUDIO_SOURCE_ALSA', 'hw:1,0').strip() or 'hw:1,0'
         elif input_format == 'pulse' and input_source.lower() == 'default':
             input_source = self._resolve_pulse_source(input_source)
-            if input_source != self.audio_source:
-                logger.info(f"Resolved PulseAudio default source to: {input_source}")
-
+            
         cmd = [
             'ffmpeg',
             '-hide_banner',             # reduce non-critical startup logs
@@ -374,14 +383,14 @@ class Capture:
             return self.is_video_stream_opened()
 
         self._last_reconnect_at = now
-        logger.warning(f"Reconnecting stream source: {self.source}")
+        logger.warning(f"{Colors.RED}Reconnecting video stream source: {self.source}{Colors.RESET}")
         
         self.release_video()
         self.open_video()
         return self.is_video_stream_opened()
     
     def reconnect_audio_stream(self):
-        logger.warning(f"Attempting audio stream reconnect for source: {self.source}")
+        logger.warning(f"{Colors.RED}Reconnecting audio stream for source: {self.source}{Colors.RESET}")
         now = time.time()
         if now - self._last_audio_reconnect_at < self._audio_reconnect_cooldown_sec:
             return self.is_audio_stream_opened()
@@ -414,7 +423,7 @@ class Capture:
         self._consecutive_read_failures += 1
         if self._consecutive_read_failures >= self._max_video_read_failures_before_reconnect:
             self._consecutive_read_failures = 0
-            logger.warning(f"Video read failure threshold exceeded, reconnecting stream: {self.source}")
+            logger.warning(f"{Colors.RED}ReadVideo:: Video read failure threshold exceeded, reconnecting stream: {self.source}{Colors.RESET }")
             self.reconnect_video_stream()
         return False, None
 
@@ -449,7 +458,7 @@ class Capture:
             self._audio_chunk_leftover = chunk[usable:]
             read_success = True
         except Exception as e:
-            logger.error(f"Error reading audio chunk: {e}")
+            logger.error(f"{Colors.RED}ReadAudio:: Error reading audio chunk: {e}{Colors.RESET}")
             read_success = False
 
         if read_success:
@@ -528,7 +537,7 @@ class CameraService(StreamingService):
         self.root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
         self.db = ConfigManager(configs_dir=os.path.join(self.root_dir, 'configs', configs))  # Use same YAML-backed DB as recording service
         
-        # Load persisted system settings (fall back to in-code defaults)
+        # Load system settings (ConfigManager now reads from presets automatically)
         _sys = self.db.get_system_settings()
         
         # Initialize streaming service with ring buffer settings
@@ -605,6 +614,12 @@ class CameraService(StreamingService):
         except Exception:
             total_memory_bytes = 0
 
+        # Get current preset info
+        sys_settings = self.db.get_system_settings()
+        active_preset = sys_settings.get('active_preset', 'default')
+        ram_auto_switch = sys_settings.get('ram_auto_switch_enabled', True)
+        ram_threshold = sys_settings.get('ram_threshold_bytes', 1073741824)
+
         return {
             'low_power_mode': bool(self.low_power_mode),
             'sensitivity': int(self.sensitivity),
@@ -625,6 +640,10 @@ class CameraService(StreamingService):
             'results_rbf_len': int(self.results_rbf_len),
             # Recording Settings
             'mux_realtime': bool(self.mux_realtime),
+            # Preset Settings
+            'active_preset': active_preset,
+            'ram_auto_switch_enabled': ram_auto_switch,
+            'ram_threshold_bytes': ram_threshold,
         }
 
     def update_runtime_settings(
@@ -645,6 +664,12 @@ class CameraService(StreamingService):
         results_rbf_len: Optional[int] = None,
         # Recording Settings
         mux_realtime: Optional[bool] = None,
+        # Preset-specific settings
+        fps: Optional[int] = None,
+        max_buffer_frames: Optional[int] = None,
+        max_recording_duration_minutes: Optional[int] = None,
+        quality: Optional[str] = None,
+        recording_enabled: Optional[bool] = None,
     ) -> Dict[str, Union[bool, int, float]]:
         low_power_changed = False
 
@@ -710,6 +735,41 @@ class CameraService(StreamingService):
         if mux_realtime is not None:
             self.mux_realtime = bool(mux_realtime)
 
+        # Handle preset-specific settings
+        if fps is not None:
+            # Update FPS for all active camera streams
+            fps = max(1, min(60, int(fps)))
+            for cap in self._camera_streams.values():
+                try:
+                    cap.fps = fps
+                except Exception:
+                    continue
+
+        if max_buffer_frames is not None:
+            # Map max_buffer_frames to frame ring buffer length
+            buffer_frames = max(1, min(100, int(max_buffer_frames)))
+            self.frame_rbf_len = buffer_frames
+
+        if max_recording_duration_minutes is not None:
+            # Convert minutes to seconds and update max_clip_length
+            duration_seconds = max(5, min(3600, int(max_recording_duration_minutes * 60)))
+            self.max_clip_length = duration_seconds
+
+        if quality is not None:
+            # Map quality string to JPEG quality value
+            quality_map = {
+                'low': 30,
+                'medium': 55, 
+                'high': 70,
+                'ultra': 90
+            }
+            if quality.lower() in quality_map:
+                self.jpeg_quality = quality_map[quality.lower()]
+
+        if recording_enabled is not None:
+            # Store recording enabled setting for future use
+            self.recording_enabled = bool(recording_enabled)
+
         try:
             self.default_sensitivity = int(self.sensitivity)
         except Exception:
@@ -734,9 +794,12 @@ class CameraService(StreamingService):
         except Exception:
             pass
 
-        # Persist all runtime settings to system.yaml
+        # Persist all runtime settings to appropriate preset
         try:
-            self.db.save_system_settings({
+            current_settings = self.db.get_system_settings()
+            current_preset = current_settings.get('active_preset', 'default')
+            
+            settings_to_save = {
                 'low_power_mode': bool(self.low_power_mode),
                 'sensitivity': int(self.sensitivity),
                 'jpeg_quality': int(self.jpeg_quality),
@@ -753,7 +816,30 @@ class CameraService(StreamingService):
                 'results_rbf_len': int(self.results_rbf_len),
                 # Recording Settings
                 'mux_realtime': bool(self.mux_realtime),
-            })
+            }
+            
+            # Add preset-specific settings if they were set
+            if hasattr(self, 'recording_enabled'):
+                settings_to_save['recording_enabled'] = bool(self.recording_enabled)
+            
+            # If individual settings are being modified (not from preset switch),
+            # automatically switch to custom preset to store modifications
+            if current_preset != 'custom':
+                # Check if any setting differs from current preset template
+                presets = self.db.get_presets()
+                current_preset_values = presets.get(current_preset, {})
+                
+                settings_differ = False
+                for key, value in settings_to_save.items():
+                    if key in current_preset_values and current_preset_values[key] != value:
+                        settings_differ = True
+                        break
+                
+                # If settings differ, switch to custom preset
+                if settings_differ:
+                    settings_to_save['active_preset'] = 'custom'
+                    
+            self.db.save_system_settings(settings_to_save)
         except Exception:
             pass
 
@@ -767,10 +853,10 @@ class CameraService(StreamingService):
                     self.stop_recording(camera_id)
             if hasattr(self, '_camera_streams'):
                 for camera_id in list(self._camera_streams.keys()):
-                    self.stop_camera(camera_id)
+                    self.stop_video(camera_id)
             if hasattr(self, '_audio_streams'):
                 for camera_id in list(self._audio_streams.keys()):
-                    self.stop_live_audio_stream(camera_id)
+                    self.stop_audio(camera_id)
         except Exception:
             pass  # Ignore cleanup errors during shutdown
         
@@ -979,58 +1065,41 @@ class CameraService(StreamingService):
         )
         return cap
     
-    def start_camera(self, camera_id: str) -> bool:
-        """Start a camera"""
+    def start_video(self, camera_id: str) -> bool:
+        """Start video capture for a camera"""
         camera_started = False
         cap = self.video_capture(camera_id)
         
         if cap is None:
-            logger.warning(f"Camera: {self.db.get_camera(camera_id)['name']} Id: {camera_id} failed to open")
+            logger.warning(f"{Colors.RED}Failed to start video for {camera_id}{Colors.RESET}")
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             return False
             
         tracker = OpticalFlowTracker()
-        
-        # Initialize audio analyzer if audio is enabled
-        db_camera = self.db.get_camera(camera_id)
-        audio_analyzer = None
-        if db_camera and bool(db_camera.get('audio_enabled', False)):
-            try:
-                sample_rate = int(db_camera.get('audio_sample_rate')) if db_camera.get('audio_sample_rate') else int(os.getenv('AUDIO_SAMPLE_RATE', '16000'))
-            except (TypeError, ValueError):
-                sample_rate = int(os.getenv('AUDIO_SAMPLE_RATE', '16000'))
-            channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
-            audio_analyzer = FrequencyIntensityAnalyzer(sample_rate=sample_rate, channels=channels)
-            logger.info(f"Created audio analyzer for camera {camera_id}: {sample_rate}Hz, {channels} channels")
-        
         ret, _ = cap.read_video()
             
         if ret:
             self.db.update_camera(camera_id, {'status': CameraStatus.ONLINE.value})
-            logger.info(f"Started camera: {self.db.get_camera(camera_id)['name']} ({camera_id})")
+            logger.info(f"{Colors.GREEN}Video started for {camera_id}{Colors.RESET}")
             camera_started = True
             self._camera_streams[camera_id] = cap
             self._camera_trackers[camera_id] = tracker
-            if audio_analyzer is not None:
-                self._audio_chunk_analyzers[camera_id] = audio_analyzer
             
             # Initialize ring buffers for SPMC data distribution
             self._ensure_ring_buffers(camera_id)
         else:
-            logger.warning(f"Camera {camera_id} opened but failed to read frames")
             cap.release_video()
-        
-        if not camera_started:
-            logger.warning(f"Camera: {self.db.get_camera(camera_id)['name']} Id: {camera_id} failed to open")
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
+            logger.warning(f"{Colors.RED}Failed to read frames for {camera_id}{Colors.RESET}")
 
         return camera_started
         
-    def stop_camera(self, camera_id: str):
-        """Stop a camera"""
+    def stop_video(self, camera_id: str):
+        """Stop video capture for a camera"""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            raise ValueError(f"Camera not found: {camera_id}")
+            logger.warning(f"{Colors.RED}Failed to stop video - camera not found: {camera_id}{Colors.RESET}")
+            return
         
         # Stop any active recording
         if camera_id in self.active_recordings:
@@ -1038,17 +1107,6 @@ class CameraService(StreamingService):
 
         try:
             self._hls_manager.stop_stream(camera_id)
-        except Exception:
-            pass
-
-        # Stop unified streaming service background threads for both video and audio
-        try:
-            self.stop_video_stream(camera_id)
-        except Exception:
-            pass
-
-        try:
-            self.stop_audio_stream(camera_id)
         except Exception:
             pass
 
@@ -1069,14 +1127,6 @@ class CameraService(StreamingService):
             except Exception:
                 pass
 
-        audio_analyzer = self._audio_chunk_analyzers.pop(camera_id, None)
-        if audio_analyzer is not None:
-            logger.info(f"Cleaned up audio analyzer for camera {camera_id}")
-            try:
-                del audio_analyzer
-            except Exception:
-                pass
-
         self.stream_locks.pop(camera_id, None)
         self._latest_frames.pop(camera_id, None)
         self._latest_hls_frames.pop(camera_id, None)
@@ -1090,26 +1140,17 @@ class CameraService(StreamingService):
         self._fps_stats.pop(f"{camera_id}:processing", None)
 
         self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
-        logger.info(f"Stopped camera: {db_camera['name']} ({camera_id})")
-
-    def close_camera_stream(self, camera_id: str):
-        """Close an active camera stream and release related resources."""
-        self.stop_camera(camera_id)
 
         if hasattr(self, "active_streams"):
             self.active_streams.pop(camera_id, None)
-    
-    def get_recording_storage_info(self, enforce_policy: bool = False) -> Dict:
-        return self.recording_manager.get_recording_storage_info(enforce_policy=enforce_policy)
+
+        logger.info(f"{Colors.YELLOW}Video stopped for {camera_id}{Colors.RESET}")
 
     def audio_capture(self, camera_id: str):
         """Create an audio-only Capture for this camera (mirrors video_capture)."""
         db_camera = self.db.get_camera(camera_id)
-        if not db_camera:
-            logger.error(f"Audio capture failed: camera not found: {camera_id}")
-            return None
-
         source = db_camera['source']
+
         try:
             source = int(source)
         except Exception:
@@ -1130,11 +1171,12 @@ class CameraService(StreamingService):
             audio_only=True,
         )
         return cap
-
+        
     def start_audio(self, camera_id: str) -> bool:
-        """Start audio capture and verify it works (mirrors start_camera)."""
+        """Start audio capture and verify it works (mirrors start_video)."""
+        
+        cap = self.audio_capture(camera_id)  # Initialize audio_cap for the camera
 
-        cap = self.audio_capture(camera_id)
         if cap is None:
             return False
 
@@ -1153,24 +1195,63 @@ class CameraService(StreamingService):
                         pass
                 exit_code = cap.audio_cap.poll() if cap.audio_cap else None
                 logger.warning(
-                    f"Audio FFmpeg process died before producing data for camera {camera_id} at attempt {attempt + 1}/{_MAX_PROBE_ATTEMPTS}"
+                    f"{Colors.RED}Failed to start audio for {camera_id} - attempt {attempt + 1}/{_MAX_PROBE_ATTEMPTS}"
                     + (f" (exit {exit_code})" if exit_code is not None else "")
                     + (f": {stderr_msg}" if stderr_msg else "")
+                    + f"{Colors.RESET}"
                 )
             else:   
                 _, _ = cap.read_audio()
                 self._audio_streams[camera_id] = cap
                 ret = True
                 db_camera = self.db.get_camera(camera_id)
-                name = db_camera['name'] if db_camera else camera_id
-                logger.info(f"Started audio: {name} ({camera_id})")
+                logger.info(f"{Colors.GREEN}Audio started for {camera_id}{Colors.RESET}")
                 break
 
         if not ret:
-            logger.warning(f"Audio capture opened but failed to read for camera {camera_id}")
+            logger.warning(f"{Colors.RED}Failed to read audio data for {camera_id}{Colors.RESET}")
             cap.release_audio()
+            return ret
+
+        # Initialize audio analyzer if audio is enabled
+        db_camera = self.db.get_camera(camera_id)
+        if db_camera and bool(db_camera.get('audio_enabled', False)):
+            sample_rate = int(db_camera.get('audio_sample_rate'))
+            channels = int(db_camera.get('audio_channels', 1))
+            audio_analyzer = FrequencyIntensityAnalyzer(sample_rate=sample_rate, channels=channels)
+            self._audio_chunk_analyzers[camera_id] = audio_analyzer
             
         return ret
+    
+    def stop_audio(self, camera_id: str):
+        """Stop audio capture for a camera"""
+        db_camera = self.db.get_camera(camera_id)
+        if not db_camera:
+            logger.warning(f"{Colors.RED}Failed to stop audio - camera not found: {camera_id}{Colors.RESET}")
+            return
+
+        # Clean up audio-related resources
+        audio_analyzer = self._audio_chunk_analyzers.pop(camera_id, None)
+        if audio_analyzer is not None:
+            try:
+                del audio_analyzer
+            except Exception:
+                pass
+
+        # Release audio capture
+        audio_cap = self._audio_streams.pop(camera_id, None)
+        if audio_cap is not None:
+            try:
+                audio_cap.release_audio()
+            except Exception:
+                pass
+
+        logger.info(f"{Colors.YELLOW}Audio stopped for {camera_id}{Colors.RESET}")
+
+        
+    
+    def get_recording_storage_info(self, enforce_policy: bool = False) -> Dict:
+        return self.recording_manager.get_recording_storage_info(enforce_policy=enforce_policy)
 
     def start_recording(self, camera_id: str):
         return self.recording_manager.start_recording(camera_id)

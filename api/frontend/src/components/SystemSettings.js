@@ -127,6 +127,8 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
   const [savingAudioId, setSavingAudioId] = useState('');
   const [savingCameraSettings, setSavingCameraSettings] = useState(false);
   const [performanceProfile, setPerformanceProfile] = useState('default');
+  const [availablePresets, setAvailablePresets] = useState({});
+  const [loadingPresets, setLoadingPresets] = useState(true);
 
   useEffect(() => {
     const map = {};
@@ -180,6 +182,43 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
     };
 
     load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPresets = async () => {
+      setLoadingPresets(true);
+      try {
+        const response = await api.getSystemPresets();
+        if (cancelled) {
+          return;
+        }
+        const data = response?.data || {};
+        setAvailablePresets(data.presets || {});
+        
+        // Update performance profile based on active preset from backend
+        if (data.active_preset) {
+          setPerformanceProfile(data.active_preset);
+        }
+      } catch (error) {
+        toast.error(`Failed to load system presets: ${error?.response?.data?.detail || error.message}`);
+        // Fall back to hardcoded presets if API call fails
+        setAvailablePresets({
+          default: DEFAULT_PERFORMANCE_PRESET,
+          low_power: LOW_POWER_PERFORMANCE_PRESET
+        });
+      } finally {
+        if (!cancelled) {
+          setLoadingPresets(false);
+        }
+      }
+    };
+
+    loadPresets();
     return () => {
       cancelled = true;
     };
@@ -275,25 +314,62 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
     }
   };
 
-  const applyPerformanceProfile = (profile) => {
-    if (profile === 'default') {
-      setPerformanceProfile('default');
-      setSettings((prev) => ({ ...prev, ...DEFAULT_PERFORMANCE_PRESET }));
-      return;
+  const applyPerformanceProfile = async (profile) => {
+    try {
+      setSaving(true);
+      
+      // Call the backend API to apply the preset
+      const response = await api.updatePerformanceProfile({
+        preset_name: profile
+      });
+      
+      if (response?.data) {
+        const data = response.data;
+        setPerformanceProfile(data.active_preset || profile);
+        
+        // Update local settings with the applied preset values
+        if (data.settings) {
+          setSettings(prev => ({
+            ...prev,
+            ...data.settings
+          }));
+        }
+        
+        toast.success(`Applied ${profile} performance profile`);
+      }
+    } catch (error) {
+      toast.error(`Failed to apply ${profile} profile: ${error?.response?.data?.detail || error.message}`);
+      
+      // Fall back to local state update if API fails
+      if (profile === 'default') {
+        setPerformanceProfile('default');
+        setSettings((prev) => ({ ...prev, ...DEFAULT_PERFORMANCE_PRESET }));
+      } else if (profile === 'low_power') {
+        setPerformanceProfile('low_power');
+        setSettings((prev) => ({ ...prev, ...LOW_POWER_PERFORMANCE_PRESET }));
+      } else {
+        setPerformanceProfile('custom');
+      }
+    } finally {
+      setSaving(false);
     }
-
-    if (profile === 'low_power') {
-      setPerformanceProfile('low_power');
-      setSettings((prev) => ({ ...prev, ...LOW_POWER_PERFORMANCE_PRESET }));
-      return;
-    }
-
-    setPerformanceProfile('custom');
   };
 
-  const handleCustomPerformanceValue = (key, value) => {
-    setPerformanceProfile('custom');
-    setSettings((prev) => ({ ...prev, [key]: value }));
+  const handleCustomPerformanceValue = async (key, value) => {
+    try {
+      setPerformanceProfile('custom');
+      setSettings((prev) => ({ ...prev, [key]: value }));
+      
+      // Update backend with custom values
+      const customSettings = {
+        preset_name: 'custom',
+        [key]: value
+      };
+      
+      await api.updatePerformanceProfile(customSettings);
+    } catch (error) {
+      toast.error(`Failed to update ${key}: ${error?.response?.data?.detail || error.message}`);
+    }
   };
 
   const handlePlaybackModeChange = (mode) => {

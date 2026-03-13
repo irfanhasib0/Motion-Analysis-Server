@@ -146,7 +146,7 @@ export const api = {
     apiClient.put(`/cameras/${cameraId}/sensitivity`, { sensitivity }),
   stopCameraAudioStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/audio_stream/stop`),
   stopCameraHlsStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/hls/stop`),
-  closeCameraStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/stream/close`),
+  
   getBlankStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/stream/blank`),
   getRecordingStreamUrl: (recordingId, mode = getStoredRecordingPlaybackMode()) => {
     const endpoint = mode === 'stream'
@@ -161,6 +161,14 @@ export const api = {
   getSystemInfo: () => apiClient.get('/system/info'),
   getSystemSettings: () => apiClient.get('/system/settings'),
   updateSystemSettings: (settings) => apiClient.put('/system/settings', settings),
+  
+  // Preset management endpoints
+  getSystemPresets: () => apiClient.get('/system/presets'),
+  updatePerformanceProfile: (payload) => apiClient.put('/system/performance-profile', payload),
+
+  // Stream health monitoring endpoints
+  getCameraStreamHealth: (cameraId) => apiClient.get(`/cameras/${cameraId}/stream-health`),
+  getAllCamerasStreamHealth: () => apiClient.get('/system/stream-health'),
 
   // Archive endpoints
   exportArchive: (filters = {}) => apiClient.post('/recordings/archive/export', filters),

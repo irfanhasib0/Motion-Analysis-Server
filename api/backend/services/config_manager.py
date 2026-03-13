@@ -5,6 +5,14 @@ from datetime import datetime
 
 
 _SYSTEM_DEFAULTS: Dict[str, Any] = {
+    # System-level metadata only (not configuration values)
+    'active_preset': 'default',
+    'ram_auto_switch_enabled': True,
+    'ram_threshold_bytes': 1073741824,
+}
+
+# Fallback configuration defaults (used if preset is missing values)
+_CONFIG_DEFAULTS: Dict[str, Any] = {
     'live_stream_mode': 'mjpeg',
     'uvicorn_reload': True,
     'low_power_mode': False,
@@ -17,11 +25,9 @@ _SYSTEM_DEFAULTS: Dict[str, Any] = {
     'motion_check_interval': 10,
     'min_free_storage_bytes': 1073741824,
     'rtsp_unified_demux_enabled': False,
-    # Advanced Performance Settings
     'frame_rbf_len': 10,
     'audio_rbf_len': 10,
     'results_rbf_len': 10,
-    # Recording Settings
     'mux_realtime': False,
 }
 
@@ -73,19 +79,104 @@ class ConfigManager:
 
     # System settings operations
     def get_system_settings(self) -> Dict[str, Any]:
-        """Return system settings, merging defaults with what is stored on disk."""
-        result = dict(_SYSTEM_DEFAULTS)
+        """Return system settings by reading from active preset + system metadata.""" 
+        # Start with configuration defaults and system metadata
+        result = dict(_CONFIG_DEFAULTS)
+        result.update(_SYSTEM_DEFAULTS)
+        
         if os.path.exists(self.system_path):
-            stored = self._read_yaml(self.system_path).get("system", {}) or {}
-            result.update(stored)
+            # Load system metadata (active_preset, ram settings, etc.)
+            stored_system = self._read_yaml(self.system_path).get("system", {})
+            # Update metadata from stored values
+            for key in _SYSTEM_DEFAULTS:
+                if key in stored_system:
+                    result[key] = stored_system[key]
+            
+            # Get configuration values from active preset
+            active_preset = result.get('active_preset', 'default')
+            presets = self.get_presets()
+            
+            if active_preset in presets:
+                # Merge preset configuration values over defaults
+                preset_values = presets[active_preset]
+                result.update(preset_values)
+                
         return result
 
     def save_system_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
-        """Merge *updates* into the stored system settings and persist to disk."""
+        """Save settings to appropriate preset template."""
         current = self.get_system_settings()
-        current.update({k: v for k, v in updates.items() if k in _SYSTEM_DEFAULTS})
-        self._write_yaml(self.system_path, {"system": current})
-        return current
+        active_preset = current.get('active_preset', 'default')
+        
+        # Separate system metadata from configuration values
+        system_metadata = {}
+        preset_values = {}
+        
+        for key, value in updates.items():
+            if key in _SYSTEM_DEFAULTS:
+                # System metadata goes to top-level system section
+                system_metadata[key] = value
+            elif key in _CONFIG_DEFAULTS or key not in _SYSTEM_DEFAULTS:
+                # Configuration values go to preset template
+                preset_values[key] = value
+        
+        # Read current YAML structure
+        if os.path.exists(self.system_path):
+            data = self._read_yaml(self.system_path)
+        else:
+            data = {"system": {}, "presets": {}}
+        
+        # Update system metadata
+        if system_metadata:
+            if "system" not in data:
+                data["system"] = {}
+            data["system"].update(system_metadata)
+            
+            # If active_preset changed, update it
+            if 'active_preset' in system_metadata:
+                active_preset = system_metadata['active_preset']
+        
+        # Update preset template with configuration values
+        if preset_values:
+            if "presets" not in data:
+                data["presets"] = {}
+            if active_preset not in data["presets"]:
+                data["presets"][active_preset] = {}
+            data["presets"][active_preset].update(preset_values)
+        
+        # Write updated structure
+        self._write_yaml(self.system_path, data)
+        
+        # Return merged settings
+        return self.get_system_settings()
+
+    def get_presets(self) -> Dict[str, Dict[str, Any]]:
+        """Get available presets from system.yaml."""
+        if os.path.exists(self.system_path):
+            data = self._read_yaml(self.system_path)
+            return data.get("presets", {})
+        return {}
+
+    def apply_preset(self, preset_name: str) -> Dict[str, Any]:
+        """Apply a preset by updating active_preset metadata."""
+        presets = self.get_presets()
+        if preset_name not in presets and preset_name != 'custom':
+            raise ValueError(f"Preset '{preset_name}' not found")
+        
+        # Just update the active_preset metadata - no copying of values needed
+        if os.path.exists(self.system_path):
+            data = self._read_yaml(self.system_path)
+        else:
+            data = {"system": {}, "presets": {}}
+            
+        if "system" not in data:
+            data["system"] = {}
+            
+        data["system"]["active_preset"] = preset_name
+        self._write_yaml(self.system_path, data)
+        
+        # Return merged settings with new active preset
+        return self.get_system_settings()
 
     def _ensure_camera_defaults(self, cam: Dict[str, Any]) -> Dict[str, Any]:
         cam.setdefault("camera_type", "webcam")

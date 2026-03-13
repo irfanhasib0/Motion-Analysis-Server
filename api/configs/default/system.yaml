@@ -1,20 +1,8 @@
 system:
-  live_stream_mode: mjpeg
-  uvicorn_reload: true
-  low_power_mode: true
-  sensitivity: 5
-  jpeg_quality: 70
-  pipe_buffer_size: 1000000
-  max_vel: 0.1
-  bg_diff: 50
-  max_clip_length: 60
-  motion_check_interval: 10
-  min_free_storage_bytes: 1073741824
-  rtsp_unified_demux_enabled: false
-  frame_rbf_len: 10
-  audio_rbf_len: 10
-  results_rbf_len: 10
-  mux_realtime: false
+  # System-level metadata only
+  active_preset: low_power
+  ram_auto_switch_enabled: true
+  ram_threshold_bytes: 1073741824
   presets:
     default:
       live_stream_mode: mjpeg

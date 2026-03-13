@@ -22,6 +22,19 @@ from services.dashboard_service import DashboardService
 from models.camera import Camera, CameraCreate, CameraUpdate
 from models.recording import Recording, RecordingCreate
 
+
+# =====================================================================
+# REQUEST MODELS
+# =====================================================================
+
+class PerformanceProfileUpdateRequest(BaseModel):
+    preset_name: str
+    fps: Optional[int] = None
+    max_buffer_frames: Optional[int] = None
+    max_recording_duration_minutes: Optional[int] = None
+    quality: Optional[str] = None
+    recording_enabled: Optional[bool] = None
+
 # =====================================================================
 # CONFIGURATION AND INITIALIZATION
 # =====================================================================
@@ -361,15 +374,15 @@ async def delete_camera(camera_id: str):
 @app.post("/api/cameras/{camera_id}/start")
 async def start_camera(camera_id: str):
     """Start camera with both video and audio streams (unified approach)"""
-    success = camera_service.start_camera(camera_id)
+    success = camera_service.start_video(camera_id)
     if success:
         # Also start background audio/video streaming threads if camera started successfully
         await asyncio.to_thread(camera_service.start_av_stream, camera_id)
         #await broadcast_message({"type": "camera_started", "camera_id": camera_id})
         return {"message": "Camera and streaming started successfully"}
     else:
-        camera_service.close_camera_stream(camera_id)
-        success = camera_service.start_camera(camera_id)
+        camera_service.stop_video(camera_id)
+        success = camera_service.start_video(camera_id)
     if success:
         # Also start background streaming on retry
         await asyncio.to_thread(camera_service.start_av_stream, camera_id)
@@ -381,7 +394,8 @@ async def start_camera(camera_id: str):
 @app.post("/api/cameras/{camera_id}/stop")
 async def stop_camera(camera_id: str):
     """Stop camera and all associated streams (video, audio, HLS, recordings)"""
-    camera_service.close_camera_stream(camera_id)
+    camera_service.stop_video_stream(camera_id)
+    camera_service.stop_audio_stream(camera_id)
     #await broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
     return {"message": "Camera and all streams stopped successfully"}
 
@@ -534,6 +548,120 @@ async def set_live_stream_mode(payload: LiveStreamModeRequest):
         "live_stream_mode": LIVE_STREAM_MODE,
         "supported_modes": ["mjpeg", "hls"],
     }
+
+
+@app.get("/api/system/presets")
+async def get_system_presets():
+    """Get available system presets from configuration."""
+    try:
+        presets = camera_service.db.get_presets()
+        current_settings = camera_service.db.get_system_settings()
+        active_preset = current_settings.get('active_preset', 'default')
+        
+        return {
+            'presets': presets,
+            'active_preset': active_preset,
+            'available_presets': list(presets.keys()) + ['custom']
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get presets: {str(e)}")
+
+
+@app.put("/api/system/performance-profile")
+async def update_performance_profile(payload: PerformanceProfileUpdateRequest):
+    """Apply a performance preset or update custom settings."""
+    try:
+        preset_name = payload.preset_name
+        
+        if preset_name == 'custom':
+            # Update custom settings in system.yaml
+            custom_settings = {}
+            for field, value in payload.dict(exclude={'preset_name'}).items():
+                if value is not None:
+                    custom_settings[field] = value
+            
+            if custom_settings:
+                custom_settings['active_preset'] = 'custom'
+                updated_settings = camera_service.db.save_system_settings(custom_settings)
+                
+                # Apply to runtime
+                camera_service.update_runtime_settings(**custom_settings)
+                
+                return {
+                    'message': 'Custom performance profile updated',
+                    'active_preset': 'custom',
+                    'settings': updated_settings
+                }
+            else:
+                # Just mark as custom without changing settings
+                updated_settings = camera_service.db.apply_preset('custom')
+                return {
+                    'message': 'Switched to custom profile',
+                    'active_preset': 'custom',
+                    'settings': updated_settings
+                }
+        else:
+            # Apply named preset
+            updated_settings = camera_service.db.apply_preset(preset_name)
+            
+            # Get preset values and apply to runtime
+            presets = camera_service.db.get_presets()
+            if preset_name in presets:
+                preset_values = presets[preset_name]
+                camera_service.update_runtime_settings(**preset_values)
+            
+            return {
+                'message': f'Applied {preset_name} performance profile',
+                'active_preset': preset_name,
+                'settings': updated_settings
+            }
+            
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update performance profile: {str(e)}")
+
+
+@app.get("/api/cameras/{camera_id}/stream-health")
+async def get_camera_stream_health(camera_id: str):
+    """Get stream health status for a specific camera."""
+    try:
+        camera = camera_service.get_camera(camera_id)
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        
+        health_status = dashboard_service.stream_monitor.get_health_status(camera_id)
+        return health_status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stream health: {str(e)}")
+
+
+@app.get("/api/system/stream-health")
+async def get_all_cameras_stream_health():
+    """Get stream health status for all cameras."""
+    try:
+        cameras = camera_service.get_cameras()
+        health_statuses = {}
+        
+        for camera in cameras:
+            if camera.id in camera_service._camera_streams:
+                health_statuses[camera.id] = dashboard_service.stream_monitor.get_health_status(camera.id)
+        
+        return {
+            'cameras': health_statuses,
+            'monitoring_config': {
+                'lag_threshold': dashboard_service.stream_monitor.lag_threshold,
+                'duration_threshold': dashboard_service.stream_monitor.duration_threshold,
+                'recovery_cooldown': dashboard_service.stream_monitor.recovery_cooldown,
+                'max_recovery_attempts': dashboard_service.stream_monitor.max_recovery_attempts
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stream health: {str(e)}")
 
 # =====================================================================
 # RECORDING STORAGE AND ARCHIVE ENDPOINTS

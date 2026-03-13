@@ -81,6 +81,21 @@ class SPMCRingBuffer:
             
             return item
     
+    def get_last_read_time(self, consumer_id: str) -> Optional[float]:
+        """Get last read time for consumer"""
+        with self._lock:
+            if self._stats_enabled and consumer_id in self._consumer_read_times and len(self._consumer_read_times[consumer_id]) > 0:
+                return self._consumer_read_times[consumer_id][-1]
+        return None
+    
+    @property
+    def last_write_time(self) -> Optional[float]:
+        """Get last write time for producer"""
+        with self._lock:
+            if self._stats_enabled and len(self._producer_write_times) > 0:
+                return self._producer_write_times[-1]
+        return None
+    
     def register_consumer(self, consumer_id: str) -> bool:
         """Register a new consumer"""
         with self._lock:
@@ -182,15 +197,41 @@ class ResultsRingBuffer(SPMCRingBuffer):
     
     def __init__(self, capacity: int = 100, enable_stats: bool = False):
         super().__init__(capacity, enable_stats)
+        self._last_combined = {'video': {}, 'audio': {}, 'timestamp': time.time()}
+        self._lock = threading.RLock()
     
     def put(self, video_result: Dict[str, Any], audio_result: Dict[str, Any]) -> bool:
         """Store combined results"""
-        combined = {
-            'video': video_result,
-            'audio': audio_result,
-            'timestamp': time.time()
-        }
-        return super().put(combined)
+        with self._lock:
+            combined = {
+                'video': video_result,
+                'audio': audio_result,
+                'timestamp': time.time()
+            }
+            self._last_combined = combined
+            return super().put(combined)
+    
+    def put_video_only(self, video_result: Dict[str, Any]) -> bool:
+        """Update only video results, preserving existing audio results"""
+        with self._lock:
+            combined = {
+                'video': video_result,
+                'audio': self._last_combined.get('audio', {}),
+                'timestamp': time.time()
+            }
+            self._last_combined = combined
+            return super().put(combined)
+    
+    def put_audio_only(self, audio_result: Dict[str, Any]) -> bool:
+        """Update only audio results, preserving existing video results"""
+        with self._lock:
+            combined = {
+                'video': self._last_combined.get('video', {}),
+                'audio': audio_result,
+                'timestamp': time.time()
+            }
+            self._last_combined = combined
+            return super().put(combined)
 
 
 class FrameBuffer:
