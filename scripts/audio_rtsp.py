@@ -4,6 +4,7 @@ import math
 import sys
 
 RTSP_URL = "rtsp://admin:L2D841A1@192.168.2.131:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif"
+#RTSP_URL = "rtsp://admin:L2CD8412@192.168.0.103:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif"
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
