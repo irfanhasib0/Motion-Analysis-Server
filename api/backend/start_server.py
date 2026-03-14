@@ -642,27 +642,22 @@ async def get_camera_stream_health(camera_id: str):
 @app.get("/api/system/stream-health")
 async def get_all_cameras_stream_health():
     """Get stream health status for all cameras."""
-    try:
-        cameras = camera_service.get_cameras()
-        health_statuses = {}
-        
-        for camera in cameras:
-            if camera.id in camera_service._camera_streams:
-                health_statuses[camera.id] = dashboard_service.stream_monitor.get_health_status(camera.id)
-        
-        return {
-            'cameras': health_statuses,
-            'monitoring_config': {
-                'lag_threshold': dashboard_service.stream_monitor.lag_threshold,
-                'duration_threshold': dashboard_service.stream_monitor.duration_threshold,
-                'recovery_cooldown': dashboard_service.stream_monitor.recovery_cooldown,
-                'max_recovery_attempts': dashboard_service.stream_monitor.max_recovery_attempts
-            }
+    cameras = camera_service.get_cameras()
+    health_statuses = {}
+    
+    for camera in cameras:
+        if camera.id in camera_service._camera_streams:
+            health_statuses[camera.id] = dashboard_service.stream_monitor.get_health_status(camera.id)
+    
+    return {
+        'cameras': health_statuses,
+        'monitoring_config': {
+            'lag_threshold': dashboard_service.stream_monitor.lag_threshold,
+            'recovery_cooldown': dashboard_service.stream_monitor.recovery_cooldown,
+            'max_recovery_attempts': dashboard_service.stream_monitor.max_recovery_attempts
         }
+    }
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get stream health: {str(e)}")
-
 # =====================================================================
 # RECORDING STORAGE AND ARCHIVE ENDPOINTS
 # =====================================================================
@@ -1111,13 +1106,17 @@ async def serve_react_routes(path: str):
 # APPLICATION STARTUP
 # =====================================================================
 if 'pi' in user:
-    kwargs = { 'limit_max_requests': 500,
-              'limit_concurrency': 50,
+    kwargs = { 'limit_max_requests': 1000,
+              'limit_concurrency': 100,
               'access_log': False,
               'backlog': 512,
-              'log_level': 'warning' }
+              'log_level': 'warning',
+              'workers': 1,
+              'timeout_keep_alive': 60,
+              'timeout_graceful_shutdown': 60,}
 else:
     kwargs = {}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
@@ -1125,7 +1124,5 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=9001, 
         reload=bool(UVICORN_RELOAD),
-        timeout_keep_alive=60,
-        timeout_graceful_shutdown=60,
         **kwargs
     )

@@ -323,6 +323,11 @@ class RecordingManager:
             res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
             audio_res = results.get('audio', {}) if results else {}
             curr_time = time.time()
+
+            if audio_enabled and audio_res:
+                # Read detected loudness flag from audio results
+                detected_loudness = bool(audio_res.get('detected_loudness', False))
+                clip_loudness = max(clip_loudness, float(audio_res.get('int', 0.0)))
             
             # Motion detection check (less frequent to avoid blocking audio)
             if curr_time - last_motion_check > self.motion_check_interval:
@@ -340,9 +345,6 @@ class RecordingManager:
                     clip_vel = max(clip_vel, vel)
                     clip_bg_diff = max(clip_bg_diff, bg_diff)
                 
-                # Read detected loudness flag from audio results
-                detected_loudness = bool(audio_res.get('detected_loudness', False))
-                clip_loudness = max(clip_loudness, float(audio_res.get('int', 0.0)))
                 logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {(curr_time - clip_start_time)},{self.max_clip_length}, {clip_motion_detected} - vel: {vel:.2f}, bg_diff: {bg_diff}, loudness: {clip_loudness:.2f}{Colors.RESET}")
                 if not recent_motion_detected or (curr_time - clip_start_time) > self.max_clip_length:
                     logger.info(f"{Colors.CYAN}🎬 Clip ended{Colors.RESET} for camera {camera_id} - motion: {clip_motion_detected}, duration: {int(curr_time - clip_start_time)}s, vel: {clip_vel:.2f}, bg_diff: {clip_bg_diff}, loudness: {clip_loudness:.2f}")

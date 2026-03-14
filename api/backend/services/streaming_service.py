@@ -806,6 +806,11 @@ class StreamingService:
 
     def stop_video_stream(self, camera_id: str) -> bool:
         """Stop background video stream thread for camera."""
+
+        # Stop any active recording
+        if camera_id in self.active_recordings:
+            self.stop_recording(camera_id)
+            
         # Signal stop
         stop_event = self._video_stop_events.get(camera_id)
         if stop_event:

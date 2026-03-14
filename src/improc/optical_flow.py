@@ -35,6 +35,7 @@ from scipy.optimize import linear_sum_assignment
 from trackers.trackers import SimpleTracker #, ByteTracker
 from improc.kalman_filter import KalmanPoint, CvKalmanPoint
 from improc.memory import FlowMemory, CoresetMemory
+from improc.person_detection import PersonDetector
 
 '''
 # Optional C++ acceleration via pybind11 module
@@ -52,7 +53,10 @@ class OpticalFlowTracker:
                  max_pid=2500, 
                  coreset_k =2, 
                  matcher_mode="hungarian", 
-                 det_method="fast"):
+                 det_method="fast",
+                 enable_person_detection=True,
+                 enable_face_detection=True,
+                 enable_body_detection=True):
         
         self.prev_gray = None
         self.prev_pts  = None
@@ -105,6 +109,16 @@ class OpticalFlowTracker:
         self.coreset = CoresetMemory(sample_len=max_traj_len, max_items=max_traj_len)
         self.coreset_k = coreset_k
 
+        # Person detection initialization
+        self.enable_person_detection = enable_person_detection
+        self.person_detector = None
+        if enable_person_detection:
+            print("Initializing PersonDetector for OpticalFlowTracker...")
+            self.person_detector = PersonDetector(
+                enable_face=enable_face_detection,
+                enable_body=enable_body_detection
+            )
+
         self.viz_div_h = None
 
     def restart(self, matcher_mode="hungarian"):
@@ -116,6 +130,39 @@ class OpticalFlowTracker:
     
     def get_detection_method(self):
         return self.det_method
+    
+    def set_person_detection_enabled(self, enabled):
+        """Enable or disable person detection feature"""
+        self.enable_person_detection = enabled and (self.person_detector is not None)
+        if self.enable_person_detection:
+            print("Person detection enabled.")
+        else:
+            print("Person detection disabled.")
+    
+    def set_face_detection_enabled(self, enabled):
+        """Enable or disable face detection specifically"""
+        if self.person_detector is not None:
+            self.person_detector.set_face_enabled(enabled)
+    
+    def set_body_detection_enabled(self, enabled):
+        """Enable or disable body detection specifically"""
+        if self.person_detector is not None:
+            self.person_detector.set_body_enabled(enabled)
+    
+    def is_person_detection_enabled(self):
+        """Check if person detection is enabled"""
+        return self.enable_person_detection
+    
+    def get_person_detection_status(self):
+        """Get detailed status of person detection features"""
+        if self.person_detector is None:
+            return {'enabled': False, 'face': False, 'body': False}
+        
+        return {
+            'enabled': self.enable_person_detection,
+            'face': self.person_detector.is_face_enabled(),
+            'body': self.person_detector.is_body_enabled()
+        }
     
     def _compute_dense_flow(self, prev_gray, gray):
             """Compute dense optical flow using Farneback method"""
@@ -134,6 +181,16 @@ class OpticalFlowTracker:
             
             rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
             return rgb
+    
+    def contour_in_dets(self, cnt_box, dets):
+        """Check if a contour overlaps with any person detection boxes"""
+        for det in dets:
+            det_box = np.array(det['bbox'])
+            # Check for overlap
+            if (cnt_box[0] < det_box[2] and cnt_box[2] > det_box[0] and
+                cnt_box[1] < det_box[3] and cnt_box[3] > det_box[1]):
+                return True
+        return False
     
     def _detect_forground_bboxes(self, gray):
         prev_fg_mask = deepcopy(self.fg_mask)
@@ -157,6 +214,14 @@ class OpticalFlowTracker:
         contours, _ = cv2.findContours(self.fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         results = []
+
+        # Add person detection boxes if enabled
+        if self.enable_person_detection and self.person_detector is not None:
+            # Convert grayscale back to BGR for person detection
+            frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            person_detections = self.person_detector.detect(frame_bgr)
+            results.extend(person_detections)
+
         areas = np.array([cv2.contourArea(cnt) for cnt in contours])
         indx  = np.argsort(areas)[::-1].astype(np.int32)
         areas = areas[indx]
@@ -164,12 +229,15 @@ class OpticalFlowTracker:
         for cnt, area in zip(contours, areas):
             if area > self.bg_min_bbox_area:
                 x, y, w, h = cv2.boundingRect(cnt)
+                if self.contour_in_dets([x, y, x + w, y + h],person_detections): 
+                    continue  # Skip if this contour overlaps with a person detection (already added)
                 _mask = np.zeros_like(self.fg_mask)
                 _mask[y:y+h, x:x+w] = self.fg_mask[y:y+h, x:x+w]
                 results.append({'bbox': [x, y, x + w, y + h],
                                 'bbox_xywh': [int(x + w/2), int(y + h/2), int(w), int(h)],
                                 'centroid': [y + h / 2, x + w / 2],
-                                'mask': _mask})
+                                'mask': _mask,
+                                'type': 'motion'})
         
         results = self.tracker.update(results)
         for i in results.keys():

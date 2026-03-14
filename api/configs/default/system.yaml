@@ -21,7 +21,6 @@ system:
       audio_rbf_len: 10
       results_rbf_len: 10
       mux_realtime: false
-      camera_start_timeout: 30  # Camera start operation timeout in seconds
     low_power:
       live_stream_mode: mjpeg
       uvicorn_reload: true
@@ -39,7 +38,6 @@ system:
       audio_rbf_len: 5
       results_rbf_len: 5
       mux_realtime: false
-      camera_start_timeout: 45  # Extended timeout for low power mode
     custom:
       live_stream_mode: mjpeg
       uvicorn_reload: true

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Download, Trash2, Clock, HardDrive, Camera, Search, Archive, Calendar } from 'lucide-react';
+import { Play, Download, Trash2, Clock, HardDrive, Camera, Search, Archive, Calendar, FolderOpen } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../api';
 
@@ -13,17 +13,27 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
   const [storageInfo, setStorageInfo] = useState(null);
   const [playbackMode, setPlaybackMode] = useState(api.getRecordingPlaybackMode());
   
-  // Archive functionality state
-  const [archiveSettings, setArchiveSettings] = useState({
-    camera_ids: [],
-    date_from: '',
-    date_to: '',
-    min_duration: '',
-    delete_after: false
+  // Archive state from EventView
+  const [archivePath, setArchivePath] = useState('');
+  const [archiveList, setArchiveList] = useState([]);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [archivePanelOpen, setArchivePanelOpen] = useState(true);
+  const [archiveFilters, setArchiveFilters] = useState(() => { 
+    const today = new Date().toISOString().slice(0, 10); 
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10); 
+    return { 
+      date_from: yesterday, 
+      date_to: today, 
+      min_vel: '', 
+      min_diff: '', 
+      min_duration: '', 
+      label_filter: '',
+      camera_filter: '' // Added camera selection
+    }; 
   });
-  const [isArchiving, setIsArchiving] = useState(false);
-  const [archives, setArchives] = useState([]);
-  const [loadedArchives, setLoadedArchives] = useState(new Set());
+  const [archiveExportResult, setArchiveExportResult] = useState(null);
+  const [deleteAfterArchive, setDeleteAfterArchive] = useState(false);
+  const [excludeMode, setExcludeMode] = useState(true);
 
   const loadStorageInfo = async () => {
     try {
@@ -37,7 +47,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
   const loadArchives = async () => {
     try {
       const response = await api.get('/recordings/archive/list');
-      setArchives(response.data.archives || []);
+      setArchiveList(response.data.archives || []);
     } catch (error) {
       console.error('Failed to load archives:', error);
     }
@@ -72,61 +82,87 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     document.body.removeChild(link);
   };
 
+  // ===== Archive handlers (adapted from EventView) =====
   const handleExportArchive = async () => {
-    if (!window.confirm('Export selected recordings to archive? This operation cannot be undone.')) {
-      return;
-    }
-    
-    setIsArchiving(true);
+    setArchiveBusy(true);
+    setArchiveExportResult(null);
     try {
-      const payload = {
-        ...archiveSettings,
-        camera_ids: archiveSettings.camera_ids.length > 0 ? archiveSettings.camera_ids : null,
-        min_duration: archiveSettings.min_duration ? parseFloat(archiveSettings.min_duration) : null
-      };
-      
-      const response = await api.post('/recordings/archive/export', payload);
-      toast.success(`Archive exported: ${response.data.archive_path}`);
-      
-      if (archiveSettings.delete_after) {
-        setRecordings(prev => prev.filter(r => !response.data.exported_ids.includes(r.id)));
+      const filters = {};
+      if (archiveFilters.date_from) filters.date_from = archiveFilters.date_from;
+      if (archiveFilters.date_to) filters.date_to = archiveFilters.date_to;
+      if (archiveFilters.min_vel !== '') filters.min_vel = Number(archiveFilters.min_vel);
+      if (archiveFilters.min_diff !== '') filters.min_diff = Number(archiveFilters.min_diff);
+      if (archiveFilters.min_duration !== '') filters.min_duration = Number(archiveFilters.min_duration);
+      if (archiveFilters.label_filter) filters.label_filter = [archiveFilters.label_filter];
+      if (archiveFilters.camera_filter) filters.camera_filter = [archiveFilters.camera_filter]; // Added camera filter
+      filters.exclude_mode = excludeMode;
+      if (deleteAfterArchive) filters.delete_after = true;
+      const res = await api.exportArchive(filters);
+      setArchiveExportResult(res.data);
+      toast.success(`Exported ${res.data.recordings_count} recording(s) → ${res.data.archive_name}`);
+      if (deleteAfterArchive && res.data.deleted_count > 0) {
+        toast(`${res.data.deleted_count} recording(s) removed from recordings.`, {
+          icon: '⚠️',
+          style: { background: '#b71c1c', color: '#fff', fontWeight: 600 },
+          duration: 5000,
+        });
+        window.dispatchEvent(new CustomEvent('archive-unloaded', { detail: {} }));
       }
-      
-      loadArchives();
-    } catch (error) {
-      toast.error('Failed to export archive: ' + (error.response?.data?.detail || error.message));
+    } catch (err) {
+      toast.error('Export failed: ' + (err?.response?.data?.detail || err.message));
     } finally {
-      setIsArchiving(false);
+      setArchiveBusy(false);
     }
   };
 
-  const handleLoadArchive = async (archivePath) => {
+  const handleListArchives = async () => {
+    setArchiveBusy(true);
     try {
-      const response = await api.post('/recordings/archive/load', { archive_path: archivePath });
-      setRecordings(prev => [...prev, ...response.data.recordings]);
-      setLoadedArchives(prev => new Set([...prev, archivePath]));
-      toast.success(`Loaded ${response.data.loaded_count} recordings from archive`);
-    } catch (error) {
-      toast.error('Failed to load archive: ' + (error.response?.data?.detail || error.message));
+      const res = await api.listArchives();
+      setArchiveList(res.data.archives || []);
+      if ((res.data.archives || []).length === 0) {
+        toast('No archives found.');
+      }
+    } catch (err) {
+      toast.error('List failed: ' + (err?.response?.data?.detail || err.message));
+    } finally {
+      setArchiveBusy(false);
     }
   };
 
-  const handleUnloadArchive = async (archivePath) => {
-    if (!window.confirm('Remove archive recordings from database? Archive files will remain on disk.')) {
+  const handleLoadArchive = async (path) => {
+    const target = path || archivePath.trim();
+    if (!target) {
+      toast.error('Please enter an archive directory path.');
       return;
     }
-    
+    setArchiveBusy(true);
     try {
-      const response = await api.post('/recordings/archive/unload', { archive_path: archivePath });
-      setRecordings(prev => prev.filter(r => !r.filename.includes(archivePath.split('/').pop())));
-      setLoadedArchives(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(archivePath);
-        return newSet;
-      });
-      toast.success(`Unloaded ${response.data.unloaded_count} recordings from database`);
-    } catch (error) {
-      toast.error('Failed to unload archive: ' + (error.response?.data?.detail || error.message));
+      const res = await api.loadArchive(target);
+      toast.success(`Loaded ${res.data.loaded_count} recording(s) from archive.`);
+      // Merge loaded recordings into parent state if available
+      if (res.data.recordings && res.data.recordings.length > 0) {
+        // We signal parent via a custom event so App.js can refresh
+        window.dispatchEvent(new CustomEvent('archive-loaded', { detail: res.data.recordings }));
+      }
+    } catch (err) {
+      toast.error('Load failed: ' + (err?.response?.data?.detail || err.message));
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
+
+  const handleUnloadArchive = async (path) => {
+    setArchiveBusy(true);
+    try {
+      const res = await api.unloadArchive(path);
+      toast.success(`Unloaded ${res.data.unloaded_count} recording(s) from view.`);
+      setArchiveList((prev) => prev.filter((a) => a.path !== path));
+      window.dispatchEvent(new CustomEvent('archive-unloaded', { detail: { path } }));
+    } catch (err) {
+      toast.error('Unload failed: ' + (err?.response?.data?.detail || err.message));
+    } finally {
+      setArchiveBusy(false);
     }
   };
 
@@ -278,6 +314,252 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
         <p className="page-subtitle">Browse and manage your recorded videos</p>
       </div>
 
+      {/* Archive Panel */}
+      <div style={{ background: 'rgba(0,150,136,0.06)', border: '1px solid rgba(0,150,136,0.18)', borderRadius: 14, padding: '14px 18px', marginBottom: 18 }}>
+        <div
+          style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
+          onClick={() => setArchivePanelOpen((o) => !o)}
+        >
+          <Archive size={18} style={{ color: '#00897b' }} />
+          <span style={{ fontWeight: 700, fontSize: 14, color: '#004d40' }}>Recording Archives</span>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: '#546e7a' }}>{archivePanelOpen ? '▲ Hide' : '▼ Show'}</span>
+        </div>
+
+        {archivePanelOpen && (
+          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+            {/* Export section */}
+            <div style={{ background: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '12px 14px', border: '1px solid rgba(0,150,136,0.15)' }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#004d40', marginBottom: 10 }}>Export recordings to archive</div>
+
+              {/* Filter row 1 — dates and camera */}
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 }}>
+                <label style={{ fontSize: 12, color: '#546e7a', minWidth: 60 }}>From</label>
+                <input
+                  type="date"
+                  className="form-control"
+                  value={archiveFilters.date_from}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, date_from: e.target.value }))}
+                  style={{ width: 150 }}
+                />
+                <label style={{ fontSize: 12, color: '#546e7a', minWidth: 20 }}>To</label>
+                <input
+                  type="date"
+                  className="form-control"
+                  value={archiveFilters.date_to}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, date_to: e.target.value }))}
+                  style={{ width: 150 }}
+                />
+                <label style={{ fontSize: 12, color: '#546e7a', minWidth: 50 }}>Camera</label>
+                <select
+                  className="form-control form-select"
+                  value={archiveFilters.camera_filter}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, camera_filter: e.target.value }))}
+                  style={{ width: 160 }}
+                >
+                  <option value="">All Cameras</option>
+                  {cameras.map(camera => (
+                    <option key={camera.id} value={camera.id}>{camera.name || camera.id}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Filter row 2 — thresholds */}
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none', fontSize: 12, fontWeight: 600, color: excludeMode ? '#b71c1c' : '#757575', marginRight: 2 }}>
+                  <input
+                    type="checkbox"
+                    checked={excludeMode}
+                    onChange={() => setExcludeMode(true)}
+                    style={{ accentColor: '#c62828', width: 14, height: 14, cursor: 'pointer' }}
+                  />
+                  Exclude ≤
+                </label>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none', fontSize: 12, fontWeight: 600, color: !excludeMode ? '#1565c0' : '#757575', marginRight: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={!excludeMode}
+                    onChange={() => setExcludeMode(false)}
+                    style={{ accentColor: '#1565c0', width: 14, height: 14, cursor: 'pointer' }}
+                  />
+                  Include ≤
+                </label>
+                <label style={{ fontSize: 12, color: '#546e7a' }}>vel</label>
+                <select
+                  className="form-control form-select"
+                  value={archiveFilters.min_vel}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, min_vel: e.target.value }))}
+                  style={{ width: 120 }}
+                >
+                  <option value="">{excludeMode ? 'None' : 'Any'}</option>
+                  <option value="0.1">0.1</option>
+                  <option value="0.2">0.2</option>
+                  <option value="0.5">0.5</option>
+                  <option value="1.0">1.0</option>
+                  <option value="1.5">1.5</option>
+                  <option value="2.0">2.0</option>
+                </select>
+                <label style={{ fontSize: 12, color: '#546e7a' }}>diff</label>
+                <select
+                  className="form-control form-select"
+                  value={archiveFilters.min_diff}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, min_diff: e.target.value }))}
+                  style={{ width: 120 }}
+                >
+                  <option value="">{excludeMode ? 'None' : 'Any'}</option>
+                  <option value="10">10</option>
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="150">150</option>
+                  <option value="200">200</option>
+                </select>
+                <label style={{ fontSize: 12, color: '#546e7a' }}>duration</label>
+                <select
+                  className="form-control form-select"
+                  value={archiveFilters.min_duration}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, min_duration: e.target.value }))}
+                  style={{ width: 120 }}
+                >
+                  <option value="">{excludeMode ? 'None' : 'Any'}</option>
+                  <option value="5">5 s</option>
+                  <option value="10">10 s</option>
+                  <option value="15">15 s</option>
+                  <option value="30">30 s</option>
+                  <option value="60">60 s</option>
+                </select>
+              </div>
+
+              {/* Label filter */}
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+                <label style={{ fontSize: 12, color: '#546e7a' }}>Alert label</label>
+                <select
+                  className="form-control form-select"
+                  value={archiveFilters.label_filter}
+                  onChange={(e) => setArchiveFilters((f) => ({ ...f, label_filter: e.target.value }))}
+                  style={{ width: 150 }}
+                >
+                  <option value="">All</option>
+                  <option value="high">🔴 High alert</option>
+                  <option value="medium">🟠 Medium alert</option>
+                  <option value="low">🟢 Low alert</option>
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ padding: '6px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
+                  disabled={archiveBusy}
+                  onClick={handleExportArchive}
+                >
+                  <Download size={14} style={{ marginRight: 4 }} />
+                  Export Archive
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ padding: '6px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
+                  disabled={archiveBusy}
+                  onClick={handleListArchives}
+                >
+                  <FolderOpen size={14} style={{ marginRight: 4 }} />
+                  List Archives
+                </button>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none', fontSize: 13, color: deleteAfterArchive ? '#c62828' : '#546e7a', fontWeight: deleteAfterArchive ? 600 : 400 }}>
+                  <input
+                    type="checkbox"
+                    checked={deleteAfterArchive}
+                    onChange={(e) => setDeleteAfterArchive(e.target.checked)}
+                    style={{ accentColor: '#c62828', width: 15, height: 15, cursor: 'pointer' }}
+                  />
+                  <Trash2 size={13} />
+                  Remove from recordings
+                </label>
+              </div>
+
+              {/* Per-camera result */}
+              {archiveExportResult && (
+                <div style={{ marginTop: 12, padding: '10px 12px', background: 'rgba(0,150,136,0.07)', borderRadius: 8, border: '1px solid rgba(0,150,136,0.18)' }}>
+                  <div style={{ fontWeight: 600, fontSize: 12, color: '#004d40', marginBottom: 6 }}>
+                    {archiveExportResult.archive_name}
+                  </div>
+                  {Object.entries(archiveExportResult.per_camera || {}).map(([cam, s]) => (
+                    <div key={cam} style={{ fontSize: 12, color: s.archived === s.total ? '#2e7d32' : '#e65100', marginBottom: 2 }}>
+                      {s.archived === s.total ? '✓' : '⚠'} {cam}: {s.archived}/{s.total} archived
+                    </div>
+                  ))}
+                  {Object.keys(archiveExportResult.per_camera || {}).length === 0 && (
+                    <div style={{ fontSize: 12, color: '#e65100' }}>No recordings matched the filters.</div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Load archive section */}
+            <div style={{ background: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '12px 14px', border: '1px solid rgba(0,150,136,0.15)' }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#004d40', marginBottom: 8 }}>Load an archive into the recording view</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  className="form-control"
+                  placeholder="Archive folder path (e.g. /mnt/backup/recordings/archive_20260301_120000)"
+                  value={archivePath}
+                  onChange={(e) => setArchivePath(e.target.value)}
+                  style={{ flex: '1 1 320px', minWidth: 220 }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ padding: '6px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
+                  disabled={archiveBusy}
+                  onClick={() => handleLoadArchive(null)}
+                >
+                  Load Archive
+                </button>
+              </div>
+            </div>
+
+            {/* Archive list */}
+            {archiveList.length > 0 && (
+              <div style={{ background: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '12px 14px', border: '1px solid rgba(0,150,136,0.15)' }}>
+                <div style={{ fontWeight: 600, fontSize: 13, color: '#004d40', marginBottom: 10 }}>Found archives</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {archiveList.map((arc) => (
+                    <div key={arc.path} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '8px 10px', background: 'rgba(0,150,136,0.05)', borderRadius: 8, border: '1px solid rgba(0,150,136,0.12)' }}>
+                      <div style={{ flex: 1, minWidth: 200 }}>
+                        <div style={{ fontWeight: 600, fontSize: 13, color: '#004d40' }}>{arc.name}</div>
+                        <div style={{ fontSize: 11, color: '#546e7a' }}>{arc.archived_at ? new Date(arc.archived_at).toLocaleString() : ''} · {arc.recordings_count} recording(s)</div>
+                        <div style={{ fontSize: 11, color: '#78909c', wordBreak: 'break-all' }}>{arc.path}</div>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ padding: '4px 12px', fontSize: 12 }}
+                        disabled={archiveBusy}
+                        onClick={() => handleLoadArchive(arc.path)}
+                      >
+                        Load
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        style={{ padding: '4px 12px', fontSize: 12 }}
+                        disabled={archiveBusy}
+                        onClick={() => handleUnloadArchive(arc.path)}
+                      >
+                        Unload
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="content-section">
         <div className="section-header">
           <h2 className="section-title">Video Recordings ({filteredRecordings.length})</h2>
@@ -381,152 +663,6 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
-
-        {/* Archive Management */}
-        <div className="card" style={{ marginBottom: '24px', backgroundColor: '#f8f9fa' }}>
-          <h3 style={{ marginBottom: '16px', color: '#004d40', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Archive size={20} />
-            Archive Management
-          </h3>
-          
-          {/* Archive Export */}
-          <div style={{ marginBottom: '20px', paddingBottom: '20px', borderBottom: '1px solid #e0e0e0' }}>
-            <h4 style={{ marginBottom: '12px', fontSize: '16px' }}>Export Archive</h4>
-            <div className="grid grid-4" style={{ marginBottom: '16px' }}>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Camera Selection</label>
-                <select 
-                  className="form-control form-select"
-                  value={archiveSettings.camera_ids.length === 0 ? 'all' : archiveSettings.camera_ids.length === 1 ? archiveSettings.camera_ids[0] : 'multiple'}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    if (value === 'all') {
-                      setArchiveSettings(prev => ({ ...prev, camera_ids: [] }));
-                    } else {
-                      setArchiveSettings(prev => ({ ...prev, camera_ids: [value] }));
-                    }
-                  }}
-                >
-                  <option value="all">All Cameras</option>
-                  {cameras.map(camera => (
-                    <option key={camera.id} value={camera.id}>
-                      {camera.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">From Date</label>
-                <input
-                  type="date"
-                  className="form-control"
-                  value={archiveSettings.date_from}
-                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, date_from: e.target.value }))}
-                />
-              </div>
-              
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">To Date</label>
-                <input
-                  type="date"
-                  className="form-control"
-                  value={archiveSettings.date_to}
-                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, date_to: e.target.value }))}
-                />
-              </div>
-              
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label className="form-label">Min Duration (seconds)</label>
-                <input
-                  type="number"
-                  className="form-control"
-                  placeholder="Optional"
-                  value={archiveSettings.min_duration}
-                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, min_duration: e.target.value }))}
-                />
-              </div>
-            </div>
-            
-            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <input
-                  type="checkbox"
-                  checked={archiveSettings.delete_after}
-                  onChange={(e) => setArchiveSettings(prev => ({ ...prev, delete_after: e.target.checked }))}
-                />
-                Delete originals after export
-              </label>
-              
-              <button 
-                className="btn btn-primary"
-                onClick={handleExportArchive}
-                disabled={isArchiving}
-                style={{ marginLeft: 'auto' }}
-              >
-                <Archive size={14} />
-                {isArchiving ? 'Exporting...' : 'Export Archive'}
-              </button>
-            </div>
-          </div>
-          
-          {/* Archive List */}
-          <div>
-            <h4 style={{ marginBottom: '12px', fontSize: '16px' }}>Available Archives ({archives.length})</h4>
-            {archives.length === 0 ? (
-              <p style={{ color: '#666', fontStyle: 'italic' }}>No archives found</p>
-            ) : (
-              <div style={{ display: 'grid', gap: '8px' }}>
-                {archives.map(archive => (
-                  <div key={archive} style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'space-between',
-                    padding: '12px', 
-                    border: '1px solid #e0e0e0', 
-                    borderRadius: '4px',
-                    backgroundColor: '#fff'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <Calendar size={16} />
-                      <span>{archive}</span>
-                      {loadedArchives.has(archive) && (
-                        <span style={{ 
-                          fontSize: '12px', 
-                          backgroundColor: '#d4edda', 
-                          color: '#155724', 
-                          padding: '2px 6px', 
-                          borderRadius: '3px' 
-                        }}>
-                          Loaded
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      {!loadedArchives.has(archive) ? (
-                        <button 
-                          className="btn btn-secondary"
-                          onClick={() => handleLoadArchive(archive)}
-                          style={{ fontSize: '12px', padding: '4px 8px' }}
-                        >
-                          Load
-                        </button>
-                      ) : (
-                        <button 
-                          className="btn btn-secondary"
-                          onClick={() => handleUnloadArchive(archive)}
-                          style={{ fontSize: '12px', padding: '4px 8px' }}
-                        >
-                          Unload
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </div>
 

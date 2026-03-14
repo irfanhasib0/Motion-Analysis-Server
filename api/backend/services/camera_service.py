@@ -1100,10 +1100,6 @@ class CameraService(StreamingService):
         if not db_camera:
             logger.warning(f"{Colors.RED}Failed to stop video - camera not found: {camera_id}{Colors.RESET}")
             return
-        
-        # Stop any active recording
-        if camera_id in self.active_recordings:
-            self.stop_recording(camera_id)
 
         try:
             self._hls_manager.stop_stream(camera_id)
