@@ -29,6 +29,9 @@ class SPMCRingBuffer:
         self._consumer_cursors: Dict[str, int] = {}
         self._lock = threading.RLock()
         
+        # Sequence number for detecting missed data (optional enhancement)
+        self._sequence = 0
+        
         # FPS Statistics
         self._stats_enabled = enable_stats
         self._producer_write_times = deque(maxlen=100)  # Last 100 writes
@@ -43,8 +46,18 @@ class SPMCRingBuffer:
         current_time = time.time()
         
         with self._lock:
-            self._buffer[self._write_idx] = item
+            current_write_pos = self._write_idx
+            
+            # Handle slow consumers: if cursor == write_pos, they're too slow (standard practice)
+            for consumer_id, cursor in list(self._consumer_cursors.items()):
+                if cursor == current_write_pos:
+                    # Consumer is too slow, skip them forward (standard overrun handling)
+                    self._consumer_cursors[consumer_id] = (current_write_pos + 1) % self.capacity
+                    
+            # Write item and advance (simple and fast)
+            self._buffer[current_write_pos] = item
             self._write_idx = (self._write_idx + 1) % self.capacity
+            self._sequence += 1
             
             # Track producer write times for FPS calculation
             if self._stats_enabled:
@@ -54,25 +67,28 @@ class SPMCRingBuffer:
             return True
     
     def get(self, consumer_id: str) -> Optional[Any]:
-        """Get next item for consumer"""
+        """Get next item for consumer (standard SPMC pattern)"""
         current_time = time.time()
         
         with self._lock:
             if consumer_id not in self._consumer_cursors:
-                # New consumer starts at current write position
+                # New consumer starts at current write position (standard)
                 self._consumer_cursors[consumer_id] = self._write_idx
-                if self._stats_enabled and consumer_id not in self._consumer_read_times:
+                if self._stats_enabled:
                     self._consumer_read_times[consumer_id] = deque(maxlen=100)
                 return None
             
             cursor = self._consumer_cursors[consumer_id]
-            if cursor == self._write_idx:
-                return None  # No new data
             
+            # No new data if cursor caught up to write position
+            if cursor == self._write_idx:
+                return None
+            
+            # Read item and advance cursor (simple!)
             item = self._buffer[cursor]
             self._consumer_cursors[consumer_id] = (cursor + 1) % self.capacity
             
-            # Track consumer read times for FPS calculation
+            # Track stats
             if self._stats_enabled:
                 if consumer_id not in self._consumer_read_times:
                     self._consumer_read_times[consumer_id] = deque(maxlen=100)
@@ -97,15 +113,15 @@ class SPMCRingBuffer:
         return None
     
     def register_consumer(self, consumer_id: str) -> bool:
-        """Register a new consumer"""
+        """Register a new consumer (standard SPMC pattern)"""
         with self._lock:
-            self._consumer_cursors[consumer_id] = self._write_idx
-            if self._stats_enabled and consumer_id not in self._consumer_read_times:
+            self._consumer_cursors[consumer_id] = self._write_idx  # Start at current position
+            if self._stats_enabled:
                 self._consumer_read_times[consumer_id] = deque(maxlen=100)
             return True
     
     def unregister_consumer(self, consumer_id: str) -> bool:
-        """Remove consumer"""
+        """Remove consumer (standard cleanup)"""
         with self._lock:
             self._consumer_cursors.pop(consumer_id, None)
             if self._stats_enabled:

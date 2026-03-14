@@ -223,42 +223,38 @@ class RecordingManager:
 
     def send_notification_to_app(self):
         pass
-
-    def process_recorded_clip(
+     
+    def delete_recording(self, recording_id: str, final_file_path: str):
+        # Release writer - returns immediately in separate files mode
+        
+        if os.path.exists(final_file_path):
+            os.system(f'rm -f {final_file_path}')
+            logger.info(f"{Colors.RED}🗑️ Deleted no-motion recording:{Colors.RESET} {final_file_path}")
+            
+        # Also clean up audio file if it exists
+        audio_file_path = getattr(writer, 'audio_file_path', None)
+        if audio_file_path and os.path.exists(audio_file_path):
+            try:
+                os.remove(audio_file_path)
+            except Exception as e:
+                logger.warning(f"{Colors.YELLOW}⚠️ Could not clean up audio file:{Colors.RESET} {e}")
+                
+        self.db.delete_recording(recording_id)
+        return
+    
+    def save_recording(
         self,
         recording_id: str,
-        writer: AVWriter,
-        clip_motion_detected: bool,
+        final_file_path: str,
+        audio_enabled: bool,
         clip_start_time: float,
         curr_time: float,
         vel: float = 0.0,
         bg_diff: int = 0,
         loudness: float = 0.0,
     ):
-        # Check if audio was being recorded before releasing (compatible interface)
-        had_audio = getattr(writer, 'audio_recording', False) and getattr(writer, 'audio_file_path', None) is not None
         
-        # Release writer - returns immediately in separate files mode
-        final_file_path = writer.release()
-        
-        if not clip_motion_detected:
-            if os.path.exists(final_file_path):
-                os.system(f'rm -f {final_file_path}')
-                logger.info(f"{Colors.RED}🗑️ Deleted no-motion recording:{Colors.RESET} {final_file_path}")
-                
-            # Also clean up audio file if it exists
-            audio_file_path = getattr(writer, 'audio_file_path', None)
-            if audio_file_path and os.path.exists(audio_file_path):
-                try:
-                    os.remove(audio_file_path)
-                except Exception as e:
-                    logger.warning(f"{Colors.YELLOW}⚠️ Could not clean up audio file:{Colors.RESET} {e}")
-                    
-            self.db.delete_recording(recording_id)
-            return
-
         clip_duration = max(0, int(curr_time - clip_start_time))
-        
         # Small delay to ensure file is fully written before getting size
         if os.path.exists(final_file_path):
             time.sleep(0.1)  # 100ms delay
@@ -282,7 +278,7 @@ class RecordingManager:
                     'vel': float(vel),
                     'diff': int(bg_diff),
                     'loudness': float(loudness),
-                    'audio_recorded': had_audio,
+                    'audio_recorded': audio_enabled,
                 },
             },
         )
@@ -293,6 +289,7 @@ class RecordingManager:
         start_time = time.time()
         clip_start_time = start_time
         curr_time = start_time
+        recent_motion_detected = False
         clip_motion_detected = False
         clip_vel = 0.0
         clip_bg_diff = 0
@@ -307,7 +304,10 @@ class RecordingManager:
         logger.info(f"{Colors.BLUE}🎬 Recording worker started{Colors.RESET} for camera {camera_id}, audio enabled: {audio_enabled}")
         # Track last motion check time
         last_motion_check = start_time
-        
+        _ext = file_path.split('.')[1]
+        with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
+            f.write('vel,bg_diff,loudness\n')
+
         while camera_id in self.active_recordings:
             loop_start = time.time()
             
@@ -323,42 +323,56 @@ class RecordingManager:
             res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
             audio_res = results.get('audio', {}) if results else {}
             curr_time = time.time()
+            
+            # Read detection flags directly from streaming service (staleness already handled)
+            detected_vel = bool(res.get('detected_vel', False))
+            detection_bg_diff = bool(res.get('detection_bg_diff', False))
+            vel = float(res.get('vel', 0.0))
+            bg_diff = int(res.get('bg_diff', 0))
+
+            if detected_vel or detection_bg_diff:
+                recent_motion_detected = True
+                clip_motion_detected   = True
+                clip_vel = max(clip_vel, vel)
+                clip_bg_diff = max(clip_bg_diff, bg_diff)
 
             if audio_enabled and audio_res:
                 # Read detected loudness flag from audio results
                 detected_loudness = bool(audio_res.get('detected_loudness', False))
-                clip_loudness = max(clip_loudness, float(audio_res.get('int', 0.0)))
+                loudness = float(audio_res.get('int', 0.0))
+                clip_loudness = max(clip_loudness, loudness)
             
-            # Motion detection check (less frequent to avoid blocking audio)
+            # Motion detection check (less frequent to avoid blocking audio) 
+            # [i] > interval, no motion -> end clip
+            # [ii] > interval, motion, < max length -> continue clip
+            # [iii] > interval, motion, > max length -> end clip
             if curr_time - last_motion_check > self.motion_check_interval:
-                recent_motion_detected = False
-
-                # Read detection flags directly from streaming service (staleness already handled)
-                detected_vel = bool(res.get('detected_vel', False))
-                detection_bg_diff = bool(res.get('detection_bg_diff', False))
-                vel = float(res.get('vel', 0.0))
-                bg_diff = int(res.get('bg_diff', 0))
-
-                if detected_vel or detection_bg_diff:
-                    recent_motion_detected = True
-                    clip_motion_detected = True
-                    clip_vel = max(clip_vel, vel)
-                    clip_bg_diff = max(clip_bg_diff, bg_diff)
-                
                 logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {(curr_time - clip_start_time)},{self.max_clip_length}, {clip_motion_detected} - vel: {vel:.2f}, bg_diff: {bg_diff}, loudness: {clip_loudness:.2f}{Colors.RESET}")
-                if not recent_motion_detected or (curr_time - clip_start_time) > self.max_clip_length:
-                    logger.info(f"{Colors.CYAN}🎬 Clip ended{Colors.RESET} for camera {camera_id} - motion: {clip_motion_detected}, duration: {int(curr_time - clip_start_time)}s, vel: {clip_vel:.2f}, bg_diff: {clip_bg_diff}, loudness: {clip_loudness:.2f}")
-                    self.process_recorded_clip(
-                        recording_id,
-                        writer,
-                        clip_motion_detected,
-                        clip_start_time,
-                        curr_time,
-                        vel=clip_vel,
-                        bg_diff=clip_bg_diff,
-                        loudness=clip_loudness,
-                    )
-
+                start_new_recording = False
+                
+                if not recent_motion_detected:
+                    recorded_file_path = writer.release()
+                    self.delete_recording(recording_id, recorded_file_path)
+                    start_new_recording = True
+                else:
+                    if (curr_time - clip_start_time) < self.max_clip_length:
+                        logger.info(f"{Colors.GREEN}⏱️ Continuing recording{Colors.RESET} for camera {camera_id} - motion: {clip_motion_detected}, duration: {int(curr_time - clip_start_time)}s, vel: {clip_vel:.2f}, bg_diff: {clip_bg_diff}, loudness: {clip_loudness:.2f}")
+                    else:
+                        logger.info(f"{Colors.CYAN}🎬 Clip ended{Colors.RESET} for camera {camera_id} - motion: {clip_motion_detected}, duration: {int(curr_time - clip_start_time)}s, vel: {clip_vel:.2f}, bg_diff: {clip_bg_diff}, loudness: {clip_loudness:.2f}")
+                        
+                        self.save_recording(
+                            recording_id,
+                            writer,
+                            clip_motion_detected,
+                            clip_start_time,
+                            curr_time,
+                            vel=clip_vel,
+                            bg_diff=clip_bg_diff,
+                            loudness=clip_loudness,
+                        )
+                        start_new_recording = True
+                
+                if start_new_recording:
                     recording_id, file_path, writer = self.init_recording(
                         camera_id,
                         self.db.get_camera(camera_id),
@@ -370,19 +384,16 @@ class RecordingManager:
                     clip_bg_diff = 0
                     clip_loudness = 0.0
                 last_motion_check = curr_time
+                recent_motion_detected = False
             
             # Write video frame if available (but don't wait for it)
             if frame is not None:
                 writer.write_frame_with_timing(frame, None)  # Audio already written above
             if audio_enabled and audio_chunk is not None:
-                writer.write_audio(audio_chunk)  # Write audio chunk immediately if enabled            
-            # Very short sleep to allow audio thread to produce more data
-            # but yield CPU to prevent busy waiting
-            #loop_duration = time.time() - loop_start
-            #target_loop_time = 1.0 / 50  # 50Hz loop for responsive audio consumption
-            #if loop_duration < target_loop_time:
-            #    time.sleep(target_loop_time - loop_duration)
-
+                writer.write_audio(audio_chunk)  # Write audio chunk immediately if enabled
+            with open(file_path.replace(f'.{_ext}', '.txt'), 'a') as f:
+                f.write(f"{vel},{bg_diff},{clip_loudness}\n")            
+            
         self.process_recorded_clip(
             recording_id,
             writer,
@@ -664,7 +675,23 @@ class RecordingManager:
                 rel_path = os.path.basename(src)
             dst = os.path.join(archive_path, rel_path)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            # Copy main file
             shutil.copy2(src, dst)
+            
+            # Copy all related files with the same stem but different extensions
+            related_files = self._find_related_files(src)
+            dst_dir = os.path.dirname(dst)
+            src_dir = os.path.dirname(src)
+            
+            # Copy each related file
+            for related_file in related_files:
+                related_src = os.path.join(src_dir, related_file)
+                related_dst = os.path.join(dst_dir, related_file)
+                try:
+                    shutil.copy2(related_src, related_dst)
+                except Exception as e:
+                    logger.warning(f"Failed to copy related file {related_file}: {e}")
             camera_archived[rec.camera_id] = camera_archived.get(rec.camera_id, 0) + 1
             exported.append({
                 'id': rec.id,
@@ -758,6 +785,31 @@ class RecordingManager:
             if not os.path.exists(abs_path):
                 logger.warning(f"Archive recording file missing, skipping: {abs_path}")
                 continue
+                
+            # Copy main file back to recordings directory
+            src = abs_path
+            dst_rel_path = rel_path if rel_path else os.path.basename(abs_path)
+            dst = os.path.join(self.recordings_dir, dst_rel_path)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+                
+                # Copy all related files with the same stem but different extensions
+                related_files = self._find_related_files(src)
+                dst_dir = os.path.dirname(dst)
+                src_dir = os.path.dirname(src)
+                
+                # Copy each related file
+                for related_file in related_files:
+                    related_src = os.path.join(src_dir, related_file)
+                    related_dst = os.path.join(dst_dir, related_file)
+                    try:
+                        if not os.path.exists(related_dst):
+                            shutil.copy2(related_src, related_dst)
+                            logger.debug(f"Imported related file: {related_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to import related file {related_file}: {e}")
             recording_data = {
                 'id': rec_id,
                 'camera_id': rec.get('camera_id', ''),
@@ -802,19 +854,61 @@ class RecordingManager:
         logger.info(f"Unloaded {count} archive recordings from DB: {archive_path}")
         return count
 
+    def _find_related_files(self, file_path: str) -> List[str]:
+        """Find all files with the same file stem but different extensions.
+        
+        Args:
+            file_path: Path to the main file
+            
+        Returns:
+            List of filenames (not full paths) that share the same stem
+        """
+        file_dir = os.path.dirname(file_path)
+        file_stem = os.path.splitext(os.path.basename(file_path))[0]
+        related_files = []
+        
+        if os.path.exists(file_dir):
+            for filename in os.listdir(file_dir):
+                if filename == os.path.basename(file_path):
+                    continue  # Skip the main file itself
+                    
+                file_base_stem = os.path.splitext(filename)[0]
+                # Handle files like recording.browser.mp4 -> stem is "recording"
+                if '.' in file_base_stem:
+                    base_stem = file_base_stem.split('.')[0]
+                else:
+                    base_stem = file_base_stem
+                
+                if base_stem == file_stem:
+                    related_files.append(filename)
+        
+        return related_files
+
     def delete_recording(self, recording_id: str):
         db_recording = self.db.get_recording(recording_id)
         if not db_recording:
             raise ValueError(f"Recording not found: {recording_id}")
 
         file_path = db_recording['file_path']
+        
+        # Delete main file
         if os.path.exists(file_path):
             os.remove(file_path)
 
-        root, ext = os.path.splitext(file_path)
-        playable_path = f"{root}.browser{ext or '.mp4'}"
-        if os.path.exists(playable_path):
-            os.remove(playable_path)
+        # Delete all related files with the same stem but different extensions
+        related_files = self._find_related_files(file_path)
+        file_dir = os.path.dirname(file_path)
+        deleted_files = [os.path.basename(file_path)]
+        
+        for related_file in related_files:
+            related_file_path = os.path.join(file_dir, related_file)
+            try:
+                if os.path.exists(related_file_path):
+                    os.remove(related_file_path)
+                    deleted_files.append(related_file)
+                    logger.debug(f"Deleted related file: {related_file}")
+            except Exception as e:
+                logger.warning(f"Failed to delete related file {related_file}: {e}")
 
         self.db.delete_recording(recording_id)
-        logger.info(f"Deleted recording: {recording_id}")
+        logger.info(f"Deleted recording {recording_id} and {len(deleted_files)} related files: {deleted_files}")

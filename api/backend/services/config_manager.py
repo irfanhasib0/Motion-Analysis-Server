@@ -154,7 +154,7 @@ class ConfigManager:
         """Get available presets from system.yaml."""
         if os.path.exists(self.system_path):
             data = self._read_yaml(self.system_path)
-            return data.get("presets", {})
+            return data.get('system', {}).get("presets", {})
         return {}
 
     def apply_preset(self, preset_name: str) -> Dict[str, Any]:
