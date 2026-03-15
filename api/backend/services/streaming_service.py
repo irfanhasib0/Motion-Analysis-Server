@@ -512,6 +512,7 @@ class StreamingService:
             logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
             while not stop_event.is_set() and cap.is_audio_stream_opened():
                 ret, chunk = cap.read_audio()
+                audio_capture_time = time.time()  # Capture timestamp immediately after audio read
                 
                 if not ret or chunk is None or len(chunk) == 0:
                     consecutive_failures += 1
@@ -543,9 +544,9 @@ class StreamingService:
                         'detected_loudness': float(analysis.get('overall_intensity', 0.0) or 0.0) > 0.0  # Threshold set to 0.0 for now
                     }
                     
-                    # Update current audio results and publish only audio to ring buffer
+                    # Update current audio results and publish only audio to ring buffer with capture timestamp
                     if camera_id in self._results_ring_buffers:
-                        self._results_ring_buffers[camera_id].put_audio_only(self._latest_res_audio[camera_id])
+                        self._results_ring_buffers[camera_id].put_audio_only_with_timestamp(self._latest_res_audio[camera_id], audio_capture_time)
                 
                 _ = self._update_loop_fps(f"{camera_id}:audio")
 
@@ -554,9 +555,9 @@ class StreamingService:
                     self._latest_audio_chunk[camera_id] = chunk
                     self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
                     
-                    # Publish to ring buffer for SPMC consumers
+                    # Publish to ring buffer for SPMC consumers with capture timestamp
                     if camera_id in self._audio_ring_buffers:
-                        self._audio_ring_buffers[camera_id].put(chunk)
+                        self._audio_ring_buffers[camera_id].put_with_timestamp(chunk, audio_capture_time)
                         
 
                 if self._latest_res_video.get('det_ts', None) and (time.time() - self.latest_res_video['det_ts']) > self.no_motion_slow_down_thr_sec:
@@ -645,12 +646,11 @@ class StreamingService:
         
         # Background thread should already be running from /start endpoint
         if camera_id not in self._audio_background_threads:
-            logger.warning(f"{Colors.RED}No audio thread for {camera_id} - start camera first{Colors.RESET}")
+            logger.warning(f"{Colors.RED}No audio thread for {camera_id} - start audio ...{Colors.RESET}")
+            self.start_audio_stream(camera_id)
             return
         
         consecutive_empty = 0
-        max_empty = 300  # 30 seconds timeout (300 * 0.1s)
-        
         # Stream loop
         while (self.active_audio_streams.get(camera_id) == stream_token and 
                camera_id in self._audio_background_threads):
@@ -724,6 +724,7 @@ class StreamingService:
             while not stop_event.is_set() and cap.is_video_stream_opened():
                 with stream_lock:
                     ret, frame = cap.read_video()
+                    frame_capture_time = time.time()  # Capture timestamp immediately after frame read
                     
                     if not ret:
                         consecutive_failures += 1
@@ -741,9 +742,9 @@ class StreamingService:
                     self._latest_frame_seq[camera_id] = (self._latest_frame_seq.get(camera_id, 0) + 1) % self.max_sequence_number
                     frame_index += 1
                     
-                    # Publish to ring buffer for SPMC consumers
+                    # Publish to ring buffer for SPMC consumers with capture timestamp
                     if camera_id in self._frame_ring_buffers:
-                        self._frame_ring_buffers[camera_id].put(frame)
+                        self._frame_ring_buffers[camera_id].put_with_timestamp(frame, frame_capture_time)
                 
                 # Resize frame for streaming performance
                 stream_frame = self._resize_frame_for_streaming(frame)
@@ -762,13 +763,13 @@ class StreamingService:
                         self._latest_viz[camera_id] = viz_frame
                         self._latest_res_video[camera_id] = res
                         
-                        # Publish viz frame to ring buffer for SPMC consumers
+                        # Publish viz frame to ring buffer for SPMC consumers with capture timestamp
                         if camera_id in self._viz_ring_buffers:
-                            self._viz_ring_buffers[camera_id].put(viz_frame)
+                            self._viz_ring_buffers[camera_id].put_with_timestamp(viz_frame, frame_capture_time)
                         
-                        # Update current video results and publish only video to ring buffer
+                        # Update current video results and publish only video to ring buffer with capture timestamp
                         if camera_id in self._results_ring_buffers:
-                            self._results_ring_buffers[camera_id].put_video_only(res)
+                            self._results_ring_buffers[camera_id].put_video_only_with_timestamp(res, frame_capture_time)
                         self._latest_pts_payload[camera_id] = flow_pts
                         
                 else:
@@ -786,7 +787,8 @@ class StreamingService:
                 frame_fps = self._update_loop_fps(f"{camera_id}:primary")
                 primary_frame = self._drawing.draw_fps_overlay(stream_frame.copy(), frame_fps)
                 primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
-                self._overlay_frame_ring_buffers[camera_id].put(primary_frame)
+                # Use capture timestamp for overlay frames to maintain chronological order
+                self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(primary_frame, frame_capture_time)
                 # Convert to bytes and store (thread-safe)
                 frame_bytes = self.frame_to_bytes(primary_frame)
                 with video_lock:
@@ -885,7 +887,6 @@ class StreamingService:
             # Give the thread a moment to start producing frames
             time.sleep(0.5)
         
-        video_lock = self._video_thread_locks.get(camera_id)
         consecutive_empty = 0
         max_empty = 300  # 30 seconds timeout (300 * 0.1s)
         last_yielded_frame = None

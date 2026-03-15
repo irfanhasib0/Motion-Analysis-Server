@@ -18,6 +18,7 @@ import time
 import struct
 import cv2
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,9 @@ class AVWriterV2:
         # Frame rate control
         self.target_interval = 1.0 / float(fps)
         self.next_write_at = time.time()
+        
+        # Thread pool for async write operations
+        self._write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"write_{camera_id}")
         
         # Create directory if needed
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -235,24 +239,38 @@ class AVWriterV2:
                 logger.error(f"Error writing audio chunk: {e}")
                 return False
     
-    def write_frame_with_timing(self, frame: np.ndarray, audio_chunk: bytes = None) -> bool:
-        """Write frame with frame rate control and optional audio chunk."""
-        if self.audio_recording and audio_chunk and len(audio_chunk) > 0:
-            self.write_audio(audio_chunk)
+    def write_frame_with_timeout(self, frame: np.ndarray, write_timeout: float = 2.0) -> bool:
+        """Write frame with frame rate control using ThreadPoolExecutor."""
         
-        # Handle frame rate timing first - this prevents flickering
-        current_time = time.time()
-        if current_time < self.next_write_at:
-            sleep_time = self.next_write_at - current_time
-            if sleep_time > 0.001:  # Only sleep if meaningful (>1ms)
-                time.sleep(sleep_time)
+        # Use ThreadPoolExecutor for async write
+        future = self._write_executor.submit(self.write_video, frame)
         
-        # Write video frame
-        self.write_video(frame)
+        write_success = True
+        try:
+            # Wait for write operation to complete with timeout
+            success = future.result(timeout=write_timeout)
+            write_success = success
+        except FutureTimeoutError:
+            # Timeout occurred - cancel the future if it hasn't started yet
+            cancelled = future.cancel()
+            if cancelled:
+                logger.warning(f"Frame write cancelled after {write_timeout}s timeout for camera {self.camera_id}")
+            else:
+                logger.warning(f"Frame write timeout after {write_timeout}s for camera {self.camera_id} - task already running")
+            write_success = False
+        except Exception as e:
+            logger.error(f"Frame write error for camera {self.camera_id}: {e}")
+            write_success = False
         
-        # Update next frame time
-        self.next_write_at = max(time.time(), self.next_write_at + self.target_interval)
-        return True
+        # Handle frame rate timing
+        self.next_write_at += self.target_interval
+        sleep_for = self.next_write_at - time.time()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        else:
+            self.next_write_at = time.time()
+            
+        return write_success
     
     def write_video_ffmpeg(self, frame: np.ndarray) -> bool:
         """Alternative FFmpeg-based video writing method.
@@ -333,6 +351,14 @@ class AVWriterV2:
             return self.path
         
         self._closed = True
+        
+        # Shutdown write thread pool
+        if hasattr(self, '_write_executor'):
+            try:
+                self._write_executor.shutdown(wait=True)
+                logger.debug(f"Thread pool shutdown complete for camera {self.camera_id}")
+            except Exception as e:
+                logger.warning(f"Error shutting down thread pool for camera {self.camera_id}: {e}")
         
         # Cleanup FFmpeg processes (both modes)
         self._cleanup_ffmpeg_processes()
@@ -571,6 +597,14 @@ class AVWriterV2:
             return
             
         self._closed = True
+        
+        # Shutdown write thread pool immediately
+        if hasattr(self, '_write_executor'):
+            try:
+                self._write_executor.shutdown(wait=False)  # Don't wait for in-progress tasks
+                logger.debug(f"Thread pool cancelled for camera {self.camera_id}")
+            except Exception as e:
+                logger.warning(f"Error cancelling thread pool for camera {self.camera_id}: {e}")
         
         # Cleanup FFmpeg processes (both modes) and remove their output files
         self._cancel_ffmpeg_processes()
@@ -915,11 +949,28 @@ class AVWriterV3:
         return True
     
     def write_frame_with_timing(self, frame: np.ndarray, audio_chunk: bytes = None) -> bool:
-        """Write frame with frame rate control and audio chunk collection."""
-        if not self.write_video(frame):
-            return False
-            
-        self.write_audio(audio_chunk)
+        """Write frame with frame rate control using ThreadPoolExecutor."""
+        
+        # Submit write task to thread pool
+        write_timeout = 2.0  # 2 second timeout for frame write
+        future = self._write_executor.submit(self.write_video, frame)
+        
+        write_success = True
+        try:
+            # Wait for write operation to complete with timeout
+            success = future.result(timeout=write_timeout)
+            write_success = success
+        except FutureTimeoutError:
+            # Timeout occurred - cancel the future if it hasn't started yet
+            cancelled = future.cancel()
+            if cancelled:
+                logger.warning(f"Frame write cancelled after {write_timeout}s timeout for camera {self.camera_id}")
+            else:
+                logger.warning(f"Frame write timeout after {write_timeout}s for camera {self.camera_id} - task already running")
+            write_success = False
+        except Exception as e:
+            logger.error(f"Frame write error for camera {self.camera_id}: {e}")
+            write_success = False
         
         # Handle frame rate timing
         self.next_write_at += self.target_interval
@@ -929,7 +980,7 @@ class AVWriterV3:
         else:
             self.next_write_at = time.time()
             
-        return True
+        return write_success
     
     def release(self) -> str:
         """Release video writer immediately and start async audio muxing if needed."""

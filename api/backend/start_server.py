@@ -399,6 +399,20 @@ async def stop_camera(camera_id: str):
     #await broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
     return {"message": "Camera and all streams stopped successfully"}
 
+@app.post("/api/cameras/{camera_id}/restart")
+async def restart_camera(camera_id: str):
+    """Restart camera (stop recording, stop camera, start camera)"""
+    try:
+        success = camera_service.restart_camera(camera_id)
+        if success:
+            #await broadcast_message({"type": "camera_restarted", "camera_id": camera_id})
+            return {"message": "Camera restarted successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to restart camera")
+    except Exception as e:
+        logger.error(f"Error restarting camera {camera_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to restart camera: {str(e)}")
+
 # =====================================================================
 # RECORDING MANAGEMENT ENDPOINTS
 # =====================================================================

@@ -103,6 +103,7 @@ export const api = {
   deleteCamera: (cameraId) => apiClient.delete(`/cameras/${cameraId}`),
   startCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/start`),
   stopCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/stop`),
+  restartCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/restart`),
   
   // Recording endpoints
   startRecording: (cameraId) => {

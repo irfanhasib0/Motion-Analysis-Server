@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff, RotateCcw } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff, RotateCw } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../api';
 import './CameraList.css';
@@ -116,6 +116,7 @@ const CameraList = ({ cameras, setCameras }) => {
   // Stream health monitoring state
   const [streamHealth, setStreamHealth] = useState({}); // { [camera_id]: health_data }
   const [refreshingStreams, setRefreshingStreams] = useState({}); // { [camera_id]: boolean }
+  const [restartingCameras, setRestartingCameras] = useState({}); // { [camera_id]: boolean }
   const [startingCameras, setStartingCameras] = useState({}); // { [camera_id]: boolean }
 
   const isLiveHlsMode = liveStreamMode === 'hls';
@@ -322,6 +323,30 @@ const CameraList = ({ cameras, setCameras }) => {
     }
   };
 
+  const handleRestartCamera = async (cameraId) => {
+    try {
+      setRestartingCameras(prev => ({ ...prev, [cameraId]: true }));
+      
+      await api.restartCamera(cameraId);
+      toast.success(`Camera ${cameraId} restarted successfully`);
+      
+      // Refresh cameras list after restart
+      setTimeout(async () => {
+        try {
+          const response = await api.getCameras();
+          setCameras(response.data);
+        } catch (error) {
+          console.warn('Failed to refresh cameras after restart:', error);
+        }
+      }, 2000);
+      
+    } catch (error) {
+      toast.error(`Failed to restart camera: ${error.message}`);
+    } finally {
+      setRestartingCameras(prev => ({ ...prev, [cameraId]: false }));
+    }
+  };
+
   // -----------------------------
   // Subcomponents
   // -----------------------------
@@ -397,35 +422,65 @@ const CameraList = ({ cameras, setCameras }) => {
               <StreamHealthIndicator cameraId={camera.id} health={streamHealth[camera.id]} />
             </div>
             
-            {/* Reload Button - Inline with camera info */}
-            <button
-              onClick={() => handleRefreshStream(camera.id)}
-              disabled={refreshingStreams[camera.id] || camera.status !== 'online'}
-              title="Refresh streams if having connection issues"
-              style={{
-                background: 'rgba(10,14,20,0.7)',
-                border: '1px solid rgba(148,163,184,0.3)',
-                borderRadius: '6px',
-                width: '20px',
-                height: '20px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: camera.status !== 'online' ? 'not-allowed' : 'pointer',
-                opacity: camera.status !== 'online' ? 0.5 : (refreshingStreams[camera.id] ? 0.7 : 1),
-                color: '#d6deea',
-                transition: 'opacity 0.2s ease',
-                flexShrink: 0
-              }}
-            >
-              <RotateCcw 
-                size={10} 
+            {/* Action Buttons - Reload and Restart */}
+            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+              {/* Reload Button */}
+              <button
+                onClick={() => handleRefreshStream(camera.id)}
+                disabled={refreshingStreams[camera.id] || camera.status !== 'online'}
+                title="Refresh streams if having connection issues"
                 style={{
-                  transform: refreshingStreams[camera.id] ? 'rotate(360deg)' : 'none',
-                  transition: refreshingStreams[camera.id] ? 'transform 1s linear infinite' : 'transform 0.2s ease'
-                }} 
-              />
-            </button>
+                  background: 'rgba(10,14,20,0.7)',
+                  border: '1px solid rgba(148,163,184,0.3)',
+                  borderRadius: '6px',
+                  width: '20px',
+                  height: '20px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: camera.status !== 'online' ? 'not-allowed' : 'pointer',
+                  opacity: camera.status !== 'online' ? 0.5 : (refreshingStreams[camera.id] ? 0.7 : 1),
+                  color: '#d6deea',
+                  transition: 'opacity 0.2s ease',
+                  flexShrink: 0
+                }}
+              >
+                <RotateCw 
+                  size={10} 
+                  style={{
+                    transform: refreshingStreams[camera.id] ? 'rotate(360deg)' : 'none',
+                    transition: refreshingStreams[camera.id] ? 'transform 1s linear infinite' : 'transform 0.2s ease'
+                  }} 
+                />
+              </button>
+              
+              {/* Restart Button */}
+              <button
+                onClick={() => handleRestartCamera(camera.id)}
+                disabled={restartingCameras[camera.id] || camera.status !== 'online'}
+                title="Restart camera (stop recording, stop camera, start camera)"
+                style={{
+                  background: 'rgba(10,14,20,0.7)',
+                  border: '1px solid rgba(255,99,99,0.4)', // Light red border
+                  borderRadius: '6px',
+                  width: 'auto',
+                  height: '20px',
+                  padding: '0 6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: camera.status !== 'online' ? 'not-allowed' : 'pointer',
+                  opacity: camera.status !== 'online' ? 0.5 : (restartingCameras[camera.id] ? 0.7 : 1),
+                  color: restartingCameras[camera.id] ? '#ff6b6b' : '#ff9999', // Light red colors
+                  transition: 'all 0.2s ease',
+                  flexShrink: 0,
+                  fontSize: '9px',
+                  fontWeight: 500
+                }}
+              >
+                <span style={{ fontSize: '9px', lineHeight: 1 }}>restart</span>
+              </button>
+            </div>
           </div>
         </div>
 

@@ -570,6 +570,7 @@ class CameraService(StreamingService):
         self.jpeg_quality = int(_sys.get('jpeg_quality', 55 if self.low_power_mode else 70))
         self.pipe_buffer_size = int(_sys.get('pipe_buffer_size', 10**6 if self.low_power_mode else 10**8))
         self.rtsp_unified_demux_enabled = bool(_sys.get('rtsp_unified_demux_enabled', self.rtsp_unified_demux_enabled))
+        self.live_stream_mode = str(_sys.get('live_stream_mode', 'mjpeg')).lower()
         
         # Store ring buffer settings for runtime updates
         self.frame_rbf_len = frame_rbf_len
@@ -631,6 +632,7 @@ class CameraService(StreamingService):
             'motion_check_interval': int(self.motion_check_interval),
             'min_free_storage_bytes': int(self.min_free_storage_bytes),
             'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
+            'live_stream_mode': str(getattr(self, 'live_stream_mode', 'mjpeg')),
             'ram_auto_low_power_enabled': bool(self.ram_auto_low_power_enabled),
             'low_power_ram_threshold_bytes': int(self.low_power_ram_threshold_bytes),
             'total_memory_bytes': total_memory_bytes,
@@ -670,6 +672,7 @@ class CameraService(StreamingService):
         max_recording_duration_minutes: Optional[int] = None,
         quality: Optional[str] = None,
         recording_enabled: Optional[bool] = None,
+        live_stream_mode: Optional[str] = None,
     ) -> Dict[str, Union[bool, int, float]]:
         low_power_changed = False
 
@@ -770,6 +773,14 @@ class CameraService(StreamingService):
             # Store recording enabled setting for future use
             self.recording_enabled = bool(recording_enabled)
 
+        if live_stream_mode is not None:
+            # Validate and store live stream mode setting
+            valid_modes = ['mjpeg', 'hls']
+            if str(live_stream_mode).lower() in valid_modes:
+                self.live_stream_mode = str(live_stream_mode).lower()
+            else:
+                logger.warning(f"Invalid live_stream_mode '{live_stream_mode}', keeping current mode")
+
         try:
             self.default_sensitivity = int(self.sensitivity)
         except Exception:
@@ -810,6 +821,7 @@ class CameraService(StreamingService):
                 'motion_check_interval': int(self.motion_check_interval),
                 'min_free_storage_bytes': int(self.min_free_storage_bytes),
                 'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
+                'live_stream_mode': str(self.live_stream_mode),
                 # Advanced Performance Settings
                 'frame_rbf_len': int(self.frame_rbf_len),
                 'audio_rbf_len': int(self.audio_rbf_len),
@@ -1141,6 +1153,38 @@ class CameraService(StreamingService):
             self.active_streams.pop(camera_id, None)
 
         logger.info(f"{Colors.YELLOW}Video stopped for {camera_id}{Colors.RESET}")
+
+    def restart_camera(self, camera_id: str) -> bool:
+        """Restart camera by stopping recording, stopping camera, and starting again."""
+        db_camera = self.db.get_camera(camera_id)
+        if not db_camera:
+            logger.error(f"{Colors.RED}❌ Camera not found:{Colors.RESET} {camera_id}")
+            return False
+
+        logger.info(f"{Colors.BLUE}🔄 Restarting camera:{Colors.RESET} {camera_id}")
+        
+        try:
+            # Step 1: Stop recording if currently recording
+            if camera_id in self.recording_manager.active_recordings:
+                logger.info(f"{Colors.YELLOW}⏹️ Stopping recording for restart:{Colors.RESET} {camera_id}")
+                self.stop_recording(camera_id)
+            
+            # Step 2: Stop camera stream (like stop button)
+            self.stop_video(camera_id)
+            logger.info(f"{Colors.YELLOW}⏹️ Stopped camera stream:{Colors.RESET} {camera_id}")
+            
+            # Step 3: Start camera stream again (like start button)  
+            success = self.start_video(camera_id)
+            if success:
+                logger.info(f"{Colors.GREEN}▶️ Restarted camera successfully:{Colors.RESET} {camera_id}")
+                return True
+            else:
+                logger.error(f"{Colors.RED}❌ Failed to restart camera:{Colors.RESET} {camera_id}")
+                return False
+                
+        except Exception as error:
+            logger.error(f"{Colors.RED}❌ Error restarting camera {camera_id}:{Colors.RESET} {error}")
+            return False
 
     def audio_capture(self, camera_id: str):
         """Create an audio-only Capture for this camera (mirrors video_capture)."""

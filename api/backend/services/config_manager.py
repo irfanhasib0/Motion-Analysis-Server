@@ -44,7 +44,7 @@ class ConfigManager:
 
         self.cameras_path = os.path.join(configs_dir, "cameras.yaml")
         self.recordings_path = os.path.join(configs_dir, "recordings.yaml")
-        self.system_path = os.path.join(configs_dir, "system.yaml")
+        self.system_path = os.path.join(os.path.dirname(configs_dir), "system.yaml")
 
         # Ensure files exist with base structure
         if not os.path.exists(self.cameras_path):

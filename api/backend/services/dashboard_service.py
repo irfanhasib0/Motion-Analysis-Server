@@ -43,6 +43,7 @@ class StreamHealthMonitor:
     
     def _check_camera_health(self, camera_id: str):
         """Check health of a specific camera and trigger recovery if needed."""
+        logger.info(f"🔍 Running health check for camera {camera_id}")
         current_lag = self._get_current_lag_stats(camera_id)
         
         if camera_id not in self.lag_history:
@@ -130,7 +131,8 @@ class StreamHealthMonitor:
             # Get producer write time
             last_write = frame_buffer.last_write_time
             if last_write:
-                lag_stats['producer_video_lag'][camera_id] = now - last_write
+                video_producer_lag = now - last_write
+                lag_stats['producer_video_lag'][camera_id] = video_producer_lag
             
             # Get consumer lag for each consumer
             if hasattr(frame_buffer, '_consumer_read_times'):
@@ -141,9 +143,9 @@ class StreamHealthMonitor:
                             consumer_lag = now - last_read
                             
                             # Special handling for recording consumer (only when lag is valid)
-                            if consumer_id == f'recorder_{camera_id}':
+                            if f'recorder_{camera_id}' in consumer_id:
                                 lag_stats['recorder_lag'][camera_id] = consumer_lag
-                            elif consumer_id == f'video_stream_{camera_id}':
+                            elif f'video_stream_{camera_id}' in consumer_id:
                                 lag_stats['video_stream_lag'][camera_id] = consumer_lag
         
         # Get audio ring buffer for audio lag
@@ -151,7 +153,8 @@ class StreamHealthMonitor:
         if audio_buffer and hasattr(audio_buffer, 'last_write_time'):
             last_write = audio_buffer.last_write_time
             if last_write:
-                lag_stats['producer_audio_lag'][camera_id] = now - last_write
+                audio_producer_lag = now - last_write
+                lag_stats['producer_audio_lag'][camera_id] = audio_producer_lag
             
             # Get audio consumer lag
             if hasattr(audio_buffer, '_consumer_read_times'):
@@ -161,10 +164,19 @@ class StreamHealthMonitor:
                         if last_read:  # Only calculate lag if we have a valid read time
                             consumer_lag = now - last_read
                             # Special handling for recording consumer (only when lag is valid)
-                            if consumer_id == f'recorder_{camera_id}':
+                            if f'recorder_{camera_id}' in consumer_id:
                                 lag_stats['recorder_lag'][camera_id] = max(lag_stats['recorder_lag'].get(camera_id, 0), consumer_lag)
-                            if consumer_id == f'audio_stream_{camera_id}':
+                            if f'audio_stream_{camera_id}' in consumer_id:
                                 lag_stats['audio_stream_lag'][camera_id] = consumer_lag
+        
+        # Summary log for high-level lag overview
+        lag_summary = []
+        for lag_type, lag_data in lag_stats.items():
+            if lag_data and camera_id in lag_data:
+                lag_summary.append(f"{lag_type}: {lag_data[camera_id]:.3f}s")
+        
+        if lag_summary:
+            logger.info(f"📊 Lag summary for {camera_id}: {', '.join(lag_summary)}")
   
         return lag_stats
     
@@ -271,12 +283,9 @@ class DashboardService:
 
     def _sample_loop(self):
         while True:
-            try:
-                self._collect_sample()
-                self._check_ram_threshold()
-                self.stream_monitor.monitor_streams()  # Add stream health monitoring
-            except Exception as error:
-                logger.warning(f"Dashboard sampler failed: {error}")
+            self._collect_sample()
+            self._check_ram_threshold()
+            self.stream_monitor.monitor_streams()  # Add stream health monitoring
             time.sleep(self.sample_interval_seconds)
 
     def _collect_sample(self):
