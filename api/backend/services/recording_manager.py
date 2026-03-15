@@ -463,7 +463,8 @@ class RecordingManager:
 
         if camera_id not in self.active_recordings or camera_id not in self.clip_start_time:
             logger.error(f"{Colors.RED}❌ Camera is not recording:{Colors.RESET} {camera_id}")
-
+            return
+        
         recording_info = self.active_recordings.pop(camera_id)
         recording_info['thread'].join(timeout=5)
         self.db.update_camera(camera_id, {'status': CameraStatus.ONLINE.value})
