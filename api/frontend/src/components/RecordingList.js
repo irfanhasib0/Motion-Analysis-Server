@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Play, Download, Trash2, Clock, HardDrive, Camera, Search, Archive, Calendar, FolderOpen } from 'lucide-react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import { Play, Download, Trash2, Clock, HardDrive, Camera, Search, Archive, Calendar, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../api';
 
@@ -32,15 +32,71 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     }; 
   });
   const [archiveExportResult, setArchiveExportResult] = useState(null);
-  const [deleteAfterArchive, setDeleteAfterArchive] = useState(false);
+  const [deleteAfterArchive, setDeleteAfterArchive] = useState(true);
   const [excludeMode, setExcludeMode] = useState(true);
+  const [cleanOverlay, setCleanOverlay] = useState(true);
+  const [minFreeStorageGiB, setMinFreeStorageGiB] = useState(1);
+  const [autoArchiveDays, setAutoArchiveDays] = useState(7);
+  const [storageSaving, setStorageSaving] = useState(false);
+  const [collapsedCameras, setCollapsedCameras] = useState({});
+  const [collapsedDates, setCollapsedDates] = useState({});
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const loadStorageInfo = async () => {
     try {
       const response = await api.getRecordingStorageInfo();
       setStorageInfo(response.data);
+      if (response.data?.min_free_bytes) {
+        setMinFreeStorageGiB(Number((response.data.min_free_bytes / (1024 ** 3)).toFixed(2)));
+      }
     } catch (error) {
       console.error('Failed to load recording storage info:', error);
+    }
+    // Load auto_archive_days from system settings
+    try {
+      const settingsRes = await api.getSystemSettings();
+      if (settingsRes.data?.auto_archive_days != null) {
+        setAutoArchiveDays(Number(settingsRes.data.auto_archive_days));
+      }
+    } catch (error) {
+      console.error('Failed to load system settings:', error);
+    }
+  };
+
+  const handleSaveMinFreeStorage = async (gib) => {
+    setStorageSaving(true);
+    try {
+      const res = await api.getSystemSettings();
+      const current = res.data || {};
+      const payload = { ...current, min_free_storage_bytes: Math.round(gib * 1024 ** 3) };
+      delete payload.total_memory_bytes;
+      delete payload.active_preset;
+      await api.updateSystemSettings(payload);
+      setMinFreeStorageGiB(gib);
+      toast.success(`Storage threshold updated to ${gib} GiB`);
+      loadStorageInfo();
+    } catch (err) {
+      toast.error('Failed to update storage threshold: ' + (err?.response?.data?.detail || err.message));
+    } finally {
+      setStorageSaving(false);
+    }
+  };
+
+  const handleSaveAutoArchiveDays = async (days) => {
+    setStorageSaving(true);
+    try {
+      const res = await api.getSystemSettings();
+      const current = res.data || {};
+      const payload = { ...current, auto_archive_days: days };
+      delete payload.total_memory_bytes;
+      delete payload.active_preset;
+      await api.updateSystemSettings(payload);
+      setAutoArchiveDays(days);
+      toast.success(days > 0 ? `Auto-archive set to ${days} days` : 'Auto-archive disabled');
+    } catch (err) {
+      toast.error('Failed to update auto-archive: ' + (err?.response?.data?.detail || err.message));
+    } finally {
+      setStorageSaving(false);
     }
   };
 
@@ -52,6 +108,20 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
       console.error('Failed to load archives:', error);
     }
   };
+
+  // Fetch recordings from API, optionally filtered by camera
+  const fetchRecordings = useCallback(async (cameraId) => {
+    try {
+      const res = await api.getRecordings(cameraId || null);
+      setRecordings(res.data);
+    } catch (err) {
+      console.error('Failed to fetch recordings:', err);
+    }
+  }, [setRecordings]);
+
+  useEffect(() => {
+    fetchRecordings(filterCamera);
+  }, [filterCamera, fetchRecordings]);
 
   useEffect(() => {
     loadStorageInfo();
@@ -82,6 +152,26 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     document.body.removeChild(link);
   };
 
+  const handleBulkDelete = async (recordingIds, label) => {
+    if (!recordingIds.length) return;
+    if (!window.confirm(`Delete ${recordingIds.length} recording(s) from ${label}?\n\nThis action cannot be undone.`)) {
+      return;
+    }
+    setBulkDeleting(true);
+    let deleted = 0;
+    for (const id of recordingIds) {
+      try {
+        await api.deleteRecording(id);
+        deleted++;
+      } catch (err) {
+        console.error(`Failed to delete ${id}:`, err);
+      }
+    }
+    setRecordings(prev => prev.filter(r => !recordingIds.includes(r.id)));
+    toast.success(`Deleted ${deleted}/${recordingIds.length} recording(s) from ${label}`);
+    setBulkDeleting(false);
+  };
+
   // ===== Archive handlers (adapted from EventView) =====
   const handleExportArchive = async () => {
     setArchiveBusy(true);
@@ -97,6 +187,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
       if (archiveFilters.camera_filter) filters.camera_filter = [archiveFilters.camera_filter]; // Added camera filter
       filters.exclude_mode = excludeMode;
       if (deleteAfterArchive) filters.delete_after = true;
+      if (cleanOverlay) filters.clean_up_extensions = ['.overlay.mp4'];
       const res = await api.exportArchive(filters);
       setArchiveExportResult(res.data);
       toast.success(`Exported ${res.data.recordings_count} recording(s) → ${res.data.archive_name}`);
@@ -191,19 +282,18 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     return new Date(dateString).toLocaleString();
   };
 
-  // Filter and sort recordings
+  // Filter and sort recordings (camera filtering done server-side)
   const filteredRecordings = recordings
     .filter(recording => {
       const camera = cameras.find(c => c.id === recording.camera_id);
       const cameraName = camera?.name || 'Unknown Camera';
       
-      const matchesCamera = !filterCamera || recording.camera_id === filterCamera;
       const matchesStatus = !filterStatus || recording.status === filterStatus;
       const matchesSearch = !searchTerm || 
         cameraName.toLowerCase().includes(searchTerm.toLowerCase()) ||
         recording.filename.toLowerCase().includes(searchTerm.toLowerCase());
       
-      return matchesCamera && matchesStatus && matchesSearch;
+      return matchesStatus && matchesSearch;
     })
     .sort((a, b) => {
       let aValue, bValue;
@@ -234,6 +324,37 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
         return aValue < bValue ? 1 : -1;
       }
     });
+
+  // Build nested structure: camera -> date -> recordings
+  const nestedRecordings = useMemo(() => {
+    const map = {};
+    for (const rec of filteredRecordings) {
+      const camId = rec.camera_id || 'unknown';
+      const dt = rec.created_at || rec.start_time || '';
+      const dateKey = dt ? dt.slice(0, 10) : 'unknown';
+      if (!map[camId]) map[camId] = {};
+      if (!map[camId][dateKey]) map[camId][dateKey] = [];
+      map[camId][dateKey].push(rec);
+    }
+    // Sort dates descending within each camera
+    const result = Object.entries(map).map(([camId, dates]) => ({
+      camId,
+      camName: cameras.find(c => c.id === camId)?.name || camId,
+      dates: Object.entries(dates)
+        .sort(([a], [b]) => b.localeCompare(a))
+        .map(([dateKey, recs]) => ({ dateKey, recordings: recs })),
+      totalCount: Object.values(dates).reduce((s, arr) => s + arr.length, 0),
+    }));
+    result.sort((a, b) => a.camName.localeCompare(b.camName));
+    return result;
+  }, [filteredRecordings, cameras]);
+
+  const toggleCamera = (camId) =>
+    setCollapsedCameras(prev => ({ ...prev, [camId]: !prev[camId] }));
+  // Dates default to collapsed (recordings hidden); toggling sets to false (expanded)
+  const isDateCollapsed = (key) => collapsedDates[key] !== false;
+  const toggleDate = (key) =>
+    setCollapsedDates(prev => ({ ...prev, [key]: prev[key] === false ? true : false }));
 
   const VideoPlayerModal = ({ recording, onClose }) => {
     const camera = cameras.find(c => c.id === recording.camera_id);
@@ -267,6 +388,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
               ) : (
                 <video
                   src={api.getRecordingStreamUrl(recording.id, 'play')}
+                  poster={api.getRecordingThumbnailUrl(recording.id)}
                   className="video-stream"
                   style={{
                     width: '100%',
@@ -467,6 +589,15 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   <FolderOpen size={14} style={{ marginRight: 4 }} />
                   List Archives
                 </button>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none', fontSize: 13, color: cleanOverlay ? '#00897b' : '#546e7a', fontWeight: cleanOverlay ? 600 : 400 }}>
+                  <input
+                    type="checkbox"
+                    checked={cleanOverlay}
+                    onChange={(e) => setCleanOverlay(e.target.checked)}
+                    style={{ accentColor: '#00897b', width: 15, height: 15, cursor: 'pointer' }}
+                  />
+                  Clean .overlay.mp4
+                </label>
                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none', fontSize: 13, color: deleteAfterArchive ? '#c62828' : '#546e7a', fontWeight: deleteAfterArchive ? 600 : 400 }}>
                   <input
                     type="checkbox"
@@ -495,6 +626,57 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   )}
                 </div>
               )}
+            </div>
+
+            {/* Storage management */}
+            <div style={{ background: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '12px 14px', border: '1px solid rgba(0,150,136,0.15)' }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#004d40', marginBottom: 10 }}>Storage management</div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+                <label style={{ fontSize: 13, color: '#546e7a' }}>Delete oldest recording when free storage &lt;</label>
+                <select
+                  className="form-control form-select"
+                  value={minFreeStorageGiB}
+                  onChange={(e) => handleSaveMinFreeStorage(Number(e.target.value))}
+                  disabled={storageSaving}
+                  style={{ width: 100 }}
+                >
+                  <option value={0}>Off</option>
+                  <option value={0.5}>0.5 GiB</option>
+                  <option value={1}>1 GiB</option>
+                  <option value={2}>2 GiB</option>
+                  <option value={4}>4 GiB</option>
+                  <option value={8}>8 GiB</option>
+                  <option value={16}>16 GiB</option>
+                  <option value={32}>32 GiB</option>
+                </select>
+                {storageInfo && (
+                  <span style={{ fontSize: 12, color: '#78909c' }}>
+                    Free: {(storageInfo.free_bytes / (1024 ** 3)).toFixed(1)} GiB / {(storageInfo.total_bytes / (1024 ** 3)).toFixed(1)} GiB
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                <label style={{ fontSize: 13, color: '#546e7a' }}>Auto-archive recordings older than</label>
+                <select
+                  className="form-control form-select"
+                  value={autoArchiveDays}
+                  onChange={(e) => handleSaveAutoArchiveDays(Number(e.target.value))}
+                  disabled={storageSaving}
+                  style={{ width: 120 }}
+                >
+                  <option value={0}>Off</option>
+                  <option value={3}>3 days</option>
+                  <option value={5}>5 days</option>
+                  <option value={7}>7 days</option>
+                  <option value={14}>14 days</option>
+                  <option value={30}>30 days</option>
+                  <option value={60}>60 days</option>
+                  <option value={90}>90 days</option>
+                </select>
+                <span style={{ fontSize: 11, color: '#90a4ae' }}>
+                  Archives the oldest date when recordings span more than {autoArchiveDays || '—'} distinct days
+                </span>
+              </div>
             </div>
 
             {/* Load archive section */}
@@ -666,9 +848,9 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
           </div>
         </div>
 
-        {/* Recording List */}
+        {/* Recording List — nested by Camera → Date → Recording */}
         <div className="recording-list">
-          {filteredRecordings.length === 0 ? (
+          {nestedRecordings.length === 0 ? (
             <div className="recording-item">
               <div className="recording-info">
                 <div className="recording-name">
@@ -685,54 +867,98 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
               </div>
             </div>
           ) : (
-            filteredRecordings.map(recording => {
-              const camera = cameras.find(c => c.id === recording.camera_id);
+            nestedRecordings.map(({ camId, camName, dates, totalCount }) => {
+              const camCollapsed = collapsedCameras[camId];
+              const allCamRecIds = dates.flatMap(d => d.recordings.map(r => r.id));
               return (
-                <div key={recording.id} className="recording-item">
-                  <div className="recording-info">
-                    <div className="recording-name">
-                      <Camera size={16} style={{ marginRight: '8px', verticalAlign: 'middle' }} />
-                      {camera?.name || 'Unknown Camera'} - {recording.filename}
-                    </div>
-                    <div className="recording-details">
-                      <span><Clock size={12} /> {formatDate(recording.created_at)}</span>
-                      <span><Clock size={12} /> {formatDuration(recording.duration)}</span>
-                      <span><HardDrive size={12} /> {formatBytes(recording.file_size)}</span>
-                      <span>{recording.resolution || 'Unknown'}</span>
-                      <span className={`status status-${recording.status}`}>
-                        {recording.status}
-                      </span>
-                    </div>
-                  </div>
-                  
-                  <div className="recording-actions">
-                    {recording.status === 'completed' && (
-                      <>
-                        <button 
-                          className="btn btn-primary"
-                          onClick={() => setSelectedRecording(recording)}
-                        >
-                          <Play size={14} />
-                          Play
-                        </button>
-                        <button 
-                          className="btn btn-secondary"
-                          onClick={() => handleDownloadRecording(recording.id)}
-                        >
-                          <Download size={14} />
-                          Download
-                        </button>
-                      </>
-                    )}
-                    
-                    <button 
+                <div key={camId} style={{ marginBottom: 12 }}>
+                  {/* Camera header */}
+                  <div
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+                      background: 'rgba(0,150,136,0.08)', borderRadius: 10,
+                      border: '1px solid rgba(0,150,136,0.18)', cursor: 'pointer', userSelect: 'none',
+                    }}
+                    onClick={() => toggleCamera(camId)}
+                  >
+                    {camCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                    <Camera size={16} style={{ color: '#00897b' }} />
+                    <span style={{ fontWeight: 700, fontSize: 14, color: '#004d40' }}>{camName}</span>
+                    <span style={{ fontSize: 12, color: '#546e7a', marginLeft: 4 }}>({totalCount})</span>
+                    <button
                       className="btn btn-danger"
-                      onClick={() => handleDeleteRecording(recording.id)}
+                      style={{ marginLeft: 'auto', padding: '2px 10px', fontSize: 11 }}
+                      disabled={bulkDeleting}
+                      onClick={(e) => { e.stopPropagation(); handleBulkDelete(allCamRecIds, camName); }}
                     >
-                      <Trash2 size={14} />
-                      Delete
+                      <Trash2 size={12} /> Delete all
                     </button>
                   </div>
+
+                  {!camCollapsed && dates.map(({ dateKey, recordings: dateRecs }) => {
+                    const dateCollapseKey = `${camId}__${dateKey}`;
+                    const dateCollapsed = isDateCollapsed(dateCollapseKey);
+                    const dateRecIds = dateRecs.map(r => r.id);
+                    return (
+                      <div key={dateCollapseKey} style={{ marginLeft: 20, marginTop: 6 }}>
+                        {/* Date header */}
+                        <div
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px',
+                            background: 'rgba(0,150,136,0.04)', borderRadius: 8,
+                            border: '1px solid rgba(0,150,136,0.10)', cursor: 'pointer', userSelect: 'none',
+                          }}
+                          onClick={() => toggleDate(dateCollapseKey)}
+                        >
+                          {dateCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                          <Calendar size={14} style={{ color: '#00897b' }} />
+                          <span style={{ fontWeight: 600, fontSize: 13, color: '#37474f' }}>{dateKey}</span>
+                          <span style={{ fontSize: 12, color: '#78909c' }}>({dateRecs.length})</span>
+                          <button
+                            className="btn btn-danger"
+                            style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: 11 }}
+                            disabled={bulkDeleting}
+                            onClick={(e) => { e.stopPropagation(); handleBulkDelete(dateRecIds, `${camName} / ${dateKey}`); }}
+                          >
+                            <Trash2 size={11} /> Delete day
+                          </button>
+                        </div>
+
+                        {!dateCollapsed && dateRecs.map(recording => (
+                          <div key={recording.id} className="recording-item" style={{ marginLeft: 16, marginTop: 2, padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {recording.filename}
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, fontSize: 11, color: '#78909c', flexWrap: 'wrap' }}>
+                                <span><Clock size={10} /> {formatDate(recording.created_at)}</span>
+                                <span><Clock size={10} /> {formatDuration(recording.duration)}</span>
+                                <span><HardDrive size={10} /> {formatBytes(recording.file_size)}</span>
+                                <span className={`status status-${recording.status}`} style={{ fontSize: 10 }}>
+                                  {recording.status}
+                                </span>
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                              {recording.status === 'completed' && (
+                                <>
+                                  <button className="btn btn-primary" style={{ padding: '2px 6px', fontSize: 11, lineHeight: 1 }} onClick={() => setSelectedRecording(recording)} title="Play">
+                                    <Play size={12} />
+                                  </button>
+                                  <button className="btn btn-secondary" style={{ padding: '2px 6px', fontSize: 11, lineHeight: 1 }} onClick={() => handleDownloadRecording(recording.id)} title="Download">
+                                    <Download size={12} />
+                                  </button>
+                                </>
+                              )}
+                              <button className="btn btn-danger" style={{ padding: '2px 6px', fontSize: 11, lineHeight: 1 }} onClick={() => handleDeleteRecording(recording.id)} title="Delete">
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
                 </div>
               );
             })

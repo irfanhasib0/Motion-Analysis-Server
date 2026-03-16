@@ -61,6 +61,9 @@ class AVWriterV2:
         # Thread pool for async write operations
         self._write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"write_{camera_id}")
         
+        # FFmpeg video writer for separate files mode
+        self._video_ffmpeg_proc = None
+        
         # Create directory if needed
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         
@@ -125,11 +128,16 @@ class AVWriterV2:
 
         cmd += ['-movflags', '+faststart', self.path]
 
+        # Buffer must hold at least one raw frame to avoid blocking on pipe write
+        frame_bytes = self.width * self.height * 3
+        pipe_buf = max(frame_bytes * 4, 10**7)
+
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            bufsize=pipe_buf,
             pass_fds=pass_fds,
         )
 
@@ -143,18 +151,15 @@ class AVWriterV2:
         
     def _init_separate_files(self):
         """Initialize separate video/audio files mode."""
-        # Initialize video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.video_writer = cv2.VideoWriter(self.path, fourcc, self.fps, (self.width, self.height))
-        
-        if not self.video_writer.isOpened():
-            raise RuntimeError(f"Failed to initialize video writer for {self.path}")
+        # cv2 VideoWriter is lazy-initialized in write_video() if needed
+        # Default path uses write_video_ffmpeg() which inits its own FFmpeg process
+        self.video_writer = None
         
         # Initialize audio recording if enabled
         if self.camera_service and self.camera_id and self.camera_config.get('audio_enabled', False):
             recording_id = os.path.splitext(os.path.basename(self.path))[0]
             audio_dir = os.path.join(os.path.dirname(self.path))
-            audio_filename = f"{recording_id}_audio.wav"
+            audio_filename = f"{recording_id}.wav"
             self.audio_file_path = os.path.join(audio_dir, audio_filename)
             
             try:
@@ -177,11 +182,14 @@ class AVWriterV2:
         if self.mux_realtime:
             return self._proc is not None and self._proc.poll() is None
         else:
-            return not self._closed and self.video_writer.isOpened()
+            # Check FFmpeg writer first (default), fall back to cv2 writer
+            if self._video_ffmpeg_proc is not None:
+                return not self._closed and self._video_ffmpeg_proc.poll() is None
+            return not self._closed and self.video_writer is not None and self.video_writer.isOpened()
     
     def write(self, frame: np.ndarray) -> bool:
         """Write video frame (compatibility with cv2.VideoWriter interface)."""
-        return self.write_video(frame)
+        return self.write_video_ffmpeg(frame)
         
     def write_video(self, frame: np.ndarray) -> bool:
         """Write one frame to the video."""
@@ -204,7 +212,13 @@ class AVWriterV2:
                 logger.error(f"Error writing video frame to pipe: {e}")
                 return False
         else:
-            # Separate files mode
+            # Separate files mode - cv2 VideoWriter (lazy init)
+            if self.video_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                self.video_writer = cv2.VideoWriter(self.path, fourcc, self.fps, (self.width, self.height))
+                if not self.video_writer.isOpened():
+                    logger.error(f"Failed to initialize cv2 video writer for {self.path}")
+                    return False
             try:
                 return self.video_writer.write(frame)
             except Exception as e:
@@ -243,7 +257,7 @@ class AVWriterV2:
         """Write frame with frame rate control using ThreadPoolExecutor."""
         
         # Use ThreadPoolExecutor for async write
-        future = self._write_executor.submit(self.write_video, frame)
+        future = self._write_executor.submit(self.write_video_ffmpeg, frame)
         
         write_success = True
         try:
@@ -396,8 +410,6 @@ class AVWriterV2:
             if self.video_writer:
                 self.video_writer.release()
                 
-            # NOTE: No muxing in this mode - return video file path
-            # Audio file stays separate for testing
             return final_path
     
     def _cleanup_ffmpeg_processes(self):
@@ -501,10 +513,9 @@ class AVWriterV2:
         self.audio_file.flush()
     
     def _init_ffmpeg_video_writer(self):
-        """Initialize FFmpeg process for video writing."""
+        """Initialize FFmpeg process for video writing to self.path (h264)."""
         try:
-            # Generate video output path with _ffmpeg suffix
-            video_path = self.path.replace('.mp4', '_ffmpeg_video.mp4')
+            frame_bytes = self.height * self.width * 3
             
             cmd = [
                 'ffmpeg', '-y',
@@ -515,13 +526,12 @@ class AVWriterV2:
                 '-s', f'{self.width}x{self.height}',
                 '-r', str(self.fps),
                 '-i', 'pipe:0',
-                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
                 '-c:v', 'libx264',
                 '-crf', '23',
-                '-preset', 'medium',
+                '-preset', 'ultrafast',
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart',
-                video_path
+                self.path
             ]
             
             self._ffmpeg_video_proc = subprocess.Popen(
@@ -529,10 +539,8 @@ class AVWriterV2:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                bufsize=0
+                bufsize=max(frame_bytes * 4, 10**7)
             )
-            
-            self._ffmpeg_video_path = video_path
             
             # Small delay to ensure process starts properly
             time.sleep(0.1)
@@ -540,7 +548,7 @@ class AVWriterV2:
                 stderr_data = self._ffmpeg_video_proc.stderr.read() if self._ffmpeg_video_proc.stderr else b''
                 raise RuntimeError(f'FFmpeg video process failed to start: {stderr_data.decode(errors="replace")[:500]}')
                 
-            logger.info(f"Initialized FFmpeg video writer: {video_path}")
+            logger.info(f"Initialized FFmpeg video writer: {self.path}")
             
         except Exception as e:
             logger.error(f"Failed to initialize FFmpeg video writer: {e}")

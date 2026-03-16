@@ -29,11 +29,21 @@ from models.recording import Recording, RecordingCreate
 
 class PerformanceProfileUpdateRequest(BaseModel):
     preset_name: str
-    fps: Optional[int] = None
-    max_buffer_frames: Optional[int] = None
-    max_recording_duration_minutes: Optional[int] = None
-    quality: Optional[str] = None
-    recording_enabled: Optional[bool] = None
+    # System config values (for custom preset updates)
+    live_stream_mode: Optional[str] = None
+    sensitivity: Optional[int] = None
+    jpeg_quality: Optional[int] = None
+    pipe_buffer_size: Optional[int] = None
+    max_vel: Optional[float] = None
+    bg_diff: Optional[int] = None
+    max_clip_length: Optional[int] = None
+    motion_check_interval: Optional[int] = None
+    min_free_storage_bytes: Optional[int] = None
+    rtsp_unified_demux_enabled: Optional[bool] = None
+    frame_rbf_len: Optional[int] = None
+    audio_rbf_len: Optional[int] = None
+    results_rbf_len: Optional[int] = None
+    mux_realtime: Optional[bool] = None
 
 # =====================================================================
 # CONFIGURATION AND INITIALIZATION
@@ -59,19 +69,15 @@ AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "86400"))
 AUTH_SECRET = os.getenv("AUTH_SECRET", secrets.token_hex(32))
 
 # Load LIVE_STREAM_MODE: env var takes priority, then system.yaml, then default
-_sys_boot = camera_service.db.get_system_settings()
+_sys_boot = camera_service.get_system_settings()
 _live_stream_env = os.getenv("LIVE_STREAM_MODE")
 LIVE_STREAM_MODE = (_live_stream_env if _live_stream_env in {"mjpeg", "hls"}
-                    else str(_sys_boot.get('live_stream_mode', 'mjpeg')))
+                    else str(_sys_boot['live_stream_mode']))
 if LIVE_STREAM_MODE not in {"mjpeg", "hls"}:
     LIVE_STREAM_MODE = "mjpeg"
 
-# Load UVICORN_RELOAD: env var takes priority, then system.yaml, then default
-_uvicorn_env = os.getenv("UVICORN_RELOAD")
-if _uvicorn_env is not None:
-    UVICORN_RELOAD = _uvicorn_env.lower() in {"1", "true", "yes", "on"}
-else:
-    UVICORN_RELOAD = bool(_sys_boot.get('uvicorn_reload', True))
+# Hardcoded to False - not configurable from frontend
+UVICORN_RELOAD = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -108,7 +114,6 @@ class CameraSensitivityRequest(BaseModel):
 
 class SystemSettingsUpdateRequest(BaseModel):
     live_stream_mode: Optional[str] = None
-    low_power_mode: Optional[bool] = None
     sensitivity: Optional[int] = None
     jpeg_quality: Optional[int] = None
     pipe_buffer_size: Optional[int] = None
@@ -118,7 +123,11 @@ class SystemSettingsUpdateRequest(BaseModel):
     motion_check_interval: Optional[int] = None
     min_free_storage_bytes: Optional[int] = None
     rtsp_unified_demux_enabled: Optional[bool] = None
-    uvicorn_reload: Optional[bool] = None
+    frame_rbf_len: Optional[int] = None
+    audio_rbf_len: Optional[int] = None
+    results_rbf_len: Optional[int] = None
+    mux_realtime: Optional[bool] = None
+    auto_archive_days: Optional[int] = None
 
 
 class RecordingMetaUpdate(BaseModel):
@@ -136,6 +145,7 @@ class ArchiveExportRequest(BaseModel):
     delete_after: bool = False
     exclude_mode: bool = True
     label_filter: Optional[List[str]] = None
+    clean_up_extensions: Optional[List[str]] = None
 
 
 class ArchivePathRequest(BaseModel):
@@ -473,7 +483,6 @@ async def get_system_settings():
     runtime_settings = camera_service.get_runtime_settings()
     return {
         'live_stream_mode': normalized_mode,
-        'uvicorn_reload': bool(UVICORN_RELOAD),
         **runtime_settings,
         'supported_live_stream_modes': ['mjpeg', 'hls'],
         'sensitivity_range': {'min': 0, 'max': int(getattr(camera_service, 'sensitivity_level', 5) or 5)},
@@ -488,8 +497,7 @@ async def get_system_settings():
 
 @app.put("/api/system/settings")
 async def update_system_settings(payload: SystemSettingsUpdateRequest):
-    global LIVE_STREAM_MODE, UVICORN_RELOAD
-    restart_required = False
+    global LIVE_STREAM_MODE
 
     if payload.live_stream_mode is not None:
         requested_mode = str(payload.live_stream_mode or '').strip().lower()
@@ -497,40 +505,27 @@ async def update_system_settings(payload: SystemSettingsUpdateRequest):
             raise HTTPException(status_code=400, detail="Invalid live_stream_mode. Supported: mjpeg, hls")
         LIVE_STREAM_MODE = requested_mode
 
-    runtime_settings = camera_service.update_runtime_settings(
-        low_power_mode=payload.low_power_mode,
-        sensitivity=payload.sensitivity,
-        jpeg_quality=payload.jpeg_quality,
-        pipe_buffer_size=payload.pipe_buffer_size,
-        max_vel=payload.max_vel,
-        bg_diff=payload.bg_diff,
-        max_clip_length=payload.max_clip_length,
-        motion_check_interval=payload.motion_check_interval,
-        min_free_storage_bytes=payload.min_free_storage_bytes,
-        rtsp_unified_demux_enabled=payload.rtsp_unified_demux_enabled,
-    )
+    # Collect non-None settings into a dict for custom preset save
+    custom_updates = {}
+    for field in ('sensitivity', 'jpeg_quality', 'pipe_buffer_size', 'max_vel',
+                   'bg_diff', 'max_clip_length', 'motion_check_interval',
+                   'min_free_storage_bytes', 'rtsp_unified_demux_enabled',
+                   'frame_rbf_len', 'audio_rbf_len', 'results_rbf_len', 'mux_realtime',
+                   'auto_archive_days'):
+        val = getattr(payload, field, None)
+        if val is not None:
+            custom_updates[field] = val
 
-    if payload.uvicorn_reload is not None:
-        next_reload = bool(payload.uvicorn_reload)
-        if next_reload != bool(UVICORN_RELOAD):
-            restart_required = True
-        UVICORN_RELOAD = next_reload
-        os.environ["UVICORN_RELOAD"] = "1" if UVICORN_RELOAD else "0"
+    if payload.live_stream_mode is not None:
+        custom_updates['live_stream_mode'] = LIVE_STREAM_MODE
 
-    # Persist live_stream_mode and uvicorn_reload to system.yaml
-    try:
-        camera_service.db.save_system_settings({
-            'live_stream_mode': LIVE_STREAM_MODE,
-            'uvicorn_reload': bool(UVICORN_RELOAD),
-        })
-    except Exception:
-        pass
+    if custom_updates:
+        camera_service.save_custom_settings(custom_updates)
 
+    runtime_settings = camera_service.get_runtime_settings()
     return {
         'message': 'System settings updated',
         'live_stream_mode': LIVE_STREAM_MODE,
-        'uvicorn_reload': bool(UVICORN_RELOAD),
-        'restart_required': restart_required,
         **runtime_settings,
         'supported_live_stream_modes': ['mjpeg', 'hls'],
     }
@@ -569,13 +564,13 @@ async def get_system_presets():
     """Get available system presets from configuration."""
     try:
         presets = camera_service.db.get_presets()
-        current_settings = camera_service.db.get_system_settings()
-        active_preset = current_settings.get('active_preset', 'default')
+        sys_settings = camera_service.get_system_settings()
+        active_preset = sys_settings['active_preset']
         
         return {
             'presets': presets,
             'active_preset': active_preset,
-            'available_presets': list(presets.keys()) + ['custom']
+            'available_presets': list(presets.keys())
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get presets: {str(e)}")
@@ -584,45 +579,42 @@ async def get_system_presets():
 @app.put("/api/system/performance-profile")
 async def update_performance_profile(payload: PerformanceProfileUpdateRequest):
     """Apply a performance preset or update custom settings."""
+    global LIVE_STREAM_MODE
     try:
         preset_name = payload.preset_name
         
         if preset_name == 'custom':
-            # Update custom settings in system.yaml
+            # Collect non-None custom setting values
             custom_settings = {}
             for field, value in payload.dict(exclude={'preset_name'}).items():
                 if value is not None:
                     custom_settings[field] = value
             
             if custom_settings:
-                custom_settings['active_preset'] = 'custom'
-                updated_settings = camera_service.db.save_system_settings(custom_settings)
-                
-                # Apply to runtime
-                camera_service.update_runtime_settings(**custom_settings)
-                
+                updated_settings = camera_service.save_custom_settings(custom_settings)
+                # Sync live_stream_mode global if it was changed
+                if 'live_stream_mode' in custom_settings:
+                    mode = str(custom_settings['live_stream_mode']).lower()
+                    if mode in ('mjpeg', 'hls'):
+                        LIVE_STREAM_MODE = mode
                 return {
                     'message': 'Custom performance profile updated',
                     'active_preset': 'custom',
                     'settings': updated_settings
                 }
             else:
-                # Just mark as custom without changing settings
-                updated_settings = camera_service.db.apply_preset('custom')
+                # Just switch to custom without changing values
+                updated_settings = camera_service.apply_preset('custom')
                 return {
                     'message': 'Switched to custom profile',
                     'active_preset': 'custom',
                     'settings': updated_settings
                 }
         else:
-            # Apply named preset
-            updated_settings = camera_service.db.apply_preset(preset_name)
-            
-            # Get preset values and apply to runtime
-            presets = camera_service.db.get_presets()
-            if preset_name in presets:
-                preset_values = presets[preset_name]
-                camera_service.update_runtime_settings(**preset_values)
+            # Apply named preset (default or low_power) - read-only switch
+            updated_settings = camera_service.apply_preset(preset_name)
+            # Sync live_stream_mode global from the preset
+            LIVE_STREAM_MODE = str(updated_settings.get('live_stream_mode', LIVE_STREAM_MODE)).lower()
             
             return {
                 'message': f'Applied {preset_name} performance profile',
@@ -740,6 +732,7 @@ async def export_archive(request: ArchiveExportRequest):
             delete_after=request.delete_after,
             exclude_mode=request.exclude_mode,
             label_filter=request.label_filter,
+            clean_up_extensions=request.clean_up_extensions,
         )
         return result
     except Exception as e:
@@ -1056,16 +1049,46 @@ async def get_recording_stream(recording_id: str):
     )
 
 @app.get("/api/recordings/{recording_id}/play")
-async def play_recording(recording_id: str):
-    """Serve a recorded video file for browser playback"""
-    file_path = camera_service.get_browser_playable_recording_path(recording_id)
+async def play_recording(recording_id: str, overlay: bool = False):
+    """Serve a recorded video file for browser playback.
+    Pass ?overlay=true to get a version with optical flow bounding boxes and tracks."""
+    if overlay:
+        try:
+            file_path = camera_service.recording_manager.generate_overlay_video(recording_id)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+    else:
+        file_path = camera_service.get_browser_playable_recording_path(recording_id)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Recording file not found")
     
     response = FileResponse(file_path, media_type="video/mp4")
     response.headers["Content-Disposition"] = f'inline; filename="recording_{recording_id}.mp4"'
     return response
-    
+
+@app.get("/api/recordings/{recording_id}/thumbnail")
+async def get_recording_thumbnail(recording_id: str):
+    """Serve the peak-motion JPG thumbnail for a recording."""
+    try:
+        file_path = camera_service.recording_manager.get_recording_path(recording_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    thumb_path = os.path.splitext(file_path)[0] + '.jpg'
+    if not os.path.exists(thumb_path):
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(thumb_path, media_type="image/jpeg")
+
+@app.post("/api/recordings/{recording_id}/overlay/generate")
+async def generate_overlay(recording_id: str):
+    """Start overlay video generation in the background."""
+    camera_service.recording_manager.start_overlay_generation(recording_id)
+    return camera_service.recording_manager.get_overlay_status(recording_id)
+
+@app.get("/api/recordings/{recording_id}/overlay/status")
+async def overlay_status(recording_id: str):
+    """Get overlay generation progress."""
+    return camera_service.recording_manager.get_overlay_status(recording_id)
+
 @app.get("/api/cameras/{camera_id}/result_stream")
 async def get_camera_results(camera_id: str):
     """Get JSON stream of processing results for a camera"""
@@ -1091,6 +1114,45 @@ async def download_recording(recording_id: str):
         )
     except Exception as e:
         logger.error(f"Failed to download recording: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/recordings/{recording_id}/motion-data")
+async def get_motion_data(recording_id: str):
+    """Get motion analysis data (velocity, bg_diff, loudness) for a recording"""
+    try:
+        # Get the recording file path and derive the .txt path
+        file_path = camera_service.get_recording_path(recording_id)
+        motion_file_path = file_path.rsplit('.', 1)[0] + '.txt'
+        
+        if not os.path.exists(motion_file_path):
+            return {"data": []}
+        
+        motion_data = []
+        with open(motion_file_path, 'r') as f:
+            lines = f.readlines()
+            if not lines:
+                return {"data": []}
+            
+            # Skip header line and parse data
+            for i, line in enumerate(lines[1:], start=0):
+                line = line.strip()
+                if line:
+                    try:
+                        parts = line.split(',')
+                        if len(parts) >= 3:
+                            motion_data.append({
+                                "time": i,  # Frame index as time
+                                "vel": float(parts[0]),
+                                "bg_diff": int(parts[1]),
+                                "loudness": float(parts[2])
+                            })
+                    except (ValueError, IndexError):
+                        # Skip malformed lines
+                        continue
+        
+        return {"data": motion_data}
+    except Exception as e:
+        logger.error(f"Failed to get motion data: {e}")
         raise HTTPException(status_code=404, detail=str(e))
 
 # =====================================================================

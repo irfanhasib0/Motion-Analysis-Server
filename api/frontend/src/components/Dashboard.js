@@ -1,8 +1,11 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Camera, Video, HardDrive, Clock } from 'lucide-react';
+import MotionActivityChart from './MotionActivityChart';
 import './Dashboard.css';
 
 const Dashboard = ({ cameras, recordings, systemInfo }) => {
+  const navigate = useNavigate();
   const onlineCameras = cameras.filter(c => c.status === 'online').length;
   const recordingCameras = cameras.filter(c => c.status === 'recording').length;
   const totalRecordings = recordings.length;
@@ -132,6 +135,14 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
             }
           </div>
         </div>
+      </div>
+
+      {/* Motion Activity Chart */}
+      <div className="content-section" style={{ marginBottom: 16 }}>
+        <div className="section-header">
+          <h2 className="section-title">24h Motion Activity Pattern</h2>
+        </div>
+        <MotionActivityChart recordings={recordings} cameras={cameras} onDayClick={(date, recordingId, cameraId) => navigate('/live', { state: { date, recordingId, cameraId } })} />
       </div>
 
       <div className="content-section">

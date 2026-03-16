@@ -18,30 +18,6 @@ const CAMERA_TARGET_OPTIONS = [
   { value: 'cam2', label: 'Camera 2' },
   { value: 'cam3', label: 'Camera 3' },
 ];
-const DEFAULT_PERFORMANCE_PRESET = {
-  low_power_mode: false,
-  sensitivity: 4,
-  jpeg_quality: 70,
-  pipe_buffer_size: 100000000,
-  // Advanced Performance Settings
-  frame_rbf_len: 10,
-  audio_rbf_len: 10,
-  results_rbf_len: 10,
-  // Recording Settings
-  mux_realtime: false,
-};
-const LOW_POWER_PERFORMANCE_PRESET = {
-  low_power_mode: true,
-  sensitivity: 2,
-  jpeg_quality: 55,
-  pipe_buffer_size: 1000000,
-  // Advanced Performance Settings (reduced for low power)
-  frame_rbf_len: 5,
-  audio_rbf_len: 5,
-  results_rbf_len: 5,
-  // Recording Settings
-  mux_realtime: false,
-};
 const DEFAULT_CAMERA_PRESET = {
   fps: 30,
   resolution: '1920x1080',
@@ -57,33 +33,6 @@ const LOW_POWER_CAMERA_PRESET = {
   audio_enabled: false,
 };
 
-const inferPerformanceProfile = (current) => {
-  const lowPower = Boolean(current?.low_power_mode);
-  const sensitivity = Number(current?.sensitivity ?? DEFAULT_PERFORMANCE_PRESET.sensitivity);
-  const jpeg = Number(current?.jpeg_quality || 70);
-  const pipeBufferSize = Number(current?.pipe_buffer_size || DEFAULT_PERFORMANCE_PRESET.pipe_buffer_size);
-
-  if (
-    lowPower === LOW_POWER_PERFORMANCE_PRESET.low_power_mode
-    && sensitivity === LOW_POWER_PERFORMANCE_PRESET.sensitivity
-    && jpeg === LOW_POWER_PERFORMANCE_PRESET.jpeg_quality
-    && pipeBufferSize === LOW_POWER_PERFORMANCE_PRESET.pipe_buffer_size
-  ) {
-    return 'low_power';
-  }
-
-  if (
-    lowPower === DEFAULT_PERFORMANCE_PRESET.low_power_mode
-    && sensitivity === DEFAULT_PERFORMANCE_PRESET.sensitivity
-    && jpeg === DEFAULT_PERFORMANCE_PRESET.jpeg_quality
-    && pipeBufferSize === DEFAULT_PERFORMANCE_PRESET.pipe_buffer_size
-  ) {
-    return 'default';
-  }
-
-  return 'custom';
-};
-
 const PARAM_ROW_STYLE = { alignItems: 'center' };
 const PARAM_LABEL_STYLE = { minWidth: 180 };
 const PARAM_CONTROL_STYLE = { display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' };
@@ -93,19 +42,21 @@ const PARAM_UNIT_STYLE = { minWidth: 34, textAlign: 'right' };
 const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
   const [settings, setSettings] = useState({
     live_stream_mode: 'mjpeg',
-    low_power_mode: false,
-    sensitivity: DEFAULT_PERFORMANCE_PRESET.sensitivity,
+    sensitivity: 4,
     jpeg_quality: 70,
-    pipe_buffer_size: DEFAULT_PERFORMANCE_PRESET.pipe_buffer_size,
+    pipe_buffer_size: 100000000,
     max_vel: 0.1,
     bg_diff: 50,
     max_clip_length: 60,
     motion_check_interval: 10,
     min_free_storage_bytes: 1 * 1024 * 1024 * 1024,
-    uvicorn_reload: true,
     total_memory_bytes: 0,
-    low_power_ram_threshold_bytes: 1024 * 1024 * 1024,
-    ram_auto_low_power_enabled: true,
+    frame_rbf_len: 10,
+    audio_rbf_len: 10,
+    results_rbf_len: 10,
+    mux_realtime: false,
+    rtsp_unified_demux_enabled: false,
+    auto_archive_days: 7,
   });
   const [playbackMode, setPlaybackMode] = useState(api.getRecordingPlaybackMode());
   const [audioByCamera, setAudioByCamera] = useState({});
@@ -157,21 +108,26 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
         setSettings((prev) => ({
           ...prev,
           live_stream_mode: data.live_stream_mode === 'hls' ? 'hls' : 'mjpeg',
-          low_power_mode: Boolean(data.low_power_mode),
-          sensitivity: Number(data.sensitivity ?? DEFAULT_PERFORMANCE_PRESET.sensitivity),
-          jpeg_quality: Number(data.jpeg_quality || 70),
-          pipe_buffer_size: Number(data.pipe_buffer_size || DEFAULT_PERFORMANCE_PRESET.pipe_buffer_size),
-          max_vel: Number(data.max_vel ?? 0.1),
-          bg_diff: Number(data.bg_diff ?? 50),
-          max_clip_length: Number(data.max_clip_length ?? 60),
-          motion_check_interval: Number(data.motion_check_interval ?? 10),
-          min_free_storage_bytes: Number(data.min_free_storage_bytes ?? 1 * 1024 * 1024 * 1024),
-          uvicorn_reload: Boolean(data.uvicorn_reload),
+          sensitivity: Number(data.sensitivity ?? prev.sensitivity),
+          jpeg_quality: Number(data.jpeg_quality ?? prev.jpeg_quality),
+          pipe_buffer_size: Number(data.pipe_buffer_size ?? prev.pipe_buffer_size),
+          max_vel: Number(data.max_vel ?? prev.max_vel),
+          bg_diff: Number(data.bg_diff ?? prev.bg_diff),
+          max_clip_length: Number(data.max_clip_length ?? prev.max_clip_length),
+          motion_check_interval: Number(data.motion_check_interval ?? prev.motion_check_interval),
+          min_free_storage_bytes: Number(data.min_free_storage_bytes ?? prev.min_free_storage_bytes),
           total_memory_bytes: Number(data.total_memory_bytes || 0),
-          low_power_ram_threshold_bytes: Number(data.low_power_ram_threshold_bytes || prev.low_power_ram_threshold_bytes),
-          ram_auto_low_power_enabled: Boolean(data.ram_auto_low_power_enabled),
+          frame_rbf_len: Number(data.frame_rbf_len ?? prev.frame_rbf_len),
+          audio_rbf_len: Number(data.audio_rbf_len ?? prev.audio_rbf_len),
+          results_rbf_len: Number(data.results_rbf_len ?? prev.results_rbf_len),
+          mux_realtime: Boolean(data.mux_realtime),
+          rtsp_unified_demux_enabled: Boolean(data.rtsp_unified_demux_enabled),
+          auto_archive_days: Number(data.auto_archive_days ?? prev.auto_archive_days),
         }));
-        setPerformanceProfile(inferPerformanceProfile(data));
+        // Trust backend's active_preset
+        if (data.active_preset) {
+          setPerformanceProfile(data.active_preset);
+        }
       } catch (error) {
         toast.error(`Failed to load system settings: ${error?.response?.data?.detail || error.message}`);
       } finally {
@@ -206,11 +162,6 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
         }
       } catch (error) {
         toast.error(`Failed to load system presets: ${error?.response?.data?.detail || error.message}`);
-        // Fall back to hardcoded presets if API call fails
-        setAvailablePresets({
-          default: DEFAULT_PERFORMANCE_PRESET,
-          low_power: LOW_POWER_PERFORMANCE_PRESET
-        });
       } finally {
         if (!cancelled) {
           setLoadingPresets(false);
@@ -242,7 +193,6 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
     try {
       const payload = {
         live_stream_mode: settings.live_stream_mode,
-        low_power_mode: Boolean(settings.low_power_mode),
         sensitivity: Number(settings.sensitivity),
         jpeg_quality: Number(settings.jpeg_quality),
         pipe_buffer_size: Number(settings.pipe_buffer_size),
@@ -251,66 +201,42 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
         max_clip_length: Number(settings.max_clip_length),
         motion_check_interval: Number(settings.motion_check_interval),
         min_free_storage_bytes: Number(settings.min_free_storage_bytes),
-        uvicorn_reload: Boolean(settings.uvicorn_reload),
+        rtsp_unified_demux_enabled: Boolean(settings.rtsp_unified_demux_enabled),
+        frame_rbf_len: Number(settings.frame_rbf_len),
+        audio_rbf_len: Number(settings.audio_rbf_len),
+        results_rbf_len: Number(settings.results_rbf_len),
+        mux_realtime: Boolean(settings.mux_realtime),
+        auto_archive_days: Number(settings.auto_archive_days),
       };
       const response = await api.updateSystemSettings(payload);
       const data = response?.data || {};
       setSettings((prev) => ({
         ...prev,
         live_stream_mode: data.live_stream_mode === 'hls' ? 'hls' : 'mjpeg',
-        low_power_mode: Boolean(data.low_power_mode),
         sensitivity: Number(data.sensitivity ?? prev.sensitivity),
-        jpeg_quality: Number(data.jpeg_quality || prev.jpeg_quality),
-        pipe_buffer_size: Number(data.pipe_buffer_size || prev.pipe_buffer_size),
+        jpeg_quality: Number(data.jpeg_quality ?? prev.jpeg_quality),
+        pipe_buffer_size: Number(data.pipe_buffer_size ?? prev.pipe_buffer_size),
         max_vel: Number(data.max_vel ?? prev.max_vel),
         bg_diff: Number(data.bg_diff ?? prev.bg_diff),
         max_clip_length: Number(data.max_clip_length ?? prev.max_clip_length),
         motion_check_interval: Number(data.motion_check_interval ?? prev.motion_check_interval),
         min_free_storage_bytes: Number(data.min_free_storage_bytes ?? prev.min_free_storage_bytes),
-        uvicorn_reload: Boolean(data.uvicorn_reload),
+        frame_rbf_len: Number(data.frame_rbf_len ?? prev.frame_rbf_len),
+        audio_rbf_len: Number(data.audio_rbf_len ?? prev.audio_rbf_len),
+        results_rbf_len: Number(data.results_rbf_len ?? prev.results_rbf_len),
+        mux_realtime: Boolean(data.mux_realtime),
+        rtsp_unified_demux_enabled: Boolean(data.rtsp_unified_demux_enabled),
+        auto_archive_days: Number(data.auto_archive_days ?? prev.auto_archive_days),
       }));
-      setPerformanceProfile(inferPerformanceProfile(data));
+      if (data.active_preset) {
+        setPerformanceProfile(data.active_preset);
+      }
       return data;
     } catch (error) {
       toast.error(`Failed to update system settings: ${error?.response?.data?.detail || error.message}`);
       return null;
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleApplySystemSettings = async () => {
-    const data = await handleSaveSystemSettings();
-    if (!data) {
-      return;
-    }
-
-    if (typeof setCameras === 'function') {
-      try {
-        const camerasRes = await api.getCameras();
-        setCameras(camerasRes?.data || []);
-      } catch (error) {
-        toast.error(`Settings applied, but failed to refresh cameras: ${error?.response?.data?.detail || error.message}`);
-        return;
-      }
-    }
-
-    if (data.restart_required) {
-      toast.success('Applied to cameras (restart required for uvicorn reload change)');
-    } else {
-      toast.success('Applied to cameras');
-    }
-  };
-
-  const handleSaveSystemSettingsOnly = async () => {
-    const data = await handleSaveSystemSettings();
-    if (!data) {
-      return;
-    }
-    if (data.restart_required) {
-      toast.success('System settings updated (restart required for uvicorn reload change)');
-    } else {
-      toast.success('System settings updated');
     }
   };
 
@@ -339,17 +265,6 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
       }
     } catch (error) {
       toast.error(`Failed to apply ${profile} profile: ${error?.response?.data?.detail || error.message}`);
-      
-      // Fall back to local state update if API fails
-      if (profile === 'default') {
-        setPerformanceProfile('default');
-        setSettings((prev) => ({ ...prev, ...DEFAULT_PERFORMANCE_PRESET }));
-      } else if (profile === 'low_power') {
-        setPerformanceProfile('low_power');
-        setSettings((prev) => ({ ...prev, ...LOW_POWER_PERFORMANCE_PRESET }));
-      } else {
-        setPerformanceProfile('custom');
-      }
     } finally {
       setSaving(false);
     }
@@ -592,28 +507,6 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
               </button>
             </div>
           </div>
-          
-          <div className="info-item" style={{ alignItems: 'center', opacity: performanceProfile === 'custom' ? 1 : 0.6 }}>
-            <span className="info-label">Auto Reload</span>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                type="button"
-                className={settings.uvicorn_reload ? 'btn btn-primary' : 'btn btn-secondary'}
-                onClick={() => handleCustomPerformanceValue('uvicorn_reload', true)}
-                disabled={performanceProfile !== 'custom'}
-              >
-                Enabled
-              </button>
-              <button
-                type="button"
-                className={!settings.uvicorn_reload ? 'btn btn-primary' : 'btn btn-secondary'}
-                onClick={() => handleCustomPerformanceValue('uvicorn_reload', false)}
-                disabled={performanceProfile !== 'custom'}
-              >
-                Disabled
-              </button>
-            </div>
-          </div>
         </div>
 
         <div className="info-card">
@@ -754,29 +647,6 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
                 onClick={() => applyPerformanceProfile('custom')}
               >
                 Custom
-              </button>
-            </div>
-          </div>
-
-          <div className="info-item" style={{ ...PARAM_ROW_STYLE, opacity: performanceProfile === 'custom' ? 1 : 0.8 }}>
-            <span className="info-label" style={PARAM_LABEL_STYLE}>Low Power Mode</span>
-            <div style={PARAM_CONTROL_STYLE}>
-              <button
-                type="button"
-                className={settings.low_power_mode ? 'btn btn-primary' : 'btn btn-secondary'}
-                onClick={() => handleCustomPerformanceValue('low_power_mode', true)}
-                disabled={performanceProfile !== 'custom'}
-                style={{ marginRight: 8 }}
-              >
-                Enabled
-              </button>
-              <button
-                type="button"
-                className={!settings.low_power_mode ? 'btn btn-primary' : 'btn btn-secondary'}
-                onClick={() => handleCustomPerformanceValue('low_power_mode', false)}
-                disabled={performanceProfile !== 'custom'}
-              >
-                Disabled
               </button>
             </div>
           </div>
@@ -930,23 +800,16 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
               <span className="info-value" style={PARAM_UNIT_STYLE}>results</span>
             </div>
           </div>
-
-          <div className="info-item">
-            <span className="info-label">Auto low-power rule</span>
-            <span className="info-value">{settings.ram_auto_low_power_enabled ? 'Enabled (≤ 1GB)' : 'Disabled'}</span>
-          </div>
-
-          <div className="info-item">
-            <span className="info-label">Current Power Mode</span>
-            <span className="info-value">{settings.low_power_mode ? 'Low Power' : 'Normal'}</span>
-          </div>
         </div>
       </div>
 
-      {/* System Settings Apply Button */}
+      {/* Save System Settings Button */}
       <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
-        <button type="button" className="btn btn-primary" disabled={saving || loading} onClick={handleApplySystemSettings}>
-          {saving ? 'Applying...' : 'Apply System Settings'}
+        <button type="button" className="btn btn-primary" disabled={saving || loading} onClick={async () => {
+          const data = await handleSaveSystemSettings();
+          if (data) toast.success('System settings saved');
+        }}>
+          {saving ? 'Saving...' : 'Save System Settings'}
         </button>
       </div>
 

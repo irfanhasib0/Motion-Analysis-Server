@@ -121,6 +121,7 @@ export const api = {
   downloadRecording: (recordingId) => {
     return buildUrlWithToken(`/api/recordings/${recordingId}/download`);
   },
+  getMotionData: (recordingId) => apiClient.get(`/recordings/${recordingId}/motion-data`),
   
   // Streaming endpoints
   getCameraMjpegStreamUrl: (cameraId) =>
@@ -149,12 +150,16 @@ export const api = {
   stopCameraHlsStream: (cameraId) => apiClient.post(`/cameras/${cameraId}/hls/stop`),
   
   getBlankStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/stream/blank`),
-  getRecordingStreamUrl: (recordingId, mode = getStoredRecordingPlaybackMode()) => {
+  getRecordingStreamUrl: (recordingId, mode = getStoredRecordingPlaybackMode(), overlay = false) => {
     const endpoint = mode === 'stream'
       ? `/api/recordings/${recordingId}/stream`
       : `/api/recordings/${recordingId}/play`;
-    return buildUrlWithToken(endpoint);
+    const base = buildUrlWithToken(endpoint);
+    return overlay ? appendQueryParams(base, { overlay: 'true' }) : base;
   },
+  getRecordingThumbnailUrl: (recordingId) => buildUrlWithToken(`/api/recordings/${recordingId}/thumbnail`),
+  generateOverlay: (recordingId) => apiClient.post(`/recordings/${recordingId}/overlay/generate`),
+  getOverlayStatus: (recordingId) => apiClient.get(`/recordings/${recordingId}/overlay/status`),
   getProcessingStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/processing_stream`),
   getResultStreamUrl: (cameraId) => buildUrlWithToken(`/api/cameras/${cameraId}/result_stream`),
   

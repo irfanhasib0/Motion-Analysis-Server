@@ -420,6 +420,7 @@ class OpticalFlowTracker:
                     'vel': np.asarray(vel, dtype=np.float32),
                     'mean_vel': float(np.mean(vel)),
                     'channel': int(_ch),
+                    'bg_diff': int(self.bg_diff),
                 }
         
         viz_frame = self._draw_pts_flow(frame, self.prev_pts)

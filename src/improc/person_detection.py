@@ -14,7 +14,7 @@ Example Usage:
     detector = PersonDetector(enable_face=True, enable_body=True)
     boxes = detector.detect(frame)
 """
-
+import os
 import cv2
 import numpy as np
 
@@ -57,11 +57,11 @@ class PersonDetector:
         # Initialize Haar cascade classifiers
         self.face_cascade = None
         self.body_cascade = None
-        
+        xml_dir = os.path.join(os.path.dirname(__file__), 'data')   
         if self.enable_face:
             try:
                 self.face_cascade = cv2.CascadeClassifier(
-                    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+                    os.path.join(xml_dir, 'haarcascade_frontalface_default.xml') # cv2.data.haarcascades
                 )
                 if self.face_cascade.empty():
                     print("Warning: Face cascade failed to load")
@@ -73,7 +73,7 @@ class PersonDetector:
         if self.enable_body:
             try:
                 self.body_cascade = cv2.CascadeClassifier(
-                    cv2.data.haarcascades + 'haarcascade_fullbody.xml'
+                    os.path.join(xml_dir, 'haarcascade_fullbody.xml')
                 )
                 if self.body_cascade.empty():
                     print("Warning: Body cascade failed to load")

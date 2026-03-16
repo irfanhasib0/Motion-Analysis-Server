@@ -1,0 +1,14 @@
+{
+  "labels": {
+    "vel": "Speed",
+    "diff": "Crowd",
+    "loudness": "Loudness",
+    "duration": "Duration"
+  },
+  "max": {
+    "vel": 6,
+    "diff": 300,
+    "loudness": 30,
+    "duration": 200
+  }
+}

@@ -1,14 +1,17 @@
 import json
 import logging
 import os
+import glob
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
 import cv2
+import numpy as np
 import psutil
 import yaml
 
@@ -16,6 +19,13 @@ from models.camera import CameraStatus
 from models.recording import Recording, RecordingStatus
 from services.av_writer import AVWriterV2 as AVWriter  # Flexible writer - can switch between V2Flexible and V3
 from services.audio_recording_utils import AudioRecordingUtils
+from services.drawing_utils import StreamDrawingHelper
+
+PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
+if PROJECT_SRC_PATH not in sys.path:
+    sys.path.append(PROJECT_SRC_PATH)
+
+from improc.optical_flow import OpticalFlowTracker
 
 # ANSI Color codes for log formatting
 class Colors:
@@ -49,6 +59,7 @@ class RecordingManager:
         motion_result_max_age_sec: float,
         archive_dir: str = '',
         mux_realtime: bool = False,
+        auto_archive_days: int = 7,
     ):
         self.camera_service = camera_service
         self.streaming_service = streaming_service
@@ -64,13 +75,21 @@ class RecordingManager:
         self.motion_result_max_age_sec = motion_result_max_age_sec
         self.active_recordings: Dict[str, dict] = {}
         self.mux_realtime = mux_realtime
+        self.auto_archive_days = auto_archive_days
+
+        # Overlay generation progress tracking
+        self._overlay_progress: Dict[str, dict] = {}  # recording_id -> {status, progress, total_frames, error}
+        self._overlay_threads: Dict[str, threading.Thread] = {}
 
         self.clip_start_time: Dict[str, float] = {}
         self.clip_motion_detected: Dict[str, bool] = {}
         self.clip_vel: Dict[str, float] = {}
         self.clip_bg_diff: Dict[str, int] = {}
         self.clip_loudness: Dict[str, float] = {}
-
+        self.clip_motion_frame: Dict[str, Optional[np.ndarray]] = {}
+        self.clean_up_extensions = ['.overlay.mp4']  # Extensions to clean up if no motion detected
+        
+        
     def load_existing_recordings(self):
         if not os.path.exists(self.recordings_dir):
             return
@@ -152,6 +171,11 @@ class RecordingManager:
         self.clip_vel[camera_id] = 0.0
         self.clip_bg_diff[camera_id] = 0
         self.clip_loudness[camera_id] = 0.0
+        self.clip_motion_frame[camera_id] = None
+
+        _ext = file_path.split('.')[-1]
+        with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
+            f.write('vel,bg_diff,loudness\n')
         return recording_id, file_path, writer
 
     def _parse_recording_time(self, db_recording: dict) -> datetime:
@@ -218,6 +242,48 @@ class RecordingManager:
 
         return deleted_count
 
+    def auto_archive_oldest_dates(self) -> dict:
+        """Archive recordings on the oldest date(s) when we have more than auto_archive_days
+        distinct recording dates.  Returns the export_archive result dict or empty dict."""
+        if self.auto_archive_days <= 0:
+            return {}
+
+        recordings = self.get_recordings()
+        completed = [r for r in recordings if r.status.value == 'completed']
+        if not completed:
+            return {}
+
+        # Collect distinct dates only from non-archive recordings
+        # (loaded archive data is tagged source='archive' and excluded)
+        date_set = set()
+        for rec in completed:
+            meta = rec.metadata or {}
+            if meta.get('source') == 'archive':
+                continue
+            dt = rec.started_at or rec.created_at
+            if dt:
+                date_set.add(dt.date())
+
+        if len(date_set) <= self.auto_archive_days:
+            return {}
+
+        # Find the oldest date to archive
+        sorted_dates = sorted(date_set)
+        oldest_date = sorted_dates[0]
+        date_str = oldest_date.isoformat()  # YYYY-MM-DD
+
+        logger.info(
+            f"Auto-archive: {len(date_set)} distinct recording dates exceed limit of "
+            f"{self.auto_archive_days}. Archiving oldest date: {date_str}"
+        )
+
+        return self.export_archive(
+            date_from=date_str,
+            date_to=date_str,
+            delete_after=True,
+            clean_up_extensions=self.clean_up_extensions,
+        )
+
     def get_recording_storage_info(self, enforce_policy: bool = False) -> Dict:
         deleted_count = self._ensure_min_free_storage() if enforce_policy else 0
         disk = psutil.disk_usage(self.recordings_dir)
@@ -269,7 +335,9 @@ class RecordingManager:
         
         # Log successful recording save
         logger.info(f"{Colors.GREEN}💾 Saved recording:{Colors.RESET} {final_file_path} (duration: {clip_duration}s, size: {file_size} bytes, vel: {self.clip_vel.get(camera_id, 0.0):.2f}, bg_diff: {self.clip_bg_diff.get(camera_id, 0)})")
-        
+        motion_frame = self.clip_motion_frame.get(camera_id)
+        if motion_frame is not None:
+            cv2.imwrite(final_file_path.replace('.mp4', '.jpg'), motion_frame)
         self.db.update_recording(
             recording_id,
             {
@@ -289,6 +357,12 @@ class RecordingManager:
         )
         logger.info(f"{Colors.MAGENTA}✨ Saving recording with motion:{Colors.RESET} {final_file_path}")
         self.send_notification_to_app()
+
+        # Auto-archive oldest dates if we exceed the configured day limit
+        try:
+            self.auto_archive_oldest_dates()
+        except Exception as e:
+            logger.warning(f"Auto-archive check failed: {e}")
         
     def record_worker(self, camera_id):
         start_time = time.time()
@@ -300,13 +374,25 @@ class RecordingManager:
         recording_id, file_path, writer = self.init_recording(camera_id)
         curr_time = start_time
         recent_motion_detected = False
+        prev_frame = None
+        motion_frame = None
         
-        clip_loudness = 0.0
+        
+        # Audio sync: track sample deficit to keep audio aligned with video
+        if audio_enabled:
+            audio_sample_rate = int(db_camera.get('audio_sample_rate', 16000) or 16000)
+            audio_channels = int(db_camera.get('audio_channels', 1) or 1)
+            audio_chunk_size = int(db_camera.get('audio_chunk_size', 512) or 512)
+            camera_fps = int(db_camera.get('fps', 30))
+            samples_per_frame = audio_sample_rate / camera_fps
+            audio_sample_deficit = 0.0
+            # Chunk size in bytes: samples * channels * 2 bytes (s16le)
+            chunk_bytes = audio_chunk_size * audio_channels * 2
+            silence_chunk = b'\x00' * chunk_bytes
         
         # Add small delay before starting to allow system to stabilize
         time.sleep(0.1)
         
-        # Debug: Check if audio is enabled  
         logger.info(f"{Colors.BLUE}🎬 Recording worker started{Colors.RESET} for camera {camera_id}, audio enabled: {audio_enabled}")
         # Track last motion check time
         last_motion_check = start_time
@@ -317,11 +403,22 @@ class RecordingManager:
         while camera_id in self.active_recordings:
     
             frame = None
+            audio_chunks = []
             res = {'vel': 0.0, 'bg_diff': 0}
             audio_res = {}
             
             frame = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'frames')
-            audio_chunk = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'audio') if audio_enabled else None
+            if frame is not None:
+                prev_frame = frame
+            elif prev_frame is not None:
+                frame = prev_frame  # Use last frame if current is missing to keep recording alive
+
+            if audio_enabled:
+                audio_sample_deficit += samples_per_frame
+                while audio_sample_deficit >= audio_chunk_size:
+                    chunk = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'audio')
+                    audio_chunks.append(chunk if chunk is not None else silence_chunk)
+                    audio_sample_deficit -= audio_chunk_size
             results = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'results')
             res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
             audio_res = results.get('audio', {}) if results else {}
@@ -332,13 +429,16 @@ class RecordingManager:
             detection_bg_diff = bool(res.get('detection_bg_diff', False))
             vel = float(res.get('vel', 0.0))
             bg_diff = int(res.get('bg_diff', 0))
-            loudness = 0.0  # Default value
+            loudness = audio_res.get('int', 0.0)  # Default value
 
             if detected_vel or detection_bg_diff:
+                if self.clip_motion_frame[camera_id] is None or vel > self.clip_vel[camera_id]:
+                    self.clip_motion_frame[camera_id] = frame
                 recent_motion_detected = True
                 self.clip_motion_detected[camera_id] = True
                 self.clip_vel[camera_id] = max(self.clip_vel.get(camera_id, 0.0), vel)
                 self.clip_bg_diff[camera_id] = max(self.clip_bg_diff.get(camera_id, 0), bg_diff)
+                
 
             if audio_enabled and audio_res:
                 # Read detected loudness flag from audio results
@@ -365,13 +465,13 @@ class RecordingManager:
                         )
                         # Start new recording after saving
                         recording_id, file_path, writer = self.init_recording(camera_id)
-                        _ext = file_path.split('.')[1]
-                        with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
-                            f.write('vel,bg_diff,loudness\n')
+                        
+                        if audio_enabled:
+                            audio_sample_deficit = 0.0
                         logger.info(f"{Colors.CYAN}📹 Clip saved (max length reached):{Colors.RESET} duration={int(clip_duration)}s")
                     else:
                         # Continue recording - motion still happening
-                        logger.info(f"{Colors.GREEN}⏱️ Continuing recording{Colors.RESET} - recent motion detected, duration={int(clip_duration)}s")
+                        logger.info(f"{Colors.GREEN}⏱️ Continuing recording{Colors.RESET} - recent motion detected vel ={self.clip_vel.get(camera_id, 0.0)}, bg_diff ={self.clip_bg_diff.get(camera_id, 0)}, loudness ={self.clip_loudness.get(camera_id, 0.0)}, duration={int(clip_duration)}s")
                 else:
                     # No recent motion detected - end current clip
                     final_file_path = writer.release()
@@ -391,9 +491,8 @@ class RecordingManager:
                 
                     # Start new recording after ending previous clip
                     recording_id, file_path, writer = self.init_recording(camera_id)
-                    _ext = file_path.split('.')[1]
-                    with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
-                        f.write('vel,bg_diff,loudness\n')
+                    if audio_enabled:
+                        audio_sample_deficit = 0.0
                 
                 # Reset for next interval
                 recent_motion_detected = False
@@ -402,11 +501,12 @@ class RecordingManager:
             # Write video frame if available (but don't wait for it)
             if frame is not None:
                 writer.write_frame_with_timeout(frame)
-            # Write audio chunk if available and enabled  
-            if audio_enabled and audio_chunk is not None:
-                writer.write_audio(audio_chunk)
-            with open(file_path.replace(f'.{_ext}', '.txt'), 'a') as f:
-                f.write(f"{vel},{bg_diff},{loudness}\n")            
+                # Write audio chunks to stay in sync with video
+                if audio_enabled and audio_chunks:
+                    combined_audio = b''.join(audio_chunks)
+                    writer.write_audio(combined_audio)
+                with open(file_path.replace(f'.{_ext}', '.txt'), 'a') as f:
+                    f.write(f"{vel},{bg_diff},{loudness}\n")            
             
         # Final processing when recording worker ends
         final_file_path = writer.release()
@@ -474,6 +574,7 @@ class RecordingManager:
         self.clip_vel.pop(camera_id, None)
         self.clip_bg_diff.pop(camera_id, None)
         self.clip_loudness.pop(camera_id, None)
+        self.clip_motion_frame.pop(camera_id, None)
 
     def get_recordings(self, camera_id: Optional[str] = None) -> List[Recording]:
         db_recordings = self.db.get_recordings_by_camera(camera_id) if camera_id else self.db.get_all_recordings()
@@ -574,33 +675,60 @@ class RecordingManager:
         """
         source_path = self.get_recording_path(recording_id)
         codec = self._get_video_codec(source_path)
-
-        # Most reliable baseline for browser playback in MP4 containers
-        if codec in {"h264", "avc1"}:
+        
+        root, ext = os.path.splitext(source_path)
+        wav_path = f"{root}.wav"
+        has_wav = os.path.exists(wav_path)
+        
+        # If already h264 and no wav to mux, nothing to do
+        if codec in {"h264", "avc1"} and not has_wav:
             return source_path
 
         root, ext = os.path.splitext(source_path)
         playable_path = f"{root}.browser{ext or '.mp4'}"
-
-        source_mtime = os.path.getmtime(source_path)
-        if os.path.exists(playable_path):
-            playable_mtime = os.path.getmtime(playable_path)
-            if playable_mtime >= source_mtime and os.path.getsize(playable_path) > 0:
-                return playable_path
-
+        
         cmd = [
             "ffmpeg",
             "-y",
             "-i", source_path,
-            "-map", "0:v:0",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-an",
-            playable_path,
         ]
+        
+        # Add audio input if .wav file exists
+        if has_wav:
+            cmd.extend(["-i", wav_path])
+            if codec in {"h264", "avc1"}:
+                # Video already h264 — copy stream, just mux audio
+                cmd.extend([
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-movflags", "+faststart",
+                ])
+            else:
+                cmd.extend([
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-c:v", "libx264",
+                    "-c:a", "aac",
+                    "-preset", "ultrafast",
+                    "-crf", "28",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ])
+        else:
+            cmd.extend([
+                "-map", "0:v:0",  # Video only
+                "-c:v", "libx264",
+                "-preset", "ultrafast", 
+                "-crf", "28",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-an",            # No audio
+            ])
+        
+        cmd.append(playable_path)
 
         result = subprocess.run(cmd, check=False, capture_output=True, text=True)
         if result.returncode != 0 or not os.path.exists(playable_path) or os.path.getsize(playable_path) == 0:
@@ -608,9 +736,163 @@ class RecordingManager:
             logger.error(f"{Colors.RED}❌ Failed to transcode recording{Colors.RESET} {recording_id} for browser playback: {stderr_tail}")
             return source_path
 
-        logger.info(f"{Colors.GREEN}✅ Transcoded recording for browser playback:{Colors.RESET} {playable_path}")
-        return playable_path
+        # Replace original with transcoded file and clean up wav
+        try:
+            os.replace(playable_path, source_path)
+        except Exception as e:
+            logger.error(f"{Colors.RED}Failed to replace original with transcoded file:{Colors.RESET} {e}")
+            return playable_path
+        if os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except Exception as e:
+                logger.warning(f"Failed to remove wav file {wav_path}: {e}")
 
+        logger.info(f"{Colors.GREEN}✅ Transcoded and replaced original:{Colors.RESET} {source_path}")
+        return source_path
+
+
+    # -------------------------------------------------------------------------
+    # Overlay video generation
+    # -------------------------------------------------------------------------
+
+    def generate_overlay_video(self, recording_id: str) -> str:
+        """Generate an overlay video with optical flow bounding boxes and tracks.
+        Returns the path to the cached overlay MP4 (creates it on first call).
+        Updates self._overlay_progress[recording_id] with frame-level progress."""
+        source_path = self.get_recording_path(recording_id)
+        root, ext = os.path.splitext(source_path)
+        overlay_path = f"{root}.overlay.mp4"
+
+        # Cache hit — return immediately if overlay is newer than source
+        if os.path.exists(overlay_path):
+            if os.path.getmtime(overlay_path) >= os.path.getmtime(source_path):
+                self._overlay_progress[recording_id] = {'status': 'ready', 'progress': 100, 'total_frames': 0}
+                return overlay_path
+
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open recording file: {source_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+        self._overlay_progress[recording_id] = {
+            'status': 'processing', 'progress': 0, 'total_frames': total_frames,
+            'processed_frames': 0,
+        }
+
+        tracker = OpticalFlowTracker()
+        draw_mask = None
+
+        tmp_path = f"{root}_overlay_tmp.mp4"
+        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            cap.release()
+            raise ValueError(f"Cannot create overlay writer for: {tmp_path}")
+
+        try:
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                viz_frame, _pts = tracker.detect(frame)
+                writer.write(viz_frame)
+                frame_idx += 1
+                if frame_idx % 10 == 0 or frame_idx == total_frames:
+                    self._overlay_progress[recording_id].update({
+                        'progress': int(90 * frame_idx / total_frames),  # 0-90% for frame processing
+                        'processed_frames': frame_idx,
+                    })
+        finally:
+            cap.release()
+            writer.release()
+
+        # 90% — encoding phase
+        self._overlay_progress[recording_id].update({'progress': 90, 'status': 'encoding'})
+
+        # Re-encode with ffmpeg for browser-compatible H.264 + faststart
+        cmd = [
+            'ffmpeg', '-y', '-i', tmp_path,
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+            '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an',
+            overlay_path,
+        ]
+        # Mux audio from wav sidecar if available
+        wav_path = f"{root}.wav"
+        if os.path.exists(wav_path):
+            cmd = [
+                'ffmpeg', '-y', '-i', tmp_path, '-i', wav_path,
+                '-map', '0:v:0', '-map', '1:a:0',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+                '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+                '-movflags', '+faststart',
+                overlay_path,
+            ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        if result.returncode != 0 or not os.path.exists(overlay_path):
+            self._overlay_progress[recording_id] = {'status': 'error', 'progress': 0, 'error': 'Encoding failed'}
+            logger.error(f"{Colors.RED}Failed to encode overlay video:{Colors.RESET} {result.stderr[-500:]}")
+            raise ValueError(f"FFmpeg overlay encoding failed for {recording_id}")
+
+        self._overlay_progress[recording_id] = {'status': 'ready', 'progress': 100, 'total_frames': total_frames}
+        logger.info(f"{Colors.GREEN}Generated overlay video:{Colors.RESET} {overlay_path}")
+        return overlay_path
+
+    def start_overlay_generation(self, recording_id: str):
+        """Start overlay generation in a background thread. Idempotent."""
+        status = self._overlay_progress.get(recording_id, {}).get('status')
+        if status in ('processing', 'encoding'):
+            return  # Already running
+
+        # Check cache first
+        try:
+            source_path = self.get_recording_path(recording_id)
+            root, _ext = os.path.splitext(source_path)
+            overlay_path = f"{root}_overlay.mp4"
+            if os.path.exists(overlay_path) and os.path.getmtime(overlay_path) >= os.path.getmtime(source_path):
+                self._overlay_progress[recording_id] = {'status': 'ready', 'progress': 100, 'total_frames': 0}
+                return
+        except ValueError:
+            pass
+
+        self._overlay_progress[recording_id] = {'status': 'processing', 'progress': 0, 'total_frames': 0}
+
+        def _worker():
+            try:
+                self.generate_overlay_video(recording_id)
+            except Exception as e:
+                self._overlay_progress[recording_id] = {'status': 'error', 'progress': 0, 'error': str(e)}
+                logger.error(f"{Colors.RED}Overlay generation failed for {recording_id}:{Colors.RESET} {e}")
+            finally:
+                self._overlay_threads.pop(recording_id, None)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        self._overlay_threads[recording_id] = t
+        t.start()
+
+    def get_overlay_status(self, recording_id: str) -> dict:
+        """Return current overlay generation status for a recording."""
+        info = self._overlay_progress.get(recording_id)
+        if info:
+            return info
+        # Check if cached file already exists
+        try:
+            source_path = self.get_recording_path(recording_id)
+            root, _ext = os.path.splitext(source_path)
+            overlay_path = f"{root}_overlay.mp4"
+            if os.path.exists(overlay_path) and os.path.getmtime(overlay_path) >= os.path.getmtime(source_path):
+                return {'status': 'ready', 'progress': 100}
+        except ValueError:
+            pass
+        return {'status': 'not_started', 'progress': 0}
 
     # -------------------------------------------------------------------------
     # Archive methods
@@ -626,6 +908,7 @@ class RecordingManager:
         delete_after: bool = False,
         exclude_mode: bool = True,
         label_filter: Optional[List[str]] = None,
+        clean_up_extensions: Optional[List[str]] = None,
     ) -> dict:
         """Copy filtered completed recordings to a timestamped sub-directory under
         archive_dir and write a recordings.yaml manifest."""
@@ -701,8 +984,18 @@ class RecordingManager:
             dst_dir = os.path.dirname(dst)
             src_dir = os.path.dirname(src)
             
-            # Copy each related file
+            # Copy each related file (skip extensions marked for cleanup)
+            _cleanup = clean_up_extensions or []
             for related_file in related_files:
+                if any(related_file.endswith(ext) for ext in _cleanup):
+                    # Delete from source instead of archiving
+                    related_src = os.path.join(src_dir, related_file)
+                    try:
+                        os.remove(related_src)
+                        logger.info(f"Cleaned up {related_file} (matched clean_up_extensions)")
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up {related_file}: {e}")
+                    continue
                 related_src = os.path.join(src_dir, related_file)
                 related_dst = os.path.join(dst_dir, related_file)
                 try:
@@ -724,12 +1017,22 @@ class RecordingManager:
                 'metadata': rec.metadata,
             })
 
+        # Build nested camera → date → recordings structure for readability
+        cameras_nested: Dict[str, Dict[str, list]] = {}
+        for entry in exported:
+            cam = entry.get('camera_id', 'unknown')
+            dt_str = (entry.get('started_at') or entry.get('created_at') or '')[:10]  # YYYY-MM-DD
+            if not dt_str:
+                dt_str = 'unknown_date'
+            cameras_nested.setdefault(cam, {}).setdefault(dt_str, []).append(entry)
+
         yaml_path = os.path.join(archive_path, 'recordings.yaml')
         with open(yaml_path, 'w') as fh:
             yaml.dump({
                 'archived_at': datetime.now().isoformat(),
                 'recordings_count': len(exported),
-                'recordings': exported,
+                'cameras': cameras_nested,
+                'recordings': exported,  # flat list kept for backward compatibility
             }, fh, default_flow_style=False, allow_unicode=True)
 
         per_camera = {
@@ -786,7 +1089,16 @@ class RecordingManager:
 
         with open(yaml_path) as fh:
             meta = yaml.safe_load(fh) or {}
+
+        # Support both nested (cameras → date → recordings) and flat formats
         recordings_meta = meta.get('recordings', [])
+        if not recordings_meta and 'cameras' in meta:
+            # Extract flat list from nested camera → date → recordings structure
+            for _cam_id, dates in meta['cameras'].items():
+                if isinstance(dates, dict):
+                    for _date, recs in dates.items():
+                        if isinstance(recs, list):
+                            recordings_meta.extend(recs)
 
         loaded_ids = []
         for rec in recordings_meta:
@@ -822,11 +1134,26 @@ class RecordingManager:
                     related_src = os.path.join(src_dir, related_file)
                     related_dst = os.path.join(dst_dir, related_file)
                     try:
+                        cleaned = False
                         if not os.path.exists(related_dst):
-                            shutil.copy2(related_src, related_dst)
-                            logger.debug(f"Imported related file: {related_file}")
+                            for extension in self.clean_up_extensions:
+                                if related_src.endswith(extension):
+                                    os.remove(related_src)
+                                    cleaned = True
+                            if not cleaned:
+                                shutil.copy2(related_src, related_dst)
+                                logger.debug(f"Imported related file: {related_file}")
                     except Exception as e:
                         logger.warning(f"Failed to import related file {related_file}: {e}")
+            # Tag with source='archive' so auto-archive excludes these recordings
+            rec_metadata = rec.get('metadata') or {}
+            if isinstance(rec_metadata, str):
+                try:
+                    rec_metadata = json.loads(rec_metadata)
+                except Exception:
+                    rec_metadata = {}
+            rec_metadata['source'] = 'archive'
+
             recording_data = {
                 'id': rec_id,
                 'camera_id': rec.get('camera_id', ''),
@@ -836,6 +1163,7 @@ class RecordingManager:
                 'duration': rec.get('duration'),
                 'file_size': rec.get('file_size'),
                 'status': 'completed',
+                'metadata': rec_metadata,
             }
             self.db.create_recording(recording_data)
             loaded_ids.append(rec_id)
@@ -882,24 +1210,15 @@ class RecordingManager:
         """
         file_dir = os.path.dirname(file_path)
         file_stem = os.path.splitext(os.path.basename(file_path))[0]
-        related_files = []
+        main_basename = os.path.basename(file_path)
         
-        if os.path.exists(file_dir):
-            for filename in os.listdir(file_dir):
-                if filename == os.path.basename(file_path):
-                    continue  # Skip the main file itself
-                    
-                file_base_stem = os.path.splitext(filename)[0]
-                # Handle files like recording.browser.mp4 -> stem is "recording"
-                if '.' in file_base_stem:
-                    base_stem = file_base_stem.split('.')[0]
-                else:
-                    base_stem = file_base_stem
-                
-                if base_stem == file_stem:
-                    related_files.append(filename)
-        
-        return related_files
+        # Match "stem.*" and "stem.something.*" (e.g. recording.browser.mp4)
+        pattern = os.path.join(glob.escape(file_dir), glob.escape(file_stem) + '.*')
+        return [
+            os.path.basename(match)
+            for match in glob.glob(pattern)
+            if os.path.basename(match) != main_basename
+        ]
 
     def delete_recording(self, recording_id: str):
         db_recording = self.db.get_recording(recording_id)

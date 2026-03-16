@@ -781,7 +781,8 @@ class StreamingService:
                             self._latest_viz[camera_id] = viz_frame
                         flow_pts = self._latest_pts_payload.get(camera_id)
                         
-                if res['det_ts'] and (time.time() - res['det_ts']) > self.no_motion_slow_down_thr_sec:
+                _det_ts = res.get('det_ts')
+                if _det_ts and (time.time() - _det_ts) > self.no_motion_slow_down_thr_sec:
                     time.sleep(self.no_motion_slow_down_delay_sec)
                 # Primary video stream: clean frame with FPS and optical flow overlays
                 frame_fps = self._update_loop_fps(f"{camera_id}:primary")

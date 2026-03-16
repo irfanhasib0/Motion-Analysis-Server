@@ -1,0 +1,53 @@
+system:
+  active_preset: default
+  ram_auto_switch_enabled: true
+  ram_threshold_bytes: 1073741824
+  presets:
+    default:
+      live_stream_mode: mjpeg
+      sensitivity: 4
+      jpeg_quality: 70
+      pipe_buffer_size: 100000000
+      max_vel: 1.5
+      bg_diff: 1000
+      max_clip_length: 300
+      motion_check_interval: 10
+      min_free_storage_bytes: 1073741824
+      rtsp_unified_demux_enabled: false
+      frame_rbf_len: 10
+      audio_rbf_len: 10
+      results_rbf_len: 10
+      mux_realtime: false
+      auto_archive_days: 7
+    low_power:
+      live_stream_mode: mjpeg
+      sensitivity: 2
+      jpeg_quality: 55
+      pipe_buffer_size: 1000000
+      max_vel: 1.5
+      bg_diff: 1000
+      max_clip_length: 300
+      motion_check_interval: 10
+      min_free_storage_bytes: 1073741824
+      rtsp_unified_demux_enabled: false
+      frame_rbf_len: 5
+      audio_rbf_len: 5
+      results_rbf_len: 5
+      mux_realtime: false
+      auto_archive_days: 7
+    custom:
+      live_stream_mode: mjpeg
+      sensitivity: 4
+      jpeg_quality: 70
+      pipe_buffer_size: 100000000
+      max_vel: 1.5
+      bg_diff: 1000
+      max_clip_length: 300
+      motion_check_interval: 10
+      min_free_storage_bytes: 1073741824
+      rtsp_unified_demux_enabled: false
+      frame_rbf_len: 10
+      audio_rbf_len: 10
+      results_rbf_len: 10
+      mux_realtime: false
+      auto_archive_days: 5

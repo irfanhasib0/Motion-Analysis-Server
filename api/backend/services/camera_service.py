@@ -4,7 +4,7 @@ import select
 import subprocess
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import psutil
 import logging
 
@@ -42,7 +42,6 @@ class Capture:
         width: int = 640,
         height: int = 480,
         fps: int = 30,
-        low_power_mode: bool = False,
         audio_sample_rate: Optional[int] = None,
         audio_channels: Optional[int] = None,
         audio_chunk_size: Optional[int] = None,
@@ -58,7 +57,6 @@ class Capture:
         self.width = width
         self.height = height
         self.fps = fps
-        self.low_power_mode = low_power_mode
         self.cap = None
         self._consecutive_read_failures = 0
         self._max_video_read_failures_before_reconnect = 30
@@ -105,7 +103,7 @@ class Capture:
     def _resolve_pipe_buffer_size(self) -> int:
         if self.pipe_buffer_size is not None:
             return max(65536, int(self.pipe_buffer_size))
-        return 10**6 if self.low_power_mode else 10**8
+        return 10**8
 
     def _close_unified_audio_pipe(self):
         if self._audio_pipe_reader is not None:
@@ -530,20 +528,16 @@ class Capture:
 
 class CameraService(StreamingService):
     def __init__(self, configs: Optional[str] = 'default'):
-        self.ram_auto_low_power_enabled = True
-        self.low_power_ram_threshold_bytes = 1 * 1024 * 1024 * 1024
-        self.rtsp_unified_demux_enabled = str(os.getenv('RTSP_UNIFIED_DEMUX', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
-        self.low_power_mode = self._should_auto_enable_low_power()
         self.root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-        self.db = ConfigManager(configs_dir=os.path.join(self.root_dir, 'configs', configs))  # Use same YAML-backed DB as recording service
+        self.db = ConfigManager(configs_dir=os.path.join(self.root_dir, 'configs', configs))
         
-        # Load system settings (ConfigManager now reads from presets automatically)
+        # Load system settings from system.yaml (no fallbacks - raises on missing keys)
         _sys = self.db.get_system_settings()
         
         # Initialize streaming service with ring buffer settings
-        frame_rbf_len = int(_sys.get('frame_rbf_len', 10))
-        audio_rbf_len = int(_sys.get('audio_rbf_len', 10))
-        results_rbf_len = int(_sys.get('results_rbf_len', 10))
+        frame_rbf_len = int(_sys['frame_rbf_len'])
+        audio_rbf_len = int(_sys['audio_rbf_len'])
+        results_rbf_len = int(_sys['results_rbf_len'])
         super().__init__(frame_rbf_len=frame_rbf_len, audio_rbf_len=audio_rbf_len, results_rbf_len=results_rbf_len)
         
         self.recordings_dir = os.path.join(self.root_dir, "recordings")
@@ -558,25 +552,25 @@ class CameraService(StreamingService):
         self._camera_trackers = {}
         self._audio_chunk_analyzers = {}
         
-        self.motion_check_interval = int(_sys.get('motion_check_interval', 10))
-        self.max_clip_length = int(_sys.get('max_clip_length', 60))
-        self.max_velocity = float(_sys.get('max_vel', 0.1))
-        self.max_bg_diff = int(_sys.get('bg_diff', 50))
+        # All settings loaded strictly from system.yaml preset - no hardcoded fallbacks
+        self.motion_check_interval = int(_sys['motion_check_interval'])
+        self.max_clip_length = int(_sys['max_clip_length'])
+        self.max_velocity = float(_sys['max_vel'])
+        self.max_bg_diff = int(_sys['bg_diff'])
         self.motion_result_max_age_sec = 3.0  # not persisted
-        self.min_free_storage_bytes = int(_sys.get('min_free_storage_bytes', 1 * 1024 * 1024 * 1024))
-        if 'low_power_mode' in _sys:
-            self.low_power_mode = bool(_sys['low_power_mode'])
-        self.sensitivity = int(_sys.get('sensitivity', 2 if self.low_power_mode else 4))
-        self.jpeg_quality = int(_sys.get('jpeg_quality', 55 if self.low_power_mode else 70))
-        self.pipe_buffer_size = int(_sys.get('pipe_buffer_size', 10**6 if self.low_power_mode else 10**8))
-        self.rtsp_unified_demux_enabled = bool(_sys.get('rtsp_unified_demux_enabled', self.rtsp_unified_demux_enabled))
-        self.live_stream_mode = str(_sys.get('live_stream_mode', 'mjpeg')).lower()
+        self.min_free_storage_bytes = int(_sys['min_free_storage_bytes'])
+        self.sensitivity = int(_sys['sensitivity'])
+        self.jpeg_quality = int(_sys['jpeg_quality'])
+        self.pipe_buffer_size = int(_sys['pipe_buffer_size'])
+        self.rtsp_unified_demux_enabled = bool(_sys['rtsp_unified_demux_enabled'])
+        self.live_stream_mode = str(_sys['live_stream_mode']).lower()
         
         # Store ring buffer settings for runtime updates
         self.frame_rbf_len = frame_rbf_len
         self.audio_rbf_len = audio_rbf_len
         self.results_rbf_len = results_rbf_len
-        self.mux_realtime = bool(_sys.get('mux_realtime', False))
+        self.mux_realtime = bool(_sys['mux_realtime'])
+        self.auto_archive_days = int(_sys.get('auto_archive_days', 7))
 
         self.default_sensitivity = int(self.sensitivity)
 
@@ -598,16 +592,33 @@ class CameraService(StreamingService):
             motion_result_max_age_sec=self.motion_result_max_age_sec,
             archive_dir=self.archive_dir,
             mux_realtime=self.mux_realtime,
+            auto_archive_days=self.auto_archive_days,
         )
         self.active_recordings = self.recording_manager.active_recordings
         self._load_existing_recordings()
 
-    def _should_auto_enable_low_power(self) -> bool:
-        try:
-            total_memory_bytes = int(psutil.virtual_memory().total)
-        except Exception:
-            total_memory_bytes = 0
-        return 0 < total_memory_bytes <= int(self.low_power_ram_threshold_bytes)
+    # ── Wrapper methods for config_manager (settings flow) ──────────────
+
+    def get_system_settings(self) -> Dict[str, Any]:
+        """Wrapper: read all system settings from system.yaml via ConfigManager."""
+        return self.db.get_system_settings()
+
+    def save_custom_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Wrapper: save settings to custom preset and apply to runtime."""
+        saved = self.db.save_custom_settings(updates)
+        self._apply_settings_to_runtime(updates)
+        return saved
+
+    def apply_preset(self, preset_name: str) -> Dict[str, Any]:
+        """Wrapper: switch active preset and load its values into runtime."""
+        result = self.db.apply_preset(preset_name)
+        # Load all preset values into runtime
+        presets = self.db.get_presets()
+        if preset_name in presets:
+            self._apply_settings_to_runtime(presets[preset_name])
+        return result
+
+    # ── Runtime settings ──────────────────────────────────────────────
 
     def get_runtime_settings(self) -> Dict[str, Union[bool, int, float]]:
         try:
@@ -615,14 +626,13 @@ class CameraService(StreamingService):
         except Exception:
             total_memory_bytes = 0
 
-        # Get current preset info
+        # Get current preset info from system.yaml
         sys_settings = self.db.get_system_settings()
-        active_preset = sys_settings.get('active_preset', 'default')
-        ram_auto_switch = sys_settings.get('ram_auto_switch_enabled', True)
-        ram_threshold = sys_settings.get('ram_threshold_bytes', 1073741824)
+        active_preset = sys_settings['active_preset']
+        ram_auto_switch = sys_settings['ram_auto_switch_enabled']
+        ram_threshold = sys_settings['ram_threshold_bytes']
 
         return {
-            'low_power_mode': bool(self.low_power_mode),
             'sensitivity': int(self.sensitivity),
             'jpeg_quality': int(self.jpeg_quality),
             'pipe_buffer_size': int(self.pipe_buffer_size),
@@ -632,9 +642,7 @@ class CameraService(StreamingService):
             'motion_check_interval': int(self.motion_check_interval),
             'min_free_storage_bytes': int(self.min_free_storage_bytes),
             'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
-            'live_stream_mode': str(getattr(self, 'live_stream_mode', 'mjpeg')),
-            'ram_auto_low_power_enabled': bool(self.ram_auto_low_power_enabled),
-            'low_power_ram_threshold_bytes': int(self.low_power_ram_threshold_bytes),
+            'live_stream_mode': str(self.live_stream_mode),
             'total_memory_bytes': total_memory_bytes,
             # Advanced Performance Settings
             'frame_rbf_len': int(self.frame_rbf_len),
@@ -642,159 +650,91 @@ class CameraService(StreamingService):
             'results_rbf_len': int(self.results_rbf_len),
             # Recording Settings
             'mux_realtime': bool(self.mux_realtime),
+            'auto_archive_days': int(self.auto_archive_days),
             # Preset Settings
             'active_preset': active_preset,
             'ram_auto_switch_enabled': ram_auto_switch,
             'ram_threshold_bytes': ram_threshold,
         }
 
-    def update_runtime_settings(
-        self,
-        low_power_mode: Optional[bool] = None,
-        sensitivity: Optional[int] = None,
-        jpeg_quality: Optional[int] = None,
-        pipe_buffer_size: Optional[int] = None,
-        max_vel: Optional[float] = None,
-        bg_diff: Optional[int] = None,
-        max_clip_length: Optional[int] = None,
-        motion_check_interval: Optional[int] = None,
-        min_free_storage_bytes: Optional[int] = None,
-        rtsp_unified_demux_enabled: Optional[bool] = None,
-        # Advanced Performance Settings
-        frame_rbf_len: Optional[int] = None,
-        audio_rbf_len: Optional[int] = None,
-        results_rbf_len: Optional[int] = None,
-        # Recording Settings
-        mux_realtime: Optional[bool] = None,
-        # Preset-specific settings
-        fps: Optional[int] = None,
-        max_buffer_frames: Optional[int] = None,
-        max_recording_duration_minutes: Optional[int] = None,
-        quality: Optional[str] = None,
-        recording_enabled: Optional[bool] = None,
-        live_stream_mode: Optional[str] = None,
-    ) -> Dict[str, Union[bool, int, float]]:
-        low_power_changed = False
-
-        if low_power_mode is not None:
-            self.low_power_mode = bool(low_power_mode)
-            low_power_changed = True
-
-        if sensitivity is not None:
-            safe_sensitivity = max(0, min(int(self.sensitivity_level), int(sensitivity)))
+    def _apply_settings_to_runtime(self, updates: Dict[str, Any]) -> None:
+        """Apply a dict of setting values to runtime attributes and propagate to components."""
+        if 'sensitivity' in updates:
+            safe_sensitivity = max(0, min(int(self.sensitivity_level), int(updates['sensitivity'])))
             self.sensitivity = safe_sensitivity
             try:
                 for camera in self.get_cameras():
                     self.set_camera_sensitivity(camera.id, safe_sensitivity)
             except Exception:
                 pass
-        elif low_power_changed:
-            self.sensitivity = 2 if self.low_power_mode else 4
 
-        if jpeg_quality is not None:
-            safe_quality = max(25, min(95, int(jpeg_quality)))
-            self.jpeg_quality = safe_quality
-        elif low_power_changed:
-            self.jpeg_quality = 55 if self.low_power_mode else 70
+        if 'jpeg_quality' in updates:
+            self.jpeg_quality = max(25, min(95, int(updates['jpeg_quality'])))
 
-        if pipe_buffer_size is not None:
-            self.pipe_buffer_size = max(65536, min(268435456, int(pipe_buffer_size)))
-        elif low_power_changed:
-            self.pipe_buffer_size = 10**6 if self.low_power_mode else 10**8
+        if 'pipe_buffer_size' in updates:
+            self.pipe_buffer_size = max(65536, min(268435456, int(updates['pipe_buffer_size'])))
 
-        if max_vel is not None:
-            self.max_velocity = max(0.0, min(5.0, float(max_vel)))
+        if 'max_vel' in updates:
+            self.max_velocity = max(0.0, min(5.0, float(updates['max_vel'])))
 
-        if bg_diff is not None:
-            self.max_bg_diff = max(1, min(5000, int(bg_diff)))
+        if 'bg_diff' in updates:
+            self.max_bg_diff = max(1, min(5000, int(updates['bg_diff'])))
 
-        if max_clip_length is not None:
-            self.max_clip_length = max(5, min(600, int(max_clip_length)))
+        if 'max_clip_length' in updates:
+            self.max_clip_length = max(5, min(600, int(updates['max_clip_length'])))
 
-        if motion_check_interval is not None:
-            self.motion_check_interval = max(1, min(120, int(motion_check_interval)))
+        if 'motion_check_interval' in updates:
+            self.motion_check_interval = max(1, min(120, int(updates['motion_check_interval'])))
 
-        if min_free_storage_bytes is not None:
-            self.min_free_storage_bytes = max(0, int(min_free_storage_bytes))
+        if 'min_free_storage_bytes' in updates:
+            self.min_free_storage_bytes = max(0, int(updates['min_free_storage_bytes']))
             try:
                 self.recording_manager.min_free_storage_bytes = self.min_free_storage_bytes
             except Exception:
                 pass
 
-        if rtsp_unified_demux_enabled is not None:
-            self.rtsp_unified_demux_enabled = bool(rtsp_unified_demux_enabled)
+        if 'rtsp_unified_demux_enabled' in updates:
+            self.rtsp_unified_demux_enabled = bool(updates['rtsp_unified_demux_enabled'])
 
-        # Handle advanced performance settings
-        if frame_rbf_len is not None:
-            self.frame_rbf_len = max(1, min(100, int(frame_rbf_len)))
+        if 'frame_rbf_len' in updates:
+            self.frame_rbf_len = max(1, min(100, int(updates['frame_rbf_len'])))
 
-        if audio_rbf_len is not None:
-            self.audio_rbf_len = max(1, min(100, int(audio_rbf_len)))
+        if 'audio_rbf_len' in updates:
+            self.audio_rbf_len = max(1, min(100, int(updates['audio_rbf_len'])))
 
-        if results_rbf_len is not None:
-            self.results_rbf_len = max(1, min(100, int(results_rbf_len)))
+        if 'results_rbf_len' in updates:
+            self.results_rbf_len = max(1, min(100, int(updates['results_rbf_len'])))
 
-        # Handle recording settings
-        if mux_realtime is not None:
-            self.mux_realtime = bool(mux_realtime)
+        if 'mux_realtime' in updates:
+            self.mux_realtime = bool(updates['mux_realtime'])
 
-        # Handle preset-specific settings
-        if fps is not None:
-            # Update FPS for all active camera streams
-            fps = max(1, min(60, int(fps)))
-            for cap in self._camera_streams.values():
-                try:
-                    cap.fps = fps
-                except Exception:
-                    continue
+        if 'auto_archive_days' in updates:
+            self.auto_archive_days = max(0, int(updates['auto_archive_days']))
+            try:
+                self.recording_manager.auto_archive_days = self.auto_archive_days
+            except Exception:
+                pass
 
-        if max_buffer_frames is not None:
-            # Map max_buffer_frames to frame ring buffer length
-            buffer_frames = max(1, min(100, int(max_buffer_frames)))
-            self.frame_rbf_len = buffer_frames
-
-        if max_recording_duration_minutes is not None:
-            # Convert minutes to seconds and update max_clip_length
-            duration_seconds = max(5, min(3600, int(max_recording_duration_minutes * 60)))
-            self.max_clip_length = duration_seconds
-
-        if quality is not None:
-            # Map quality string to JPEG quality value
-            quality_map = {
-                'low': 30,
-                'medium': 55, 
-                'high': 70,
-                'ultra': 90
-            }
-            if quality.lower() in quality_map:
-                self.jpeg_quality = quality_map[quality.lower()]
-
-        if recording_enabled is not None:
-            # Store recording enabled setting for future use
-            self.recording_enabled = bool(recording_enabled)
-
-        if live_stream_mode is not None:
-            # Validate and store live stream mode setting
-            valid_modes = ['mjpeg', 'hls']
-            if str(live_stream_mode).lower() in valid_modes:
-                self.live_stream_mode = str(live_stream_mode).lower()
-            else:
-                logger.warning(f"Invalid live_stream_mode '{live_stream_mode}', keeping current mode")
+        if 'live_stream_mode' in updates:
+            mode = str(updates['live_stream_mode']).lower()
+            if mode in ('mjpeg', 'hls'):
+                self.live_stream_mode = mode
 
         try:
             self.default_sensitivity = int(self.sensitivity)
         except Exception:
             pass
 
+        # Propagate to active camera streams
         for cap in self._camera_streams.values():
             try:
-                cap.low_power_mode = bool(self.low_power_mode)
                 cap.pipe_buffer_size = int(self.pipe_buffer_size)
                 if hasattr(cap, '_rtsp_unified_demux_enabled'):
                     cap._rtsp_unified_demux_enabled = bool(self.rtsp_unified_demux_enabled)
             except Exception:
                 continue
 
+        # Propagate to recording manager
         try:
             self.recording_manager.max_velocity = float(self.max_velocity)
             self.recording_manager.max_bg_diff = int(self.max_bg_diff)
@@ -804,58 +744,6 @@ class CameraService(StreamingService):
             self.recording_manager.mux_realtime = bool(self.mux_realtime)
         except Exception:
             pass
-
-        # Persist all runtime settings to appropriate preset
-        try:
-            current_settings = self.db.get_system_settings()
-            current_preset = current_settings.get('active_preset', 'default')
-            
-            settings_to_save = {
-                'low_power_mode': bool(self.low_power_mode),
-                'sensitivity': int(self.sensitivity),
-                'jpeg_quality': int(self.jpeg_quality),
-                'pipe_buffer_size': int(self.pipe_buffer_size),
-                'max_vel': float(self.max_velocity),
-                'bg_diff': int(self.max_bg_diff),
-                'max_clip_length': int(self.max_clip_length),
-                'motion_check_interval': int(self.motion_check_interval),
-                'min_free_storage_bytes': int(self.min_free_storage_bytes),
-                'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
-                'live_stream_mode': str(self.live_stream_mode),
-                # Advanced Performance Settings
-                'frame_rbf_len': int(self.frame_rbf_len),
-                'audio_rbf_len': int(self.audio_rbf_len),
-                'results_rbf_len': int(self.results_rbf_len),
-                # Recording Settings
-                'mux_realtime': bool(self.mux_realtime),
-            }
-            
-            # Add preset-specific settings if they were set
-            if hasattr(self, 'recording_enabled'):
-                settings_to_save['recording_enabled'] = bool(self.recording_enabled)
-            
-            # If individual settings are being modified (not from preset switch),
-            # automatically switch to custom preset to store modifications
-            if current_preset != 'custom':
-                # Check if any setting differs from current preset template
-                presets = self.db.get_presets()
-                current_preset_values = presets.get(current_preset, {})
-                
-                settings_differ = False
-                for key, value in settings_to_save.items():
-                    if key in current_preset_values and current_preset_values[key] != value:
-                        settings_differ = True
-                        break
-                
-                # If settings differ, switch to custom preset
-                if settings_differ:
-                    settings_to_save['active_preset'] = 'custom'
-                    
-            self.db.save_system_settings(settings_to_save)
-        except Exception:
-            pass
-
-        return self.get_runtime_settings()
 
     def __del__(self):
         # Clean up any active recordings on shutdown
@@ -1066,7 +954,6 @@ class CameraService(StreamingService):
             width=resolution[0],
             height=resolution[1],
             fps=fps,
-            low_power_mode=self.low_power_mode,
             audio_enabled=audio_enabled,
             audio_sample_rate=audio_sample_rate,
             audio_chunk_size=audio_chunk_size,

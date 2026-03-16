@@ -33,23 +33,23 @@ export const FrameStepButtons = ({ disabled, onStepBack, onStepForward }) => (
   </div>
 );
 
-export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessValue }) => (
+export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessValue, MOTION_COLORS = {} }) => (
   <div className="recording-meta">
     <div className="meta-item">
       <Clock size={12} />
       <span>{durationText}</span>
     </div>
     <div className="meta-item">
-      <Activity size={12} />
-      <span>{velValue ?? 'N/A'}</span>
+      <Activity size={12} style={{ color: MOTION_COLORS.velocity || '#009688' }} />
+      <span style={{ color: MOTION_COLORS.velocity || '#009688' }}>{velValue ?? 'N/A'}</span>
     </div>
     <div className="meta-item">
-      <BarChart3 size={12} />
-      <span>{diffValue ?? 'N/A'}</span>
+      <BarChart3 size={12} style={{ color: MOTION_COLORS.bgDiff || '#5c6bc0' }} />
+      <span style={{ color: MOTION_COLORS.bgDiff || '#5c6bc0' }}>{diffValue ?? 'N/A'}</span>
     </div>
     <div className="meta-item">
-      <Volume2 size={12} />
-      <span>{typeof loudnessValue === 'number' ? loudnessValue.toFixed(2) : 'N/A'}</span>
+      <Volume2 size={12} style={{ color: MOTION_COLORS.loudness || '#ff9800' }} />
+      <span style={{ color: MOTION_COLORS.loudness || '#ff9800' }}>{typeof loudnessValue === 'number' ? loudnessValue.toFixed(2) : 'N/A'}</span>
     </div>
   </div>
 );
@@ -190,7 +190,7 @@ export const buildCameraRows = (recordingsByCamera = {}, validCameras = []) => O
   })
   .sort((a, b) => a.cameraName.localeCompare(b.cameraName));
 
-export const buildRowMetricsData = (recordings = []) => {
+export const buildRowMetricsData = (recordings = [], zoomHours = 24, scrollOffsetHours = 0) => {
   const rowMetrics = recordings.map((recording, index) => {
     const metadata = getRecordingMetadata(recording);
     const timestampValue = getRecordingTimestampValue(recording, metadata);
@@ -198,6 +198,8 @@ export const buildRowMetricsData = (recordings = []) => {
     const hasValidTime = parsedTimestamp && !Number.isNaN(parsedTimestamp.getTime());
     const velocity = Number(metadata.vel);
     const bgDiff = Number(metadata.diff);
+    const loudness = Number(metadata.loudness);
+    const duration = Number(recording.duration);
 
     return {
       id: recording.id,
@@ -208,6 +210,8 @@ export const buildRowMetricsData = (recordings = []) => {
         : '--:--',
       velocity: Number.isFinite(velocity) ? Math.max(0, velocity) : 0,
       bgDiff: Number.isFinite(bgDiff) ? Math.max(0, bgDiff) : 0,
+      loudness: Number.isFinite(loudness) ? Math.max(0, loudness) : 0,
+      duration: Number.isFinite(duration) ? Math.max(0, duration) : 0,
     };
   });
 
@@ -216,17 +220,20 @@ export const buildRowMetricsData = (recordings = []) => {
     .filter((value) => Number.isFinite(value));
 
   const latestTimestampMs = validTimestamps.length > 0 ? Math.max(...validTimestamps) : Date.now();
-  const chartWindowMs = 24 * 60 * 60 * 1000;
-  const chartStartMs = latestTimestampMs - chartWindowMs;
+  const earliestTimestampMs = validTimestamps.length > 0 ? Math.min(...validTimestamps) : Date.now();
+  const totalDataSpanHours = Math.max(zoomHours, (latestTimestampMs - earliestTimestampMs) / (60 * 60 * 1000));
+  const chartWindowMs = zoomHours * 60 * 60 * 1000;
+  const chartEndMs = latestTimestampMs - (scrollOffsetHours * 60 * 60 * 1000);
+  const chartStartMs = chartEndMs - chartWindowMs;
 
   const chartMetrics = rowMetrics
     .map((metric) => {
       const ts = Number(metric.timestampMs);
-      if (!Number.isFinite(ts) || ts < chartStartMs || ts > latestTimestampMs) {
+      if (!Number.isFinite(ts) || ts < chartStartMs || ts > chartEndMs) {
         return { ...metric, xPercent: null };
       }
 
-      const normalized = ((latestTimestampMs - ts) / chartWindowMs) * 100;
+      const normalized = ((chartEndMs - ts) / chartWindowMs) * 100;
       const xPercent = Math.max(0, Math.min(100, normalized));
       return { ...metric, xPercent };
     })
@@ -234,13 +241,19 @@ export const buildRowMetricsData = (recordings = []) => {
 
   const chartMaxVelocity = Math.max(1, ...chartMetrics.map((metric) => metric.velocity));
   const chartMaxBgDiff = Math.max(1, ...chartMetrics.map((metric) => metric.bgDiff));
+  const chartMaxLoudness = Math.max(1, ...chartMetrics.map((metric) => metric.loudness));
+  const chartMaxDuration = Math.max(1, ...chartMetrics.map((metric) => metric.duration));
 
-  const axisTicks = Array.from({ length: 25 }, (_, hourOffset) => {
-    const tickTs = latestTimestampMs - (hourOffset * 60 * 60 * 1000);
+  const tickInterval = Math.max(1, Math.floor(zoomHours / 8)); // Show ~8 ticks max
+  const tickCount = Math.floor(zoomHours / tickInterval) + 1;
+  
+  const axisTicks = Array.from({ length: tickCount }, (_, tickIndex) => {
+    const hourOffset = tickIndex * tickInterval;
+    const tickTs = chartEndMs - (hourOffset * 60 * 60 * 1000);
     return {
-      xPercent: (hourOffset / 24) * 100,
+      xPercent: (hourOffset / zoomHours) * 100,
       label: new Date(tickTs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
-      showLabel: hourOffset % 3 === 0 || hourOffset === 24,
+      showLabel: tickIndex % Math.max(1, Math.floor(tickCount / 4)) === 0, // Show ~4 labels max
     };
   });
 
@@ -248,6 +261,81 @@ export const buildRowMetricsData = (recordings = []) => {
     chartMetrics,
     chartMaxVelocity,
     chartMaxBgDiff,
+    chartMaxLoudness,
+    chartMaxDuration,
     axisTicks,
+    totalDataSpanHours,
+    latestTimestampMs,
+    earliestTimestampMs,
+  };
+};
+
+/**
+ * Build metrics data for a single date (00:00–23:59), x-axis = time of day.
+ * Returns metrics positioned as percentage of the 24h window (0% = 00:00, 100% = 24:00).
+ */
+export const buildDateMetricsData = (recordings = [], dateStr) => {
+  const dayStart = new Date(`${dateStr}T00:00:00`).getTime();
+  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  const rowMetrics = recordings.map((recording, index) => {
+    const metadata = getRecordingMetadata(recording);
+    const timestampValue = getRecordingTimestampValue(recording, metadata);
+    const parsedTimestamp = timestampValue ? new Date(timestampValue) : null;
+    const hasValidTime = parsedTimestamp && !Number.isNaN(parsedTimestamp.getTime());
+    const velocity = Number(metadata.vel);
+    const bgDiff = Number(metadata.diff);
+    const loudness = Number(metadata.loudness);
+    const duration = Number(recording.duration);
+
+    return {
+      id: recording.id,
+      index,
+      timestampMs: hasValidTime ? parsedTimestamp.getTime() : null,
+      timeLabel: hasValidTime
+        ? parsedTimestamp.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+        : '--:--',
+      velocity: Number.isFinite(velocity) ? Math.max(0, velocity) : 0,
+      bgDiff: Number.isFinite(bgDiff) ? Math.max(0, bgDiff) : 0,
+      loudness: Number.isFinite(loudness) ? Math.max(0, loudness) : 0,
+      duration: Number.isFinite(duration) ? Math.max(0, duration) : 0,
+    };
+  });
+
+  const chartMetrics = rowMetrics
+    .filter(m => m.timestampMs != null && m.timestampMs >= dayStart && m.timestampMs < dayEnd)
+    .map(metric => {
+      const xPercent = ((dayEnd - metric.timestampMs) / dayMs) * 100;
+      return { ...metric, xPercent: Math.max(0, Math.min(100, xPercent)) };
+    });
+
+  const chartMaxVelocity = Math.max(1, ...chartMetrics.map(m => m.velocity));
+  const chartMaxBgDiff = Math.max(1, ...chartMetrics.map(m => m.bgDiff));
+  const chartMaxLoudness = Math.max(1, ...chartMetrics.map(m => m.loudness));
+  const chartMaxDuration = Math.max(1, ...chartMetrics.map(m => m.duration));
+
+  // Fixed 24h axis ticks every 3 hours (newest=left, oldest=right)
+  const axisTicks = Array.from({ length: 9 }, (_, i) => {
+    const hour = i * 3;
+    return {
+      xPercent: (hour / 24) * 100,
+      label: `${String(24 - hour).padStart(2, '0')}:00`,
+      showLabel: true,
+    };
+  });
+
+  // Current time indicator (percentage of day elapsed)
+  const now = Date.now();
+  const nowPercent = now >= dayStart && now < dayEnd ? ((dayEnd - now) / dayMs) * 100 : null;
+
+  return {
+    chartMetrics,
+    chartMaxVelocity,
+    chartMaxBgDiff,
+    chartMaxLoudness,
+    chartMaxDuration,
+    axisTicks,
+    nowPercent,
   };
 };
