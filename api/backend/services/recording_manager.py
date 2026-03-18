@@ -26,19 +26,7 @@ if PROJECT_SRC_PATH not in sys.path:
     sys.path.append(PROJECT_SRC_PATH)
 
 from improc.optical_flow import OpticalFlowTracker
-
-# ANSI Color codes for log formatting
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    GRAY = '\033[90m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'  # Reset to default
+from services.colors import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +72,13 @@ class RecordingManager:
         self.clip_start_time: Dict[str, float] = {}
         self.clip_motion_detected: Dict[str, bool] = {}
         self.clip_vel: Dict[str, float] = {}
+        self.clip_max_vel: Dict[str, float] = {}
         self.clip_bg_diff: Dict[str, int] = {}
         self.clip_loudness: Dict[str, float] = {}
+        self.clip_loudness_frame_count: Dict[str, int] = {}
         self.clip_motion_frame: Dict[str, Optional[np.ndarray]] = {}
+        self.clip_motion_frame_count: Dict[str, int] = {}
+        self.clip_no_motion_frame_count: Dict[str, int] = {}
         self.clean_up_extensions = ['.overlay.mp4']  # Extensions to clean up if no motion detected
         
         
@@ -169,9 +161,13 @@ class RecordingManager:
         self.clip_start_time[camera_id] = timestamp
         self.clip_motion_detected[camera_id] = False
         self.clip_vel[camera_id] = 0.0
+        self.clip_max_vel[camera_id] = 0.0
         self.clip_bg_diff[camera_id] = 0
         self.clip_loudness[camera_id] = 0.0
+        self.clip_loudness_frame_count[camera_id] = 0
         self.clip_motion_frame[camera_id] = None
+        self.clip_motion_frame_count[camera_id] = 0
+        self.clip_no_motion_frame_count[camera_id] = 0
 
         _ext = file_path.split('.')[-1]
         with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
@@ -338,6 +334,11 @@ class RecordingManager:
         motion_frame = self.clip_motion_frame.get(camera_id)
         if motion_frame is not None:
             cv2.imwrite(final_file_path.replace('.mp4', '.jpg'), motion_frame)
+
+        self.clip_vel[camera_id] = round(self.clip_vel[camera_id] / self.clip_motion_frame_count[camera_id] if self.clip_motion_frame_count[camera_id] > 0 else 0.0, 2)
+        self.clip_bg_diff[camera_id] = round(self.clip_bg_diff[camera_id] / self.clip_motion_frame_count[camera_id] if self.clip_motion_frame_count[camera_id] > 0 else 0, 2)
+        self.clip_loudness[camera_id] = round(self.clip_loudness[camera_id] / self.clip_loudness_frame_count[camera_id] if self.clip_loudness_frame_count[camera_id] > 0 else 0.0, 2)
+        clip_activity_percentage = round(self.clip_motion_frame_count[camera_id] / self.clip_no_motion_frame_count[camera_id] if self.clip_no_motion_frame_count[camera_id] > 0 else 1.0, 2)
         self.db.update_recording(
             recording_id,
             {
@@ -351,6 +352,7 @@ class RecordingManager:
                     'vel': float(self.clip_vel.get(camera_id, 0.0)),
                     'diff': int(self.clip_bg_diff.get(camera_id, 0)),
                     'loudness': float(self.clip_loudness.get(camera_id, 0.0)),
+                    'activity_percentage': float(clip_activity_percentage),   
                     'audio_recorded': audio_enabled,
                 },
             },
@@ -365,161 +367,186 @@ class RecordingManager:
             logger.warning(f"Auto-archive check failed: {e}")
         
     def record_worker(self, camera_id):
-        start_time = time.time()
-        
-        # Get camera config first before initializing recording
-        db_camera = self.db.get_camera(camera_id) or {}
-        audio_enabled = db_camera.get('audio_enabled', False)
-        
-        recording_id, file_path, writer = self.init_recording(camera_id)
-        curr_time = start_time
-        recent_motion_detected = False
-        prev_frame = None
-        motion_frame = None
-        
-        
-        # Audio sync: track sample deficit to keep audio aligned with video
-        if audio_enabled:
-            audio_sample_rate = int(db_camera.get('audio_sample_rate', 16000) or 16000)
-            audio_channels = int(db_camera.get('audio_channels', 1) or 1)
-            audio_chunk_size = int(db_camera.get('audio_chunk_size', 512) or 512)
-            camera_fps = int(db_camera.get('fps', 30))
-            samples_per_frame = audio_sample_rate / camera_fps
-            audio_sample_deficit = 0.0
-            # Chunk size in bytes: samples * channels * 2 bytes (s16le)
-            chunk_bytes = audio_chunk_size * audio_channels * 2
-            silence_chunk = b'\x00' * chunk_bytes
-        
-        # Add small delay before starting to allow system to stabilize
-        time.sleep(0.1)
-        
-        logger.info(f"{Colors.BLUE}🎬 Recording worker started{Colors.RESET} for camera {camera_id}, audio enabled: {audio_enabled}")
-        # Track last motion check time
-        last_motion_check = start_time
-        _ext = file_path.split('.')[1]
-        with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
-            f.write('vel,bg_diff,loudness\n')
-
-        while camera_id in self.active_recordings:
-    
-            frame = None
-            audio_chunks = []
-            res = {'vel': 0.0, 'bg_diff': 0}
-            audio_res = {}
+        writer = None
+        recording_id = None
+        file_path = None
+        audio_enabled = False
+        curr_time = time.time()
+        try:
+            start_time = time.time()
             
-            frame = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'frames')
-            if frame is not None:
-                prev_frame = frame
-            elif prev_frame is not None:
-                frame = prev_frame  # Use last frame if current is missing to keep recording alive
-
+            # Get camera config first before initializing recording
+            db_camera = self.db.get_camera(camera_id) or {}
+            audio_enabled = db_camera.get('audio_enabled', False)
+            
+            recording_id, file_path, writer = self.init_recording(camera_id)
+            curr_time = start_time
+            recent_motion_detected = False
+            prev_frame = None
+            
+            # Audio sync: track sample deficit to keep audio aligned with video
             if audio_enabled:
-                audio_sample_deficit += samples_per_frame
-                while audio_sample_deficit >= audio_chunk_size:
-                    chunk = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'audio')
-                    audio_chunks.append(chunk if chunk is not None else silence_chunk)
-                    audio_sample_deficit -= audio_chunk_size
-            results = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'results')
-            res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
-            audio_res = results.get('audio', {}) if results else {}
-            curr_time = time.time()
+                audio_sample_rate = int(db_camera.get('audio_sample_rate', 16000) or 16000)
+                audio_channels = int(db_camera.get('audio_channels', 1) or 1)
+                audio_chunk_size = int(db_camera.get('audio_chunk_size', 512) or 512)
+                camera_fps = int(db_camera.get('fps', 30))
+                samples_per_frame = audio_sample_rate / camera_fps
+                audio_sample_deficit = 0.0
+                # Chunk size in bytes: samples * channels * 2 bytes (s16le)
+                chunk_bytes = audio_chunk_size * audio_channels * 2
+                silence_chunk = b'\x00' * chunk_bytes
             
-            # Read detection flags directly from streaming service (staleness already handled)
-            detected_vel = bool(res.get('detected_vel', False))
-            detection_bg_diff = bool(res.get('detection_bg_diff', False))
-            vel = float(res.get('vel', 0.0))
-            bg_diff = int(res.get('bg_diff', 0))
-            loudness = audio_res.get('int', 0.0)  # Default value
-
-            if detected_vel or detection_bg_diff:
-                if self.clip_motion_frame[camera_id] is None or vel > self.clip_vel[camera_id]:
-                    self.clip_motion_frame[camera_id] = frame
-                recent_motion_detected = True
-                self.clip_motion_detected[camera_id] = True
-                self.clip_vel[camera_id] = max(self.clip_vel.get(camera_id, 0.0), vel)
-                self.clip_bg_diff[camera_id] = max(self.clip_bg_diff.get(camera_id, 0), bg_diff)
-                
-
-            if audio_enabled and audio_res:
-                # Read detected loudness flag from audio results
-                detected_loudness = bool(audio_res.get('detected_loudness', False))
-                loudness = float(audio_res.get('int', 0.0))
-                self.clip_loudness[camera_id] = max(self.clip_loudness.get(camera_id, 0.0), loudness)
+            # Add small delay before starting to allow system to stabilize
+            time.sleep(0.1)
             
-            # Motion detection check every interval
-            if curr_time - last_motion_check > self.motion_check_interval:
-                clip_duration = curr_time - self.clip_start_time.get(camera_id, curr_time)
-                logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {camera_id}: duration={clip_duration:.1f}s, max={self.max_clip_length}s, recent_motion={recent_motion_detected}, clip_has_motion={self.clip_motion_detected.get(camera_id, False)}{Colors.RESET}")
+            logger.info(f"{Colors.BLUE}🎬 Recording worker started{Colors.RESET} for camera {camera_id}, audio enabled: {audio_enabled}")
+            # Track last motion check time
+            last_motion_check = start_time
+            _ext = file_path.split('.')[1]
+            with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
+                f.write('vel,bg_diff,loudness\n')
+
+            while camera_id in self.active_recordings:
+        
+                frame = None
+                audio_chunks = []
+                res = {'vel': 0.0, 'bg_diff': 0}
+                audio_res = {}
                 
-                if recent_motion_detected:
-                    # Recent motion detected in this interval
-                    if clip_duration >= self.max_clip_length:
-                        # Clip exceeds max length - save and start new  
+                frame = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'frames')
+                if frame is not None:
+                    prev_frame = frame
+                elif prev_frame is not None:
+                    frame = prev_frame  # Use last frame if current is missing to keep recording alive
+                else:
+                    time.sleep(0.01)  # No frame available yet, wait briefly before retrying
+                    continue
+
+                if audio_enabled:
+                    audio_sample_deficit += samples_per_frame
+                    while audio_sample_deficit >= audio_chunk_size:
+                        chunk = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'audio')
+                        audio_chunks.append(chunk if chunk is not None else silence_chunk)
+                        audio_sample_deficit -= audio_chunk_size
+                results = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'results')
+                res = results.get('video', {'vel': 0.0, 'bg_diff': 0}) if results else {'vel': 0.0, 'bg_diff': 0}
+                audio_res = results.get('audio', {}) if results else {}
+                curr_time = time.time()
+                
+                # Read detection flags directly from streaming service (staleness already handled)
+                detected_vel = bool(res.get('detected_vel', False))
+                detection_bg_diff = bool(res.get('detection_bg_diff', False))
+                vel = float(res.get('vel', 0.0))
+                bg_diff = int(res.get('bg_diff', 0))
+                loudness = audio_res.get('int', 0.0)  # Default value
+
+                if detected_vel or detection_bg_diff:
+                    if self.clip_motion_frame[camera_id] is None or vel > self.clip_max_vel[camera_id]:
+                        self.clip_motion_frame[camera_id] = frame
+                    self.clip_max_vel[camera_id] = max(self.clip_max_vel.get(camera_id, 0.0), vel)
+                    recent_motion_detected = True
+                    self.clip_motion_detected[camera_id] = True
+                    self.clip_vel[camera_id] = self.clip_vel.get(camera_id, 0.0) + vel
+                    self.clip_bg_diff[camera_id] = self.clip_bg_diff.get(camera_id, 0) + bg_diff
+                    self.clip_motion_frame_count[camera_id] += 1
+                else:
+                    self.clip_no_motion_frame_count[camera_id] += 1
+
+                if audio_enabled and audio_res:
+                    detected_loudness = bool(audio_res.get('detected_loudness', False))
+                    loudness = float(audio_res.get('int', 0.0))
+                    if detected_loudness:
+                        self.clip_loudness[camera_id] = self.clip_loudness.get(camera_id, 0.0) + loudness
+                        self.clip_loudness_frame_count[camera_id] += 1
+                
+                # Motion detection check every interval
+                if curr_time - last_motion_check > self.motion_check_interval:
+                    clip_duration = curr_time - self.clip_start_time.get(camera_id, curr_time)
+                    logger.info(f"{Colors.YELLOW}⚠️ Motion check for camera {camera_id}: duration={clip_duration:.1f}s, max={self.max_clip_length}s, recent_motion={recent_motion_detected}, clip_has_motion={self.clip_motion_detected.get(camera_id, False)}{Colors.RESET}")
+                    
+                    if recent_motion_detected:
+                        # Recent motion detected in this interval
+                        if clip_duration >= self.max_clip_length:
+                            # Clip exceeds max length - save and start new  
+                            final_file_path = writer.release()
+                            self.save_recording(
+                                camera_id,
+                                recording_id,
+                                final_file_path,
+                                audio_enabled,
+                                curr_time
+                            )
+                            # Start new recording after saving
+                            recording_id, file_path, writer = self.init_recording(camera_id)
+                            
+                            if audio_enabled:
+                                audio_sample_deficit = 0.0
+                            logger.info(f"{Colors.CYAN}📹 Clip saved (max length reached):{Colors.RESET} duration={int(clip_duration)}s")
+                        else:
+                            # Continue recording - motion still happening
+                            logger.info(f"{Colors.GREEN}⏱️ Continuing recording{Colors.RESET} - recent motion detected vel ={self.clip_vel.get(camera_id, 0.0)}, bg_diff ={self.clip_bg_diff.get(camera_id, 0)}, loudness ={self.clip_loudness.get(camera_id, 0.0)}, duration={int(clip_duration)}s")
+                    else:
+                        # No recent motion detected - end current clip
                         final_file_path = writer.release()
-                        self.save_recording(
-                            camera_id,
-                            recording_id,
-                            final_file_path,
-                            audio_enabled,
-                            curr_time
-                        )
-                        # Start new recording after saving
+                        if self.clip_motion_detected.get(camera_id, False):
+                            # Save clip - it had motion earlier
+                            self.save_recording(
+                                camera_id,
+                                recording_id,
+                                final_file_path,
+                                audio_enabled,
+                                curr_time)                        
+                            logger.info(f"{Colors.MAGENTA}💾 Clip saved (motion ended):{Colors.RESET} duration={int(clip_duration)}s")
+                        else:
+                            # Delete clip - no motion throughout entire clip
+                            self.delete_no_motion_recording(camera_id, recording_id, final_file_path)
+                            logger.info(f"{Colors.RED}🗑️ Clip deleted (no motion):{Colors.RESET} duration={int(clip_duration)}s")
+                    
+                        # Start new recording after ending previous clip
                         recording_id, file_path, writer = self.init_recording(camera_id)
-                        
                         if audio_enabled:
                             audio_sample_deficit = 0.0
-                        logger.info(f"{Colors.CYAN}📹 Clip saved (max length reached):{Colors.RESET} duration={int(clip_duration)}s")
-                    else:
-                        # Continue recording - motion still happening
-                        logger.info(f"{Colors.GREEN}⏱️ Continuing recording{Colors.RESET} - recent motion detected vel ={self.clip_vel.get(camera_id, 0.0)}, bg_diff ={self.clip_bg_diff.get(camera_id, 0)}, loudness ={self.clip_loudness.get(camera_id, 0.0)}, duration={int(clip_duration)}s")
-                else:
-                    # No recent motion detected - end current clip
+                    
+                    # Reset for next interval
+                    recent_motion_detected = False
+                    last_motion_check = curr_time
+                    
+                # Write video frame if available (but don't wait for it)
+                if frame is not None:
+                    writer.write_frame_with_timeout(frame)
+                    # Write audio chunks to stay in sync with video
+                    if audio_enabled and audio_chunks:
+                        combined_audio = b''.join(audio_chunks)
+                        writer.write_audio(combined_audio)
+                    with open(file_path.replace(f'.{_ext}', '.txt'), 'a') as f:
+                        f.write(f"{vel},{bg_diff},{loudness}\n")            
+                
+            # Final processing when recording worker ends normally
+            final_file_path = writer.release()
+            writer = None  # Mark as released
+            if self.clip_motion_detected.get(camera_id, False):
+                self.save_recording(
+                    camera_id,
+                    recording_id,
+                    final_file_path,
+                    audio_enabled,
+                    curr_time
+                )
+            else:
+                self.delete_no_motion_recording(camera_id, recording_id, final_file_path)
+        except Exception:
+            logger.exception(f"{Colors.RED}💀 Recording worker crashed for camera {camera_id}{Colors.RESET}")
+            # Emergency: release writer if not already released
+            if writer is not None:
+                try:
                     final_file_path = writer.release()
-                    if self.clip_motion_detected.get(camera_id, False):
-                        # Save clip - it had motion earlier
-                        self.save_recording(
-                            camera_id,
-                            recording_id,
-                            final_file_path,
-                            audio_enabled,
-                            curr_time)                        
-                        logger.info(f"{Colors.MAGENTA}💾 Clip saved (motion ended):{Colors.RESET} duration={int(clip_duration)}s")
-                    else:
-                        # Delete clip - no motion throughout entire clip
-                        self.delete_no_motion_recording(camera_id, recording_id, final_file_path)
-                        logger.info(f"{Colors.RED}🗑️ Clip deleted (no motion):{Colors.RESET} duration={int(clip_duration)}s")
-                
-                    # Start new recording after ending previous clip
-                    recording_id, file_path, writer = self.init_recording(camera_id)
-                    if audio_enabled:
-                        audio_sample_deficit = 0.0
-                
-                # Reset for next interval
-                recent_motion_detected = False
-                last_motion_check = curr_time
-                
-            # Write video frame if available (but don't wait for it)
-            if frame is not None:
-                writer.write_frame_with_timeout(frame)
-                # Write audio chunks to stay in sync with video
-                if audio_enabled and audio_chunks:
-                    combined_audio = b''.join(audio_chunks)
-                    writer.write_audio(combined_audio)
-                with open(file_path.replace(f'.{_ext}', '.txt'), 'a') as f:
-                    f.write(f"{vel},{bg_diff},{loudness}\n")            
-            
-        # Final processing when recording worker ends
-        final_file_path = writer.release()
-        if self.clip_motion_detected.get(camera_id, False):
-            self.save_recording(
-                camera_id,
-                recording_id,
-                final_file_path,
-                audio_enabled,
-                curr_time
-            )
-        else:
-            self.delete_no_motion_recording(camera_id, recording_id, final_file_path)
+                    self.delete_no_motion_recording(camera_id, recording_id, final_file_path)
+                except Exception:
+                    logger.exception(f"Failed emergency writer release for {camera_id}")
+        finally:
+            # Ensure system knows recording is no longer active
+            self.active_recordings.pop(camera_id, None)
+            logger.info(f"{Colors.YELLOW}Recording worker exiting for {camera_id}{Colors.RESET}")
 
     def start_recording(self, camera_id: str) -> Optional[str]:
         db_camera = self.db.get_camera(camera_id)
@@ -574,6 +601,7 @@ class RecordingManager:
         self.clip_vel.pop(camera_id, None)
         self.clip_bg_diff.pop(camera_id, None)
         self.clip_loudness.pop(camera_id, None)
+        self.clip_loudness_frame_count.pop(camera_id, None)
         self.clip_motion_frame.pop(camera_id, None)
 
     def get_recordings(self, camera_id: Optional[str] = None) -> List[Recording]:

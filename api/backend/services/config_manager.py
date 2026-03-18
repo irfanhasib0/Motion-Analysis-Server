@@ -5,21 +5,9 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 
-# ANSI Color codes for log formatting
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    GRAY = '\033[90m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'  # Reset to default
+from services.colors import Colors
 
 logger = logging.getLogger(__name__)
-COLORS = Colors()
 
 
 # System-level metadata keys (not configuration values)
@@ -138,14 +126,14 @@ class ConfigManager:
                 current_preset = sys_meta.get('active_preset', 'default')
                 if current_preset != 'low_power':
                     logger.warning(
-                        f"{COLORS.YELLOW}RAM ({total_memory / (1024**3):.1f} GB) below threshold "
-                        f"({ram_threshold / (1024**3):.1f} GB). Auto-switching to low_power preset.{COLORS.RESET}"
+                        f"{Colors.YELLOW}RAM ({total_memory / (1024**3):.1f} GB) below threshold "
+                        f"({ram_threshold / (1024**3):.1f} GB). Auto-switching to low_power preset.{Colors.RESET}"
                     )
                     sys_meta['active_preset'] = 'low_power'
                     data['system'] = sys_meta
                     self._write_yaml(self.system_path, data)
         except Exception as e:
-            logger.error(f"{COLORS.RED}Failed to auto-detect RAM preset: {e}{COLORS.RESET}")
+            logger.error(f"{Colors.RED}Failed to auto-detect RAM preset: {e}{Colors.RESET}")
 
     def _validate_preset_keys(self, preset_name: str, preset_values: Dict[str, Any]) -> None:
         """Raise an error if any required config key is missing from a preset."""

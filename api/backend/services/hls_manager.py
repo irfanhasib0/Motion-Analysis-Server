@@ -8,8 +8,8 @@ from typing import Any, Callable, List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-class AudioRecordingUtils:
-    """Minimal helper kept for hls_manager.py compatibility."""
+class HLSAudioHelper:
+    """Audio resolution helpers for HLS stream commands."""
 
     @staticmethod
     def _resolve_sample_rate(db_camera: dict) -> int:
@@ -90,6 +90,9 @@ class HLSManager:
         self._pipe_threads: Dict[str, threading.Thread] = {}
         self._pipe_stop_events: Dict[str, threading.Event] = {}
         self._audio_pipes: Dict[str, Any] = {}  # Audio pipes for shared chunks
+        self._last_video_seq: Dict[str, int] = {}
+        self._last_audio_seq: Dict[str, int] = {}
+        self._get_latest_audio_chunk_spmc = None  # Placeholder; set externally if shared audio is available
         
         # Consumer ID for SPMC access
         self._consumer_id_base = "hls_manager"
@@ -143,7 +146,7 @@ class HLSManager:
         if bool(db_camera.get('audio_enabled', False)):
             if use_shared_audio and self._get_latest_audio_chunk_spmc:
                 # Use shared audio chunks from background thread
-                sample_rate = AudioRecordingUtils._resolve_sample_rate(db_camera)
+                sample_rate = HLSAudioHelper._resolve_sample_rate(db_camera)
                 command += [
                     '-f', 's16le',
                     '-ar', str(sample_rate),
@@ -153,7 +156,7 @@ class HLSManager:
                 has_hls_audio = True
             else:
                 # Fallback to separate audio capture
-                audio_input_args = AudioRecordingUtils._resolve_audio_input_args(db_camera)
+                audio_input_args = HLSAudioHelper._resolve_audio_input_args(db_camera)
                 if audio_input_args:
                     command += [
                         '-thread_queue_size', '1024',
@@ -177,7 +180,7 @@ class HLSManager:
         ]
 
         if has_hls_audio:
-            sample_rate = AudioRecordingUtils._resolve_sample_rate(db_camera)
+            sample_rate = HLSAudioHelper._resolve_sample_rate(db_camera)
             command += [
                 '-map', '1:a:0?',
                 '-c:a', 'aac',

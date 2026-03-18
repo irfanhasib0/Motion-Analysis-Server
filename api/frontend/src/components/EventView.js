@@ -19,6 +19,22 @@ import {
 } from './EventViewUtils';
 import './EventView.css';
 
+// Module-level cache: persists for the lifetime of the browser session
+const MOTION_CACHE_MAX = 100;
+const motionDataCache = {};
+const motionCacheKeys = [];
+
+function cacheMotionData(recordingId, data) {
+  if (motionCacheKeys.length >= MOTION_CACHE_MAX && !motionDataCache[recordingId]) {
+    const oldest = motionCacheKeys.shift();
+    delete motionDataCache[oldest];
+  }
+  motionDataCache[recordingId] = data;
+  if (!motionCacheKeys.includes(recordingId)) {
+    motionCacheKeys.push(recordingId);
+  }
+}
+
 /**
  * Simple motion plot component for individual recordings
  * Displays vel, bg_diff, loudness as line chart below progress bar
@@ -28,13 +44,21 @@ const SimpleMotionPlot = ({ recording, MOTION_COLORS }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!recording?.id) return;
+
+    // Use cached data immediately without re-fetching
+    if (motionDataCache[recording.id]) {
+      setMotionData(motionDataCache[recording.id]);
+      setLoading(false);
+      return;
+    }
+
     const loadMotionData = async () => {
-      if (!recording?.id) return;
-      
       try {
         setLoading(true);
         const response = await api.getMotionData(recording.id);
         const data = response.data?.data || [];
+        cacheMotionData(recording.id, data);
         setMotionData(data);
       } catch (err) {
         console.error('Failed to load motion data:', err);
@@ -837,18 +861,21 @@ const EventView = ({ recordings = [], cameras = [] }) => {
     try {
       await api.updateRecordingMeta(recordingId, { label: next || '' });
     } catch (err) {
+      setLabelMap((m) => ({ ...m, [recordingId]: { ...(m[recordingId] || {}), label: current } }));
       toast.error('Failed to save label');
     }
   };
 
   const handleSaveNote = async (recordingId) => {
     const note = noteDraft[recordingId] ?? (labelMap[recordingId]?.note || '');
+    const previousNote = labelMap[recordingId]?.note;
     setLabelMap((m) => ({ ...m, [recordingId]: { ...(m[recordingId] || {}), note } }));
     try {
       await api.updateRecordingMeta(recordingId, { note });
       toast.success('Note saved');
       setNotePanelId(null);
     } catch (err) {
+      setLabelMap((m) => ({ ...m, [recordingId]: { ...(m[recordingId] || {}), note: previousNote } }));
       toast.error('Failed to save note');
     }
   };

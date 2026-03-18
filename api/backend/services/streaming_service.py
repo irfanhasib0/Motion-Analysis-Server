@@ -20,20 +20,9 @@ if PROJECT_SRC_PATH not in sys.path:
     sys.path.append(PROJECT_SRC_PATH)
 
 from audioproc import FrequencyIntensityAnalyzer
+from services.colors import Colors
 
 logger = logging.getLogger(__name__)
-
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    GRAY = '\033[90m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'  # Reset to default
 
 class StreamingService:
     def __init__(self, frame_rbf_len: int = 10, audio_rbf_len: int = 10, results_rbf_len: int = 10):
@@ -492,81 +481,92 @@ class StreamingService:
         
         def _audio_thread():
             """Background thread that continuously captures audio chunks."""
-            
-            # Start audio capture
-            success = self.start_audio(camera_id)
-            if not success:
-                logger.warning(f"{Colors.RED}Failed to start audio for {camera_id}{Colors.RESET}")
-                return
-            
-            cap = self._audio_streams.get(camera_id)
-            if not cap or not cap.is_audio_stream_opened():
-                logger.warning(f"{Colors.RED}Audio capture unavailable for {camera_id}{Colors.RESET}")
-                return
-            
-            analyzer = self._get_audio_chunk_analyzer(camera_id)
-            consecutive_failures = 0
-            max_failures = 10
-            audio_chunk_seq = 0
-            
-            logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
-            while not stop_event.is_set() and cap.is_audio_stream_opened():
-                ret, chunk = cap.read_audio()
-                audio_capture_time = time.time()  # Capture timestamp immediately after audio read
+            cap = None
+            try:
+                # Start audio capture
+                success = self.start_audio(camera_id)
+                if not success:
+                    logger.warning(f"{Colors.RED}Failed to start audio for {camera_id}{Colors.RESET}")
+                    return
                 
-                if not ret or chunk is None or len(chunk) == 0:
-                    consecutive_failures += 1
-                    if consecutive_failures >= max_failures:
-                        logger.warning(f"{Colors.RED}Too many audio failures for {camera_id}, stopping{Colors.RESET}")
-                        break
-                    time.sleep(0.01)
-                    continue
+                cap = self._audio_streams.get(camera_id)
+                if not cap or not cap.is_audio_stream_opened():
+                    logger.warning(f"{Colors.RED}Audio capture unavailable for {camera_id}{Colors.RESET}")
+                    return
                 
+                analyzer = self._get_audio_chunk_analyzer(camera_id)
                 consecutive_failures = 0
-                audio_chunk_seq += 1
+                max_failures = 10
+                audio_chunk_seq = 0
                 
-                # Process audio analysis
-                samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
-                samples /= (32768.0/25.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
-                
-                self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
-                audio_chunk_index = self._audio_chunk_index[camera_id]
-                effective_stride = self.get_camera_effective_stride(camera_id)
-                
-                should_run_analysis = (effective_stride == 1 or audio_chunk_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
-                
-                if should_run_analysis and analyzer is not None:
-                    analysis = analyzer.process_chunk(samples)
-                    self._latest_audio_chunk_analysis[camera_id] = analysis
-                    self._latest_res_audio[camera_id] = {
-                        'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
-                        'freq': float(analysis.get('peak_frequency_mean', 0.0) or 0.0),
-                        'detected_loudness': float(analysis.get('overall_intensity', 0.0) or 0.0) > 0.0  # Threshold set to 0.0 for now
-                    }
+                logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
+                while not stop_event.is_set() and cap.is_audio_stream_opened():
+                    ret, chunk = cap.read_audio()
+                    audio_capture_time = time.time()  # Capture timestamp immediately after audio read
                     
-                    # Update current audio results and publish only audio to ring buffer with capture timestamp
-                    if camera_id in self._results_ring_buffers:
-                        self._results_ring_buffers[camera_id].put_audio_only_with_timestamp(self._latest_res_audio[camera_id], audio_capture_time)
-                
-                _ = self._update_loop_fps(f"{camera_id}:audio")
-
-                # Store latest chunk with sequence number (thread-safe)
-                with audio_lock:
-                    self._latest_audio_chunk[camera_id] = chunk
-                    self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
+                    if not ret or chunk is None or len(chunk) == 0:
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_failures:
+                            logger.warning(f"{Colors.RED}Too many audio failures for {camera_id}, stopping{Colors.RESET}")
+                            break
+                        time.sleep(0.01)
+                        continue
                     
-                    # Publish to ring buffer for SPMC consumers with capture timestamp
-                    if camera_id in self._audio_ring_buffers:
-                        self._audio_ring_buffers[camera_id].put_with_timestamp(chunk, audio_capture_time)
+                    consecutive_failures = 0
+                    audio_chunk_seq += 1
+                    
+                    # Process audio analysis
+                    samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
+                    samples /= (32768.0/25.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
+                    
+                    self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
+                    audio_chunk_index = self._audio_chunk_index[camera_id]
+                    effective_stride = self.get_camera_effective_stride(camera_id)
+                    
+                    should_run_analysis = (effective_stride == 1 or audio_chunk_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
+                    
+                    if should_run_analysis and analyzer is not None:
+                        analysis = analyzer.process_chunk(samples)
+                        self._latest_audio_chunk_analysis[camera_id] = analysis
+                        self._latest_res_audio[camera_id] = {
+                            'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
+                            'freq': float(analysis.get('peak_frequency_mean', 0.0) or 0.0),
+                            'detected_loudness': float(analysis.get('overall_intensity', 0.0) or 0.0) > 0.0  # Threshold set to 0.0 for now
+                        }
                         
+                        # Update current audio results and publish only audio to ring buffer with capture timestamp
+                        if camera_id in self._results_ring_buffers:
+                            self._results_ring_buffers[camera_id].put_audio_only_with_timestamp(self._latest_res_audio[camera_id], audio_capture_time)
+                    
+                    _ = self._update_loop_fps(f"{camera_id}:audio")
 
-                if self._latest_res_video.get('det_ts', None) and (time.time() - self.latest_res_video['det_ts']) > self.no_motion_slow_down_thr_sec:
-                    time.sleep(self.no_motion_slow_down_delay_sec)
+                    # Store latest chunk with sequence number (thread-safe)
+                    with audio_lock:
+                        self._latest_audio_chunk[camera_id] = chunk
+                        self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
+                        
+                        # Publish to ring buffer for SPMC consumers with capture timestamp
+                        if camera_id in self._audio_ring_buffers:
+                            self._audio_ring_buffers[camera_id].put_with_timestamp(chunk, audio_capture_time)
+                            
 
-            logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
-            # Cleanup
-            cap.release_audio()
-            self._audio_streams.pop(camera_id, None)
+                    camera_res = self._latest_res_video.get(camera_id, {})
+                    det_ts = camera_res.get('det_ts')
+                    if det_ts and (time.time() - det_ts) > self.no_motion_slow_down_thr_sec:
+                        time.sleep(self.no_motion_slow_down_delay_sec)
+
+                logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
+            except Exception:
+                logger.exception(f"{Colors.RED}💀 Audio thread crashed for {camera_id}{Colors.RESET}")
+            finally:
+                # Cleanup audio resources regardless of how we exit
+                if cap is not None:
+                    try:
+                        cap.release_audio()
+                    except Exception:
+                        pass
+                self._audio_streams.pop(camera_id, None)
+                logger.info(f"{Colors.YELLOW}Audio thread exiting for {camera_id}{Colors.RESET}")
         
         # Start thread
         thread = threading.Thread(target=_audio_thread, daemon=True, name=f'audio-bg-{camera_id}')
@@ -715,90 +715,91 @@ class StreamingService:
         
         def _video_thread():
             """Background thread that continuously captures and processes video frames."""
-            logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
-            
-            consecutive_failures = 0
-            max_failures = 10
-            frame_index = 0
-            
-            while not stop_event.is_set() and cap.is_video_stream_opened():
-                with stream_lock:
-                    ret, frame = cap.read_video()
-                    frame_capture_time = time.time()  # Capture timestamp immediately after frame read
-                    
-                    if not ret:
-                        consecutive_failures += 1
-                        if consecutive_failures >= max_failures:
-                            logger.warning(f"{Colors.RED}Too many video failures for {camera_id}, stopping{Colors.RESET}")
-                            break
-                        else:
-                            time.sleep(0.1)
-                            continue
-                    
-                    consecutive_failures = 0
-                    
-                    # Store original frame for recording consumers
-                    self._latest_frames[camera_id] = frame
-                    self._latest_frame_seq[camera_id] = (self._latest_frame_seq.get(camera_id, 0) + 1) % self.max_sequence_number
-                    frame_index += 1
-                    
-                    # Publish to ring buffer for SPMC consumers with capture timestamp
-                    if camera_id in self._frame_ring_buffers:
-                        self._frame_ring_buffers[camera_id].put_with_timestamp(frame, frame_capture_time)
+            try:
+                logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
                 
-                # Resize frame for streaming performance
-                stream_frame = self._resize_frame_for_streaming(frame)
-                effective_stride = self.get_camera_effective_stride(camera_id)
+                consecutive_failures = 0
+                max_failures = 10
+                frame_index = 0
                 
-                # Determine if we should run motion tracking on this frame
-                should_run_tracker = (effective_stride == 1 or frame_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
-                
-                if should_run_tracker:
-                    detect_output = tracker.detect(stream_frame, return_pts=True)
-                    stream_frame, points_dict, flow_pts = self._extract_detect_payload(detect_output, stream_frame)
-                    viz_frame, _res = self._draw_motion_analysis_chart(stream_frame, points_dict, camera_id)
-                    res = self._aggregate_motion_result(_res)
-                    
+                while not stop_event.is_set() and cap.is_video_stream_opened():
                     with stream_lock:
-                        self._latest_viz[camera_id] = viz_frame
-                        self._latest_res_video[camera_id] = res
+                        ret, frame = cap.read_video()
+                        frame_capture_time = time.time()  # Capture timestamp immediately after frame read
                         
-                        # Publish viz frame to ring buffer for SPMC consumers with capture timestamp
-                        if camera_id in self._viz_ring_buffers:
-                            self._viz_ring_buffers[camera_id].put_with_timestamp(viz_frame, frame_capture_time)
+                        if not ret:
+                            consecutive_failures += 1
+                            if consecutive_failures >= max_failures:
+                                logger.warning(f"{Colors.RED}Too many video failures for {camera_id}, stopping{Colors.RESET}")
+                                break
+                            else:
+                                time.sleep(0.1)
+                                continue
                         
-                        # Update current video results and publish only video to ring buffer with capture timestamp
-                        if camera_id in self._results_ring_buffers:
-                            self._results_ring_buffers[camera_id].put_video_only_with_timestamp(res, frame_capture_time)
-                        self._latest_pts_payload[camera_id] = flow_pts
+                        consecutive_failures = 0
                         
-                else:
-                    with stream_lock:
-                        viz_frame = self._latest_viz.get(camera_id)
-                        res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time(), 'detected_vel': False, 'detection_bg_diff': False})
-                        if viz_frame is None:
-                            viz_frame = stream_frame
+                        # Store original frame for recording consumers
+                        self._latest_frames[camera_id] = frame
+                        self._latest_frame_seq[camera_id] = (self._latest_frame_seq.get(camera_id, 0) + 1) % self.max_sequence_number
+                        frame_index += 1
+                        
+                        # Publish to ring buffer for SPMC consumers with capture timestamp
+                        if camera_id in self._frame_ring_buffers:
+                            self._frame_ring_buffers[camera_id].put_with_timestamp(frame, frame_capture_time)
+                    
+                    # Resize frame for streaming performance
+                    stream_frame = self._resize_frame_for_streaming(frame)
+                    effective_stride = self.get_camera_effective_stride(camera_id)
+                    
+                    # Determine if we should run motion tracking on this frame
+                    should_run_tracker = (effective_stride == 1 or frame_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
+                    
+                    if should_run_tracker:
+                        detect_output = tracker.detect(stream_frame, return_pts=True)
+                        stream_frame, points_dict, flow_pts = self._extract_detect_payload(detect_output, stream_frame)
+                        viz_frame, _res = self._draw_motion_analysis_chart(stream_frame, points_dict, camera_id)
+                        res = self._aggregate_motion_result(_res)
+                        
+                        with stream_lock:
                             self._latest_viz[camera_id] = viz_frame
-                        flow_pts = self._latest_pts_payload.get(camera_id)
-                        
-                _det_ts = res.get('det_ts')
-                if _det_ts and (time.time() - _det_ts) > self.no_motion_slow_down_thr_sec:
-                    time.sleep(self.no_motion_slow_down_delay_sec)
-                # Primary video stream: clean frame with FPS and optical flow overlays
-                frame_fps = self._update_loop_fps(f"{camera_id}:primary")
-                primary_frame = self._drawing.draw_fps_overlay(stream_frame.copy(), frame_fps)
-                primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
-                # Use capture timestamp for overlay frames to maintain chronological order
-                self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(primary_frame, frame_capture_time)
-                # Convert to bytes and store (thread-safe)
-                frame_bytes = self.frame_to_bytes(primary_frame)
-                with video_lock:
-                    self._latest_video_frame[camera_id] = frame_bytes
+                            self._latest_res_video[camera_id] = res
+                            
+                            # Publish viz frame to ring buffer for SPMC consumers with capture timestamp
+                            if camera_id in self._viz_ring_buffers:
+                                self._viz_ring_buffers[camera_id].put_with_timestamp(viz_frame, frame_capture_time)
+                            
+                            # Update current video results and publish only video to ring buffer with capture timestamp
+                            if camera_id in self._results_ring_buffers:
+                                self._results_ring_buffers[camera_id].put_video_only_with_timestamp(res, frame_capture_time)
+                            self._latest_pts_payload[camera_id] = flow_pts
+                            
+                    else:
+                        with stream_lock:
+                            viz_frame = self._latest_viz.get(camera_id)
+                            res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time(), 'detected_vel': False, 'detection_bg_diff': False})
+                            if viz_frame is None:
+                                viz_frame = stream_frame
+                                self._latest_viz[camera_id] = viz_frame
+                            flow_pts = self._latest_pts_payload.get(camera_id)
+                            
+                    _det_ts = res.get('det_ts')
+                    if _det_ts and (time.time() - _det_ts) > self.no_motion_slow_down_thr_sec:
+                        time.sleep(self.no_motion_slow_down_delay_sec)
+                    # Primary video stream: clean frame with FPS and optical flow overlays
+                    frame_fps = self._update_loop_fps(f"{camera_id}:primary")
+                    primary_frame = self._drawing.draw_fps_overlay(stream_frame.copy(), frame_fps)
+                    primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
+                    # Use capture timestamp for overlay frames to maintain chronological order
+                    self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(primary_frame, frame_capture_time)
+                    # Convert to bytes and store (thread-safe)
+                    frame_bytes = self.frame_to_bytes(primary_frame)
+                    with video_lock:
+                        self._latest_video_frame[camera_id] = frame_bytes
+            except Exception:
+                logger.exception(f"{Colors.RED}💀 Video thread crashed for {camera_id}{Colors.RESET}")
+            finally:
+                logger.info(f"{Colors.YELLOW}Video thread exiting for {camera_id}{Colors.RESET}")
                     
-                    # Log every 30 frames for debugging
-                    if frame_index % 30 == 0:
-                        logger.debug(f"Video {camera_id} frame {frame_index}, bytes: {len(frame_bytes)}")
-        
         # Start thread
         thread = threading.Thread(target=_video_thread, daemon=True, name=f'video-bg-{camera_id}')
         thread.start()

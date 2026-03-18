@@ -248,33 +248,39 @@ const CameraList = ({ cameras, setCameras }) => {
     };
   }, [cameras]);
 
-  // Stream health monitoring
+  // Stream health monitoring with backoff on failure
   useEffect(() => {
     let cancelled = false;
-    let monitorInterval = null;
+    let timeoutId = null;
+    let consecutiveFailures = 0;
+    const BASE_INTERVAL = 30000;
+    const MAX_INTERVAL = 120000;
+
+    const scheduleNext = () => {
+      const delay = Math.min(BASE_INTERVAL * Math.pow(2, consecutiveFailures), MAX_INTERVAL);
+      timeoutId = setTimeout(checkStreamHealth, delay);
+    };
 
     const checkStreamHealth = async () => {
       try {
         const response = await api.getAllCamerasStreamHealth();
         if (!cancelled) {
           setStreamHealth(response.data.cameras || {});
+          consecutiveFailures = 0;
         }
       } catch (error) {
         console.warn('Failed to check stream health:', error);
+        if (!cancelled) consecutiveFailures++;
       }
+      if (!cancelled) scheduleNext();
     };
 
     // Initial health check
     checkStreamHealth();
 
-    // Set up periodic monitoring every 30 seconds  
-    monitorInterval = setInterval(checkStreamHealth, 30000);
-
     return () => {
       cancelled = true;
-      if (monitorInterval) {
-        clearInterval(monitorInterval);
-      }
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, []);
 

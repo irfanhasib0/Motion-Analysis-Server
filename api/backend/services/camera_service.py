@@ -15,6 +15,7 @@ from services.config_manager import ConfigManager
 from services.streaming_service import StreamingService
 from services.recording_manager import RecordingManager
 from services.audio_recording_utils import AudioRecordingUtils
+from services.colors import Colors
 
 import sys
 sys.path.append('../../src')
@@ -22,18 +23,6 @@ from improc.optical_flow import OpticalFlowTracker
 from audioproc import FrequencyIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
-
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    GRAY = '\033[90m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'  # Reset to default
 
 class Capture:
     def __init__(
@@ -59,6 +48,7 @@ class Capture:
         self.fps = fps
         self.cap = None
         self._consecutive_read_failures = 0
+        self._consecutive_audio_read_failures = 0
         self._max_video_read_failures_before_reconnect = 30
         self._max_audio_read_failures_before_reconnect = 30
         self._reconnect_cooldown_sec = 2.0
@@ -83,7 +73,7 @@ class Capture:
 
         try:
             source = int(source)
-        except:
+        except (TypeError, ValueError):
             source = str(source)
 
         if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
@@ -165,13 +155,18 @@ class Capture:
         ]
 
         pipe_buffer_size = self._resolve_pipe_buffer_size()
-        self.cap = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=pipe_buffer_size,
-            pass_fds=(write_fd,),
-        )
+        try:
+            self.cap = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=pipe_buffer_size,
+                pass_fds=(write_fd,),
+            )
+        except Exception:
+            logger.exception(f"Failed to start unified RTSP demux for {self.source}")
+            self._close_unified_audio_pipe()
+            return False
 
         os.close(write_fd)
         
@@ -460,12 +455,12 @@ class Capture:
             read_success = False
 
         if read_success:
-            self.consecutive_audio_read_failures = 0
+            self._consecutive_audio_read_failures = 0
             return True, chunk
         else:
-            self.consecutive_audio_read_failures += 1
-            if self.consecutive_audio_read_failures >= self._max_audio_read_failures_before_reconnect:
-                self.consecutive_audio_read_failures = 0
+            self._consecutive_audio_read_failures += 1
+            if self._consecutive_audio_read_failures >= self._max_audio_read_failures_before_reconnect:
+                self._consecutive_audio_read_failures = 0
                 self.reconnect_audio_stream()
         return False, b'a'
 
@@ -483,6 +478,7 @@ class Capture:
             except Exception:
                 try:
                     self.cap.kill()
+                    self.cap.wait(timeout=2.0)
                 except Exception:
                     pass
             self.cap = None
@@ -508,6 +504,7 @@ class Capture:
             except Exception:
                 try:
                     self.audio_cap.kill()
+                    self.audio_cap.wait(timeout=2.0)
                 except Exception:
                     pass
             self.audio_cap = None
@@ -763,32 +760,31 @@ class CameraService(StreamingService):
     def _load_existing_recordings(self):
         self.recording_manager.load_existing_recordings()
 
+    @staticmethod
+    def _db_to_camera(db_camera: dict) -> Camera:
+        """Convert a database/config camera dict to a Camera model."""
+        return Camera(
+            id=db_camera['id'],
+            name=db_camera['name'],
+            source=db_camera['source'],
+            camera_type=CameraType(db_camera.get('camera_type', 'webcam')),
+            fps=db_camera['fps'],
+            resolution=db_camera['resolution'],
+            status=CameraStatus(db_camera['status']),
+            created_at=datetime.fromisoformat(db_camera['created_at']),
+            processing_active=db_camera.get('processing_active', False),
+            processing_type=db_camera.get('processing_type'),
+            audio_enabled=bool(db_camera.get('audio_enabled', False)),
+            audio_source=db_camera.get('audio_source'),
+            audio_input_format=db_camera.get('audio_input_format'),
+            audio_sample_rate=int(db_camera.get('audio_sample_rate', 16000) or 16000),
+            audio_chunk_size=int(db_camera.get('audio_chunk_size', 512) or 512),
+        )
+
     def get_cameras(self) -> List[Camera]:
         """Get all cameras"""
         db_cameras = self.db.get_all_cameras()
-        cameras = []
-        
-        for db_camera in db_cameras:
-            camera = Camera(
-                id=db_camera['id'],
-                name=db_camera['name'],
-                source=db_camera['source'],
-                camera_type=CameraType(db_camera.get('camera_type', 'webcam')),
-                fps=db_camera['fps'],
-                resolution=db_camera['resolution'],
-                status=CameraStatus(db_camera['status']),
-                created_at=datetime.fromisoformat(db_camera['created_at']),
-                processing_active=db_camera['processing_active'],
-                processing_type=db_camera.get('processing_type'),
-                audio_enabled=bool(db_camera.get('audio_enabled', False)),
-                audio_source=db_camera.get('audio_source'),
-                audio_input_format=db_camera.get('audio_input_format'),
-                audio_sample_rate=int(db_camera.get('audio_sample_rate', 16000) or 16000),
-                audio_chunk_size=int(db_camera.get('audio_chunk_size', 512) or 512),
-            )
-            cameras.append(camera)
-        
-        return cameras
+        return [self._db_to_camera(db_cam) for db_cam in db_cameras]
 
     def add_camera(self, camera_data: CameraCreate) -> Camera:
         """Add a new camera"""
@@ -813,21 +809,7 @@ class CameraService(StreamingService):
         db_camera = self.db.create_camera(camera_dict)
         
         # Convert to Camera model
-        camera = Camera(
-            id=db_camera['id'],
-            name=db_camera['name'],
-            source=db_camera['source'],
-            camera_type=camera_data.camera_type,
-            fps=db_camera['fps'],
-            resolution=db_camera['resolution'],
-            status=CameraStatus(db_camera['status']),
-            created_at=datetime.fromisoformat(db_camera['created_at']),
-            audio_enabled=bool(db_camera.get('audio_enabled', False)),
-            audio_source=db_camera.get('audio_source'),
-            audio_input_format=db_camera.get('audio_input_format'),
-            audio_sample_rate=int(db_camera.get('audio_sample_rate', 16000) or 16000),
-            audio_chunk_size=int(db_camera.get('audio_chunk_size', 512) or 512),
-        )
+        camera = self._db_to_camera(db_camera)
         
         logger.info(f"Added camera: {camera.name} ({camera_id})")
         return camera
@@ -838,23 +820,7 @@ class CameraService(StreamingService):
         if not db_camera:
             return None
             
-        return Camera(
-            id=db_camera['id'],
-            name=db_camera['name'],
-            source=db_camera['source'],
-            camera_type=CameraType(db_camera.get('camera_type', 'webcam')),
-            fps=db_camera['fps'],
-            resolution=db_camera['resolution'],
-            status=CameraStatus(db_camera['status']),
-            created_at=datetime.fromisoformat(db_camera['created_at']),
-            processing_active=db_camera['processing_active'],
-            processing_type=db_camera.get('processing_type'),
-            audio_enabled=bool(db_camera.get('audio_enabled', False)),
-            audio_source=db_camera.get('audio_source'),
-            audio_input_format=db_camera.get('audio_input_format'),
-            audio_sample_rate=int(db_camera.get('audio_sample_rate', 16000) or 16000),
-            audio_chunk_size=int(db_camera.get('audio_chunk_size', 512) or 512),
-        )
+        return self._db_to_camera(db_camera)
 
     def update_camera(self, camera_id: str, camera_update: CameraUpdate) -> Camera:
         """Update camera settings"""
@@ -896,24 +862,7 @@ class CameraService(StreamingService):
         if update_dict:
             updated_camera = self.db.update_camera(camera_id, update_dict)
             if updated_camera:
-                camera = Camera(
-                    id=updated_camera['id'],
-                    name=updated_camera['name'],
-                    source=updated_camera['source'],
-                    camera_type=CameraType(updated_camera.get('camera_type', 'webcam')),
-                    fps=updated_camera['fps'],
-                    resolution=updated_camera['resolution'],
-                    status=CameraStatus(updated_camera['status']),
-                    created_at=datetime.fromisoformat(updated_camera['created_at']),
-                    processing_active=updated_camera['processing_active'],
-                    processing_type=updated_camera.get('processing_type'),
-                    processing_params=updated_camera.get('processing_params', {}),
-                    audio_enabled=bool(updated_camera.get('audio_enabled', False)),
-                    audio_source=updated_camera.get('audio_source'),
-                    audio_input_format=updated_camera.get('audio_input_format'),
-                    audio_sample_rate=int(updated_camera.get('audio_sample_rate', 16000) or 16000),
-                    audio_chunk_size=int(updated_camera.get('audio_chunk_size', 512) or 512),
-                )
+                camera = self._db_to_camera(updated_camera)
                 
                 logger.info(f"Updated camera: {camera.name} ({camera_id})")
                 return camera
@@ -938,7 +887,7 @@ class CameraService(StreamingService):
         
         try:
             source = int(source)
-        except:
+        except (TypeError, ValueError):
             source = str(source)
         
         resolution = [int(res) for res in db_camera['resolution'].split('x')]

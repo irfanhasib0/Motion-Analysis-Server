@@ -36,6 +36,7 @@ class StreamHealthMonitor:
         self._last_check = now
         
         try:
+            self._check_thread_health()
             for camera_id in list(self.camera_service._camera_streams.keys()):
                 self._check_camera_health(camera_id)
         except Exception as e:
@@ -219,6 +220,51 @@ class StreamHealthMonitor:
         # Could extend this to send alerts via webhook, email, etc.
         # For now, just log the frozen stream detection
             
+    def _check_thread_health(self):
+        """Check if background threads are alive and log alongside lag status."""
+        thread_status = {}
+        
+        for camera_id in list(self.camera_service._camera_streams.keys()):
+            video_thread = self.camera_service._video_background_threads.get(camera_id)
+            audio_thread = self.camera_service._audio_background_threads.get(camera_id)
+            rec_info = self.camera_service.recording_manager.active_recordings.get(camera_id)
+            rec_thread = rec_info.get('thread') if rec_info else None
+            
+            video_alive = video_thread.is_alive() if video_thread else None
+            audio_alive = audio_thread.is_alive() if audio_thread else None
+            rec_alive = rec_thread.is_alive() if rec_thread else None
+            
+            thread_status[camera_id] = {
+                'video': video_alive,
+                'audio': audio_alive,
+                'recording': rec_alive,
+            }
+            
+            # Warn on dead threads that should be alive
+            dead = []
+            if video_thread and not video_alive:
+                dead.append('video')
+            if audio_thread and not audio_alive:
+                dead.append('audio')
+            if rec_thread and not rec_alive:
+                dead.append('recording')
+            
+            status_parts = []
+            if video_thread is not None:
+                status_parts.append(f"video={'✅' if video_alive else '💀'}")
+            if audio_thread is not None:
+                status_parts.append(f"audio={'✅' if audio_alive else '💀'}")
+            if rec_thread is not None:
+                status_parts.append(f"rec={'✅' if rec_alive else '💀'}")
+            
+            if status_parts:
+                logger.info(f"🧵 Thread status for {camera_id}: {', '.join(status_parts)}")
+            
+            if dead:
+                logger.error(f"💀 Dead threads detected for {camera_id}: {', '.join(dead)} — recovery needed")
+        
+        return thread_status
+
     def get_health_status(self, camera_id: str) -> Dict:
         """Get current health status for a camera."""
         current_lag = self._get_current_lag_stats(camera_id)
@@ -283,9 +329,12 @@ class DashboardService:
 
     def _sample_loop(self):
         while True:
-            self._collect_sample()
-            self._check_ram_threshold()
-            self.stream_monitor.monitor_streams()  # Add stream health monitoring
+            try:
+                self._collect_sample()
+                self._check_ram_threshold()
+                self.stream_monitor.monitor_streams()  # Add stream health monitoring
+            except Exception:
+                logger.exception("💀 _sample_loop iteration failed — monitoring continues")
             time.sleep(self.sample_interval_seconds)
 
     def _collect_sample(self):
@@ -477,12 +526,7 @@ class DashboardService:
             if available_ram < ram_threshold and current_preset != 'low_power':
                 logger.info(f"RAM below threshold ({available_ram / (1024**3):.2f}GB < {ram_threshold / (1024**3):.2f}GB), switching to low_power preset")
                 try:
-                    self.camera_service.db.apply_preset('low_power')
-                    # Apply the preset to runtime settings
-                    presets = self.camera_service.db.get_presets()
-                    if 'low_power' in presets:
-                        preset_settings = presets['low_power']
-                        self.camera_service.update_runtime_settings(**preset_settings)
+                    self.camera_service.apply_preset('low_power')
                 except Exception as e:
                     logger.error(f"Failed to switch to low_power preset: {e}")
                     
@@ -490,12 +534,7 @@ class DashboardService:
                 # Add 20% hysteresis to prevent oscillation
                 logger.info(f"RAM above threshold with hysteresis ({available_ram / (1024**3):.2f}GB >= {ram_threshold * 1.2 / (1024**3):.2f}GB), switching to default preset")
                 try:
-                    self.camera_service.db.apply_preset('default')
-                    # Apply the preset to runtime settings
-                    presets = self.camera_service.db.get_presets()
-                    if 'default' in presets:
-                        preset_settings = presets['default']
-                        self.camera_service.update_runtime_settings(**preset_settings)
+                    self.camera_service.apply_preset('default')
                 except Exception as e:
                     logger.error(f"Failed to switch to default preset: {e}")
                     

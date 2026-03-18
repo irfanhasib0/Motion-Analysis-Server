@@ -131,4 +131,6 @@ else
 fi
 
 echo "Done. Backend logs: $LOG_FILE"
-tail -f "$LOG_FILE"
+#tail -f "$LOG_FILE"
+echo "To view logs: tail -f $LOG_FILE"
+echo "To stop backend: pkill -f $START_SCRIPT_NAME"

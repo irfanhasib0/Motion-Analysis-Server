@@ -234,7 +234,7 @@ class AudioRecordingUtils:
                     logger.warning(f"Audio file is empty, removing: {audio_file_path}")
                     try:
                         os.remove(audio_file_path)
-                    except:
+                    except OSError:
                         pass
                         
             return None
@@ -311,7 +311,7 @@ class AudioRecordingUtils:
                 # Clean up original video file
                 try:
                     os.remove(video_file_path)
-                except:
+                except OSError:
                     logger.warning(f"Could not remove original video file: {video_file_path}")
                     
                 return output_file_path

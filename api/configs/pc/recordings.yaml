@@ -1,145 +1,5 @@
 cameras:
-  cam-2_webcam_1770921408:
-    '2026-02-23':
-    - id: cam-2_webcam_1770921408_1771880428
-      camera_id: cam-2_webcam_1770921408
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880428.mp4
-      start_time: '2026-02-23T21:00:28.210687'
-      status: completed
-      end_time: null
-      duration: null
-      file_size: null
-      created_at: '2026-02-23T21:00:28.210715'
-    - id: cam-2_webcam_1770921408_1771880688
-      camera_id: cam-2_webcam_1770921408
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880688.mp4
-      start_time: '2026-02-23T21:04:48.826993'
-      status: completed
-      end_time: null
-      duration: null
-      file_size: null
-      created_at: '2026-02-23T21:04:48.827051'
-    - id: cam-2_webcam_1770921408_1771880889
-      camera_id: cam-2_webcam_1770921408
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771880889.mp4
-      start_time: '2026-02-23T21:08:09.151040'
-      status: completed
-      end_time: null
-      duration: null
-      file_size: null
-      created_at: '2026-02-23T21:08:09.151055'
-    - id: cam-2_webcam_1770921408_1771883913
-      camera_id: cam-2_webcam_1770921408
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771883913.mp4
-      start_time: '2026-02-23T21:58:33.978935'
-      status: completed
-      end_time: null
-      duration: null
-      file_size: null
-      created_at: '2026-02-23T21:58:33.979004'
-    - id: cam-2_webcam_1770921408_1771887253
-      camera_id: cam-2_webcam_1770921408
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-2_webcam_1770921408/cam-2_webcam_1770921408_1771887253.mp4
-      start_time: '2026-02-23T22:54:13.311325'
-      status: completed
-      end_time: '2026-02-23T22:54:23.825609'
-      duration: 0
-      file_size: 1135059
-      created_at: '2026-02-23T22:54:13.311355'
   cam3_webcam_1771887423:
-    '2026-02-23':
-    - id: cam3_webcam_1771887423_1771887550
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1771887550.mp4
-      start_time: '2026-02-23T22:59:10.773590'
-      status: completed
-      end_time: '2026-02-23T22:59:21.381782'
-      duration: 60
-      file_size: 6030196
-      created_at: '2026-02-23T22:59:10.773644'
-    '2026-02-24':
-    - id: cam3_webcam_1771887423_1771891314
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1771891314.mp4
-      start_time: '2026-02-24T00:01:54.175121'
-      status: completed
-      end_time: '2026-02-24T00:02:06.002760'
-      duration: 0
-      file_size: 1314335
-      created_at: '2026-02-24T00:01:54.175158'
-      metadata:
-        motion_detected: true
-        vel: 236
-        diff: 0
-    - id: cam3_webcam_1771887423_1771892596
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1771892596.mp4
-      start_time: '2026-02-24T00:23:16.114690'
-      status: completed
-      end_time: '2026-02-24T00:23:36.157265'
-      duration: 20
-      file_size: 1703869
-      created_at: '2026-02-24T00:23:16.114719'
-      metadata:
-        motion_detected: true
-        vel: 7.59
-        diff: 254
-    '2026-03-02':
-    - id: cam3_webcam_1771887423_1772425902
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772425902.mp4
-      start_time: '2026-03-02T04:31:42.146486'
-      status: completed
-      end_time: '2026-03-02T04:32:12.155174'
-      duration: 30
-      file_size: 2729106
-      created_at: '2026-03-02T04:31:42.146519'
-      metadata:
-        motion_detected: true
-        vel: 0.62
-        diff: 207
-    - id: cam3_webcam_1771887423_1772426022
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772426022.mp4
-      start_time: '2026-03-02T04:33:42.339186'
-      status: completed
-      end_time: '2026-03-02T04:34:02.320753'
-      duration: 20
-      file_size: 1853202
-      created_at: '2026-03-02T04:33:42.339209'
-      metadata:
-        motion_detected: true
-        vel: 0.79
-        diff: 235
-    - id: cam3_webcam_1771887423_1772427047
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1772427047.mp4
-      start_time: '2026-03-02T04:50:47.554601'
-      status: completed
-      end_time: '2026-03-02T04:51:05.064807'
-      duration: 17
-      file_size: 1592900
-      created_at: '2026-03-02T04:50:47.554635'
-      metadata:
-        motion_detected: true
-        vel: 0.72
-        diff: 152
-    '2026-03-11':
-    - id: cam3_webcam_1771887423_1773267815
-      camera_id: cam3_webcam_1771887423
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773267815.mp4
-      start_time: '2026-03-11T22:23:35.483825'
-      status: completed
-      end_time: '2026-03-11T22:24:05.667751'
-      duration: 30
-      file_size: 1396616
-      created_at: '2026-03-11T22:23:35.483856'
-      metadata:
-        motion_detected: true
-        vel: 1.17
-        diff: 0
-        loudness: 9.999999747378752e-05
-        audio_recorded: true
     '2026-03-12':
     - id: cam3_webcam_1771887423_1773317525
       camera_id: cam3_webcam_1771887423
@@ -6056,176 +5916,382 @@ cameras:
         diff: 183
         loudness: 0.49570196866989136
         audio_recorded: true
-  cam-1_rtsp_1770917682:
-    '2026-02-24':
-    - id: cam-1_rtsp_1770917682_1771914099
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771914099.mp4
-      start_time: '2026-02-24T06:21:39.874981'
+    '2026-03-17':
+    - id: cam3_webcam_1771887423_1773754869
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773754869.mp4
+      start_time: '2026-03-17T13:41:09.968051'
+      status: recording
+      end_time: null
+      duration: null
+      file_size: null
+      created_at: '2026-03-17T13:41:09.968285'
+    - id: cam3_webcam_1771887423_1773755125
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773755125.mp4
+      start_time: '2026-03-17T13:45:25.296946'
       status: completed
-      end_time: '2026-02-24T06:21:59.855910'
-      duration: 20
-      file_size: 12373584
-      created_at: '2026-02-24T06:21:39.875006'
+      end_time: '2026-03-17T13:45:44.693574'
+      duration: 19
+      file_size: 5974590
+      created_at: '2026-03-17T13:45:25.297158'
       metadata:
         motion_detected: true
-        vel: 2.02
-        diff: 187
-    - id: cam-1_rtsp_1770917682_1771915703
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771915703.mp4
-      start_time: '2026-02-24T06:48:23.223633'
+        vel: 1.7249999999999999
+        diff: 202
+        loudness: 0.0019309063209220767
+        activity_percentage: 0.0975609756097561
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773755428
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773755428.mp4
+      start_time: '2026-03-17T13:50:28.618723'
       status: completed
-      end_time: '2026-02-24T06:49:03.259312'
+      end_time: '2026-03-17T13:50:48.018378'
+      duration: 19
+      file_size: 5573876
+      created_at: '2026-03-17T13:50:28.618904'
+      metadata:
+        motion_detected: true
+        vel: 1.562
+        diff: 194
+        loudness: 0.32629942893981934
+        activity_percentage: 0.02824858757062147
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773759888
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773759888.mp4
+      start_time: '2026-03-17T15:04:48.313216'
+      status: completed
+      end_time: '2026-03-17T15:05:28.233253'
+      duration: 39
+      file_size: 14740028
+      created_at: '2026-03-17T15:04:48.313381'
+      metadata:
+        motion_detected: true
+        vel: 1.56
+        diff: 186
+        loudness: 0.0
+        activity_percentage: 1.02
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773763519
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773763519.mp4
+      start_time: '2026-03-17T16:05:19.097944'
+      status: completed
+      end_time: '2026-03-17T16:05:49.618236'
+      duration: 30
+      file_size: 11209505
+      created_at: '2026-03-17T16:05:19.098145'
+      metadata:
+        motion_detected: true
+        vel: 1.86
+        diff: 206
+        loudness: 0.01
+        activity_percentage: 0.15
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773763988
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773763988.mp4
+      start_time: '2026-03-17T16:13:08.922021'
+      status: completed
+      end_time: '2026-03-17T16:13:48.761204'
       duration: 40
-      file_size: 27456270
-      created_at: '2026-02-24T06:48:23.223653'
+      file_size: 13007921
+      created_at: '2026-03-17T16:13:08.922111'
       metadata:
         motion_detected: true
-        vel: 5.12
-        diff: 248
-    - id: cam-1_rtsp_1770917682_1771915973
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771915973.mp4
-      start_time: '2026-02-24T06:52:53.582893'
+        vel: 3.24
+        diff: 194
+        loudness: 0.0
+        activity_percentage: 0.36
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773764029
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773764029.mp4
+      start_time: '2026-03-17T16:13:49.343703'
       status: completed
-      end_time: '2026-02-24T06:53:13.603748'
-      duration: 20
-      file_size: 11377646
-      created_at: '2026-02-24T06:52:53.582912'
+      end_time: '2026-03-17T16:14:28.918110'
+      duration: 39
+      file_size: 13347511
+      created_at: '2026-03-17T16:13:49.343852'
       metadata:
         motion_detected: true
-        vel: 1.09
-        diff: 165
-    - id: cam-1_rtsp_1770917682_1771916013
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771916013.mp4
-      start_time: '2026-02-24T06:53:33.633136'
+        vel: 2.78
+        diff: 180
+        loudness: 0.17
+        activity_percentage: 1.03
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773764239
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773764239.mp4
+      start_time: '2026-03-17T16:17:19.968764'
       status: completed
-      end_time: '2026-02-24T06:53:53.686479'
-      duration: 20
-      file_size: 10013775
-      created_at: '2026-02-24T06:53:33.633156'
-      metadata:
-        motion_detected: true
-        vel: 0.08
-        diff: 254
-    - id: cam-1_rtsp_1770917682_1771940294
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940294.mp4
-      start_time: '2026-02-24T13:38:14.710169'
-      status: completed
-      end_time: '2026-02-24T13:38:34.690907'
-      duration: 20
-      file_size: 10417113
-      created_at: '2026-02-24T13:38:14.710279'
-      metadata:
-        motion_detected: true
-        vel: 0.26
-        diff: 185
-    - id: cam-1_rtsp_1770917682_1771940594
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940594.mp4
-      start_time: '2026-02-24T13:43:14.846066'
-      status: completed
-      end_time: '2026-02-24T13:43:34.781236'
-      duration: 20
-      file_size: 13149964
-      created_at: '2026-02-24T13:43:14.846121'
-      metadata:
-        motion_detected: true
-        vel: 2.43
-        diff: 101
-    - id: cam-1_rtsp_1770917682_1771940824
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771940824.mp4
-      start_time: '2026-02-24T13:47:04.902489'
-      status: completed
-      end_time: '2026-02-24T13:47:34.930517'
+      end_time: '2026-03-17T16:17:49.817788'
       duration: 30
-      file_size: 16205392
-      created_at: '2026-02-24T13:47:04.902516'
+      file_size: 9712588
+      created_at: '2026-03-17T16:17:19.968841'
       metadata:
         motion_detected: true
-        vel: 1.02
-        diff: 207
-    - id: cam-1_rtsp_1770917682_1771941105
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941105.mp4
-      start_time: '2026-02-24T13:51:45.199074'
+        vel: 3.28
+        diff: 147
+        loudness: 0.01
+        activity_percentage: 0.48
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773764280
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773764280.mp4
+      start_time: '2026-03-17T16:18:00.273850'
       status: completed
-      end_time: '2026-02-24T13:52:05.199074'
-      duration: 20
-      file_size: 10156119
-      created_at: '2026-02-24T13:51:45.199105'
+      end_time: '2026-03-17T16:18:40.104364'
+      duration: 39
+      file_size: 15381411
+      created_at: '2026-03-17T16:18:00.273926'
       metadata:
         motion_detected: true
-        vel: 0.49
-        diff: 0
-    - id: cam-1_rtsp_1770917682_1771941325
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941325.mp4
-      start_time: '2026-02-24T13:55:25.439369'
+        vel: 3.74
+        diff: 169
+        loudness: 0.46
+        activity_percentage: 1.34
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773764400
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773764400.mp4
+      start_time: '2026-03-17T16:20:00.905797'
       status: completed
-      end_time: '2026-02-24T13:55:45.442967'
-      duration: 20
-      file_size: 9778817
-      created_at: '2026-02-24T13:55:25.439434'
-      metadata:
-        motion_detected: true
-        vel: 1.05
-        diff: 127
-    - id: cam-1_rtsp_1770917682_1771941385
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941385.mp4
-      start_time: '2026-02-24T13:56:25.495025'
-      status: completed
-      end_time: '2026-02-24T13:56:45.456687'
-      duration: 20
-      file_size: 9854914
-      created_at: '2026-02-24T13:56:25.495056'
-      metadata:
-        motion_detected: true
-        vel: 1.03
-        diff: 127
-    - id: cam-1_rtsp_1770917682_1771941405
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941405.mp4
-      start_time: '2026-02-24T13:56:45.481811'
-      status: completed
-      end_time: '2026-02-24T13:57:05.490156'
-      duration: 20
-      file_size: 11039412
-      created_at: '2026-02-24T13:56:45.481845'
-      metadata:
-        motion_detected: true
-        vel: 1.02
-        diff: 127
-    - id: cam-1_rtsp_1770917682_1771941815
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941815.mp4
-      start_time: '2026-02-24T14:03:35.749438'
-      status: completed
-      end_time: '2026-02-24T14:03:55.721789'
-      duration: 20
-      file_size: 15698350
-      created_at: '2026-02-24T14:03:35.749481'
-      metadata:
-        motion_detected: true
-        vel: 1.51
-        diff: 160
-        label: medium
-    - id: cam-1_rtsp_1770917682_1771941925
-      camera_id: cam-1_rtsp_1770917682
-      file_path: /root/Motion-Analysis-Server/api/recordings/cam-1_rtsp_1770917682/cam-1_rtsp_1770917682_1771941925.mp4
-      start_time: '2026-02-24T14:05:25.891090'
-      status: completed
-      end_time: '2026-02-24T14:05:55.849041'
+      end_time: '2026-03-17T16:20:30.809045'
       duration: 30
-      file_size: 23739493
-      created_at: '2026-02-24T14:05:25.891124'
+      file_size: 10361481
+      created_at: '2026-03-17T16:20:00.905894'
       metadata:
         motion_detected: true
-        vel: 2.89
-        diff: 200
-        note: Test note 1.
+        vel: 2.46
+        diff: 143
+        loudness: 0.0
+        activity_percentage: 0.49
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773764772
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773764772.mp4
+      start_time: '2026-03-17T16:26:12.768089'
+      status: completed
+      end_time: '2026-03-17T16:27:33.003415'
+      duration: 80
+      file_size: 28541841
+      created_at: '2026-03-17T16:26:12.768240'
+      metadata:
+        motion_detected: true
+        vel: 4.62
+        diff: 174
+        loudness: 0.46
+        activity_percentage: 3.18
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773765446
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773765446.mp4
+      start_time: '2026-03-17T16:37:26.110169'
+      status: completed
+      end_time: '2026-03-17T16:37:56.145478'
+      duration: 29
+      file_size: 10463618
+      created_at: '2026-03-17T16:37:26.110292'
+      metadata:
+        motion_detected: true
+        vel: 1.83
+        diff: 201
+        loudness: 0.07
+        activity_percentage: 0.15
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773765536
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773765536.mp4
+      start_time: '2026-03-17T16:38:56.808774'
+      status: completed
+      end_time: '2026-03-17T16:39:46.843263'
+      duration: 50
+      file_size: 16661103
+      created_at: '2026-03-17T16:38:56.808937'
+      metadata:
+        motion_detected: true
+        vel: 2.25
+        diff: 191
+        loudness: 0.0
+        activity_percentage: 1.24
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773765607
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773765607.mp4
+      start_time: '2026-03-17T16:40:07.165031'
+      status: completed
+      end_time: '2026-03-17T16:40:57.038937'
+      duration: 49
+      file_size: 15015435
+      created_at: '2026-03-17T16:40:07.165183'
+      metadata:
+        motion_detected: true
+        vel: 2.52
+        diff: 146
+        loudness: 0.0
+        activity_percentage: 1.04
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773765737
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773765737.mp4
+      start_time: '2026-03-17T16:42:17.707088'
+      status: completed
+      end_time: '2026-03-17T16:43:07.719241'
+      duration: 50
+      file_size: 14530217
+      created_at: '2026-03-17T16:42:17.707161'
+      metadata:
+        motion_detected: true
+        vel: 2.98
+        diff: 168
+        loudness: 0.0
+        activity_percentage: 1.25
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773765838
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773765838.mp4
+      start_time: '2026-03-17T16:43:58.334363'
+      status: completed
+      end_time: '2026-03-17T16:44:18.185998'
+      duration: 19
+      file_size: 6845507
+      created_at: '2026-03-17T16:43:58.334436'
+      metadata:
+        motion_detected: true
+        vel: 1.52
+        diff: 173
+        loudness: 0.0
+        activity_percentage: 0.03
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773766119
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773766119.mp4
+      start_time: '2026-03-17T16:48:39.750862'
+      status: completed
+      end_time: '2026-03-17T16:49:29.698957'
+      duration: 50
+      file_size: 14617137
+      created_at: '2026-03-17T16:48:39.751002'
+      metadata:
+        motion_detected: true
+        vel: 3.33
+        diff: 150
+        loudness: 0.0
+        activity_percentage: 1.24
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773766170
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773766170.mp4
+      start_time: '2026-03-17T16:49:30.236460'
+      status: completed
+      end_time: '2026-03-17T16:51:00.394727'
+      duration: 89
+      file_size: 32261888
+      created_at: '2026-03-17T16:49:30.236618'
+      metadata:
+        motion_detected: true
+        vel: 3.19
+        diff: 190
+        loudness: 0.06
+        activity_percentage: 1.28
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773767037
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773767037.mp4
+      start_time: '2026-03-17T17:03:57.894170'
+      status: completed
+      end_time: '2026-03-17T17:04:37.671073'
+      duration: 40
+      file_size: 13975260
+      created_at: '2026-03-17T17:03:57.894323'
+      metadata:
+        motion_detected: true
+        vel: 2.36
+        diff: 179
+        loudness: 0.06
+        activity_percentage: 0.58
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773767209
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773767209.mp4
+      start_time: '2026-03-17T17:06:49.111891'
+      status: completed
+      end_time: '2026-03-17T17:07:08.541403'
+      duration: 19
+      file_size: 6365994
+      created_at: '2026-03-17T17:06:49.112071'
+      metadata:
+        motion_detected: true
+        vel: 1.56
+        diff: 244
+        loudness: 0.0
+        activity_percentage: 0.03
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773767339
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773767339.mp4
+      start_time: '2026-03-17T17:08:59.447857'
+      status: completed
+      end_time: '2026-03-17T17:09:59.542145'
+      duration: 59
+      file_size: 20410099
+      created_at: '2026-03-17T17:08:59.448054'
+      metadata:
+        motion_detected: true
+        vel: 3.25
+        diff: 182
+        loudness: 0.0
+        activity_percentage: 1.15
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773772846
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773772846.mp4
+      start_time: '2026-03-17T18:40:46.577650'
+      status: completed
+      end_time: '2026-03-17T18:40:56.433902'
+      duration: 10
+      file_size: 2840833
+      created_at: '2026-03-17T18:40:46.577751'
+      metadata:
+        motion_detected: true
+        vel: 1.88
+        diff: 127
+        loudness: 0.0
+        activity_percentage: 1.72
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773773239
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773773239.mp4
+      start_time: '2026-03-17T18:47:19.703940'
+      status: completed
+      end_time: '2026-03-17T18:47:25.662970'
+      duration: 6
+      file_size: 1701778
+      created_at: '2026-03-17T18:47:19.704185'
+      metadata:
+        motion_detected: true
+        vel: 1.63
+        diff: 166
+        loudness: 0.0
+        activity_percentage: 0.15
+        audio_recorded: true
+    '2026-03-18':
+    - id: cam3_webcam_1771887423_1773814018
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773814018.mp4
+      start_time: '2026-03-18T06:06:58.656784'
+      status: completed
+      end_time: '2026-03-18T06:07:28.283170'
+      duration: 29
+      file_size: 10159356
+      created_at: '2026-03-18T06:06:58.657036'
+      metadata:
+        motion_detected: true
+        vel: 1.69
+        diff: 195
+        loudness: 0.06
+        activity_percentage: 0.12
+        audio_recorded: true

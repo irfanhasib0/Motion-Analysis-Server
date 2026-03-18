@@ -13,28 +13,30 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
   const [storageInfo, setStorageInfo] = useState(null);
   const [playbackMode, setPlaybackMode] = useState(api.getRecordingPlaybackMode());
   
-  // Archive state from EventView
-  const [archivePath, setArchivePath] = useState('');
-  const [archiveList, setArchiveList] = useState([]);
-  const [archiveBusy, setArchiveBusy] = useState(false);
-  const [archivePanelOpen, setArchivePanelOpen] = useState(true);
-  const [archiveFilters, setArchiveFilters] = useState(() => { 
-    const today = new Date().toISOString().slice(0, 10); 
-    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10); 
-    return { 
-      date_from: yesterday, 
-      date_to: today, 
-      min_vel: '', 
-      min_diff: '', 
-      min_duration: '', 
-      label_filter: '',
-      camera_filter: '' // Added camera selection
-    }; 
+  // Archive state — consolidated into single state object
+  const [archive, setArchive] = useState(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    return {
+      path: '',
+      list: [],
+      busy: false,
+      panelOpen: true,
+      filters: { date_from: yesterday, date_to: today, min_vel: '', min_diff: '', min_duration: '', label_filter: '', camera_filter: '' },
+      exportResult: null,
+      deleteAfter: true,
+      excludeMode: true,
+      cleanOverlay: true,
+    };
   });
-  const [archiveExportResult, setArchiveExportResult] = useState(null);
-  const [deleteAfterArchive, setDeleteAfterArchive] = useState(true);
-  const [excludeMode, setExcludeMode] = useState(true);
-  const [cleanOverlay, setCleanOverlay] = useState(true);
+  const {
+    path: archivePath, list: archiveList, busy: archiveBusy,
+    panelOpen: archivePanelOpen, filters: archiveFilters,
+    exportResult: archiveExportResult, deleteAfter: deleteAfterArchive,
+    excludeMode, cleanOverlay,
+  } = archive;
+  const updateArchive = (patch) => setArchive(p => ({ ...p, ...patch }));
+  const updateArchiveFilter = (field, value) => setArchive(p => ({ ...p, filters: { ...p.filters, [field]: value } }));
   const [minFreeStorageGiB, setMinFreeStorageGiB] = useState(1);
   const [autoArchiveDays, setAutoArchiveDays] = useState(7);
   const [storageSaving, setStorageSaving] = useState(false);
@@ -103,7 +105,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
   const loadArchives = async () => {
     try {
       const response = await api.get('/recordings/archive/list');
-      setArchiveList(response.data.archives || []);
+      updateArchive({ list: response.data.archives || [] });
     } catch (error) {
       console.error('Failed to load archives:', error);
     }
@@ -174,8 +176,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
 
   // ===== Archive handlers (adapted from EventView) =====
   const handleExportArchive = async () => {
-    setArchiveBusy(true);
-    setArchiveExportResult(null);
+    updateArchive({ busy: true, exportResult: null });
     try {
       const filters = {};
       if (archiveFilters.date_from) filters.date_from = archiveFilters.date_from;
@@ -189,7 +190,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
       if (deleteAfterArchive) filters.delete_after = true;
       if (cleanOverlay) filters.clean_up_extensions = ['.overlay.mp4'];
       const res = await api.exportArchive(filters);
-      setArchiveExportResult(res.data);
+      updateArchive({ exportResult: res.data });
       toast.success(`Exported ${res.data.recordings_count} recording(s) → ${res.data.archive_name}`);
       if (deleteAfterArchive && res.data.deleted_count > 0) {
         toast(`${res.data.deleted_count} recording(s) removed from recordings.`, {
@@ -202,22 +203,22 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     } catch (err) {
       toast.error('Export failed: ' + (err?.response?.data?.detail || err.message));
     } finally {
-      setArchiveBusy(false);
+      updateArchive({ busy: false });
     }
   };
 
   const handleListArchives = async () => {
-    setArchiveBusy(true);
+    updateArchive({ busy: true });
     try {
       const res = await api.listArchives();
-      setArchiveList(res.data.archives || []);
+      updateArchive({ list: res.data.archives || [] });
       if ((res.data.archives || []).length === 0) {
         toast('No archives found.');
       }
     } catch (err) {
       toast.error('List failed: ' + (err?.response?.data?.detail || err.message));
     } finally {
-      setArchiveBusy(false);
+      updateArchive({ busy: false });
     }
   };
 
@@ -227,7 +228,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
       toast.error('Please enter an archive directory path.');
       return;
     }
-    setArchiveBusy(true);
+    updateArchive({ busy: true });
     try {
       const res = await api.loadArchive(target);
       toast.success(`Loaded ${res.data.loaded_count} recording(s) from archive.`);
@@ -239,21 +240,21 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
     } catch (err) {
       toast.error('Load failed: ' + (err?.response?.data?.detail || err.message));
     } finally {
-      setArchiveBusy(false);
+      updateArchive({ busy: false });
     }
   };
 
   const handleUnloadArchive = async (path) => {
-    setArchiveBusy(true);
+    updateArchive({ busy: true });
     try {
       const res = await api.unloadArchive(path);
       toast.success(`Unloaded ${res.data.unloaded_count} recording(s) from view.`);
-      setArchiveList((prev) => prev.filter((a) => a.path !== path));
+      setArchive(p => ({ ...p, list: p.list.filter(a => a.path !== path) }));
       window.dispatchEvent(new CustomEvent('archive-unloaded', { detail: { path } }));
     } catch (err) {
       toast.error('Unload failed: ' + (err?.response?.data?.detail || err.message));
     } finally {
-      setArchiveBusy(false);
+      updateArchive({ busy: false });
     }
   };
 
@@ -440,7 +441,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
       <div style={{ background: 'rgba(0,150,136,0.06)', border: '1px solid rgba(0,150,136,0.18)', borderRadius: 14, padding: '14px 18px', marginBottom: 18 }}>
         <div
           style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
-          onClick={() => setArchivePanelOpen((o) => !o)}
+          onClick={() => setArchive(p => ({ ...p, panelOpen: !p.panelOpen }))}
         >
           <Archive size={18} style={{ color: '#00897b' }} />
           <span style={{ fontWeight: 700, fontSize: 14, color: '#004d40' }}>Recording Archives</span>
@@ -461,7 +462,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   type="date"
                   className="form-control"
                   value={archiveFilters.date_from}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, date_from: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('date_from', e.target.value)}
                   style={{ width: 150 }}
                 />
                 <label style={{ fontSize: 12, color: '#546e7a', minWidth: 20 }}>To</label>
@@ -469,14 +470,14 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   type="date"
                   className="form-control"
                   value={archiveFilters.date_to}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, date_to: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('date_to', e.target.value)}
                   style={{ width: 150 }}
                 />
                 <label style={{ fontSize: 12, color: '#546e7a', minWidth: 50 }}>Camera</label>
                 <select
                   className="form-control form-select"
                   value={archiveFilters.camera_filter}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, camera_filter: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('camera_filter', e.target.value)}
                   style={{ width: 160 }}
                 >
                   <option value="">All Cameras</option>
@@ -492,7 +493,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   <input
                     type="checkbox"
                     checked={excludeMode}
-                    onChange={() => setExcludeMode(true)}
+                    onChange={() => updateArchive({ excludeMode: true })}
                     style={{ accentColor: '#c62828', width: 14, height: 14, cursor: 'pointer' }}
                   />
                   Exclude ≤
@@ -501,7 +502,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   <input
                     type="checkbox"
                     checked={!excludeMode}
-                    onChange={() => setExcludeMode(false)}
+                    onChange={() => updateArchive({ excludeMode: false })}
                     style={{ accentColor: '#1565c0', width: 14, height: 14, cursor: 'pointer' }}
                   />
                   Include ≤
@@ -510,7 +511,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                 <select
                   className="form-control form-select"
                   value={archiveFilters.min_vel}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, min_vel: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('min_vel', e.target.value)}
                   style={{ width: 120 }}
                 >
                   <option value="">{excludeMode ? 'None' : 'Any'}</option>
@@ -525,7 +526,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                 <select
                   className="form-control form-select"
                   value={archiveFilters.min_diff}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, min_diff: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('min_diff', e.target.value)}
                   style={{ width: 120 }}
                 >
                   <option value="">{excludeMode ? 'None' : 'Any'}</option>
@@ -540,7 +541,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                 <select
                   className="form-control form-select"
                   value={archiveFilters.min_duration}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, min_duration: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('min_duration', e.target.value)}
                   style={{ width: 120 }}
                 >
                   <option value="">{excludeMode ? 'None' : 'Any'}</option>
@@ -558,7 +559,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                 <select
                   className="form-control form-select"
                   value={archiveFilters.label_filter}
-                  onChange={(e) => setArchiveFilters((f) => ({ ...f, label_filter: e.target.value }))}
+                  onChange={(e) => updateArchiveFilter('label_filter', e.target.value)}
                   style={{ width: 150 }}
                 >
                   <option value="">All</option>
@@ -593,7 +594,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   <input
                     type="checkbox"
                     checked={cleanOverlay}
-                    onChange={(e) => setCleanOverlay(e.target.checked)}
+                    onChange={(e) => updateArchive({ cleanOverlay: e.target.checked })}
                     style={{ accentColor: '#00897b', width: 15, height: 15, cursor: 'pointer' }}
                   />
                   Clean .overlay.mp4
@@ -602,7 +603,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   <input
                     type="checkbox"
                     checked={deleteAfterArchive}
-                    onChange={(e) => setDeleteAfterArchive(e.target.checked)}
+                    onChange={(e) => updateArchive({ deleteAfter: e.target.checked })}
                     style={{ accentColor: '#c62828', width: 15, height: 15, cursor: 'pointer' }}
                   />
                   <Trash2 size={13} />
@@ -688,7 +689,7 @@ const RecordingList = ({ recordings, setRecordings, cameras }) => {
                   className="form-control"
                   placeholder="Archive folder path (e.g. /mnt/backup/recordings/archive_20260301_120000)"
                   value={archivePath}
-                  onChange={(e) => setArchivePath(e.target.value)}
+                  onChange={(e) => updateArchive({ path: e.target.value })}
                   style={{ flex: '1 1 320px', minWidth: 220 }}
                 />
                 <button

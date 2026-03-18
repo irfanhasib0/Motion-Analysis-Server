@@ -54,6 +54,9 @@ class OpticalFlowTracker:
                  coreset_k =2, 
                  matcher_mode="hungarian", 
                  det_method="fast",
+                 bg_indoor=True,
+                 bg_detect_shadow=True,
+                 iou_threshold=0.5,
                  enable_person_detection=True,
                  enable_face_detection=True,
                  enable_body_detection=True):
@@ -70,7 +73,8 @@ class OpticalFlowTracker:
         self.bg_min_bbox_area = 500
         self.bg_min_pix_thr = 200
         self.bg_mask_dilate_ksize = (3, 3)
-        self.bg_hist = 50
+        self.bf_detect_shadow = bg_detect_shadow
+        self.bg_shadow_pixel_value = 127
         self.mtc_max_cost_thr = 50
         self.kpt_max_kpts = 5
         self.kpt_det_idx = 1  # 0: FAST, 1: SIFT, 2: ORB, 3: GFTT
@@ -85,10 +89,23 @@ class OpticalFlowTracker:
             self.colors += colors
         self.n_colors = len(self.colors)
         self.count = 0
+
+        if bg_indoor == True:
+            # High sensitivity
+            shadowThreshold = 0.7 # lower means more aggressive shadow filtering
+            history = 50 # longer history for more stable background modeling
+            varThreshold = 16 # higher means less sensitive to small changes (tune based on noise level)
+
+        else:
+            # Low sensitivity
+            shadowThreshold = 0.5
+            history = 200
+            varThreshold = 30
+
+        self.mog_params = dict(history=history,
+                               varThreshold=varThreshold,
+                               detectShadows=self.bf_detect_shadow)
         
-        self.mog_params = dict(history=self.bg_hist,
-                               varThreshold=16, # 16
-                               detectShadows=False)
         self.kpt_params = dict(threshold=25,
                                nonmaxSuppression=True)
         self.flow_params = dict(winSize=(9, 9), # 15 
@@ -96,6 +113,10 @@ class OpticalFlowTracker:
                                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 7, 0.03)) # 10 , 0.03
         
         self.bgsub    = cv2.createBackgroundSubtractorMOG2(**self.mog_params) # 500, 16, True
+        if self.bf_detect_shadow:
+            self.bgsub.setShadowValue(self.bg_shadow_pixel_value)
+            self.bgsub.setShadowThreshold(shadowThreshold)
+
         self.gftt     = cv2.GFTTDetector_create(maxCorners=100, qualityLevel=0.1, minDistance=10, blockSize=10) # 200, 0.01, 10, 10
         self.orb      = cv2.ORB_create(nfeatures=24)
         self.fast     = cv2.FastFeatureDetector_create(**self.kpt_params)
@@ -103,6 +124,7 @@ class OpticalFlowTracker:
         self.tracker  = SimpleTracker(max_disappeared=10, max_distance=400)
         #self.tracker  = ByteTracker()
 
+        self.iou_threshold = iou_threshold
         self.matcher_mode = matcher_mode  # 'hungarian' (robust) or 'greedy' (faster, C++ accelerated)
         self.memory = FlowMemory(maxpid=max_pid, min_traj_len=min_traj_len, max_traj_len=max_traj_len)
         # Coreset memory (PatchCore-like) for representative motion trajectories
@@ -183,18 +205,27 @@ class OpticalFlowTracker:
             return rgb
     
     def contour_in_dets(self, cnt_box, dets):
-        """Check if a contour overlaps with any person detection boxes"""
+        """Check if a contour overlaps with any person detection boxes using IoU threshold"""
+        x1, y1, x2, y2 = cnt_box[0], cnt_box[1], cnt_box[2], cnt_box[3]
+        cnt_area = (x2 - x1) * (y2 - y1)
         for det in dets:
-            det_box = np.array(det['bbox'])
-            # Check for overlap
-            if (cnt_box[0] < det_box[2] and cnt_box[2] > det_box[0] and
-                cnt_box[1] < det_box[3] and cnt_box[3] > det_box[1]):
+            dx1, dy1, dx2, dy2 = det['bbox']
+            inter_w = min(x2, dx2) - max(x1, dx1)
+            inter_h = min(y2, dy2) - max(y1, dy1)
+            if inter_w <= 0 or inter_h <= 0:
+                continue
+            inter = inter_w * inter_h
+            iou = inter / (cnt_area + (dx2 - dx1) * (dy2 - dy1) - inter)
+            if iou >= self.iou_threshold:
                 return True
         return False
     
     def _detect_forground_bboxes(self, gray):
         prev_fg_mask = deepcopy(self.fg_mask)
-        self.fg_mask = np.uint8(0.5 * self.fg_mask) + np.uint8(0.5 * self.bgsub.apply(gray))
+        bg_mask = self.bgsub.apply(gray)
+        if self.bf_detect_shadow:
+            bg_mask[bg_mask == self.bg_shadow_pixel_value] = 0
+        self.fg_mask = np.uint8(0.5 * self.fg_mask) + np.uint8(0.5 * bg_mask)
         if type(prev_fg_mask) == int:
             prev_fg_mask = self.fg_mask.copy()
         diff_mask    = np.abs(self.fg_mask - prev_fg_mask)
@@ -216,6 +247,7 @@ class OpticalFlowTracker:
         results = []
 
         # Add person detection boxes if enabled
+        person_detections = []
         if self.enable_person_detection and self.person_detector is not None:
             # Convert grayscale back to BGR for person detection
             frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
