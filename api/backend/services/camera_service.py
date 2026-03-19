@@ -561,6 +561,7 @@ class CameraService(StreamingService):
         self.pipe_buffer_size = int(_sys['pipe_buffer_size'])
         self.rtsp_unified_demux_enabled = bool(_sys['rtsp_unified_demux_enabled'])
         self.live_stream_mode = str(_sys['live_stream_mode']).lower()
+        self.enable_person_detection = bool(_sys.get('enable_person_detection', True))
         
         # Store ring buffer settings for runtime updates
         self.frame_rbf_len = frame_rbf_len
@@ -714,7 +715,7 @@ class CameraService(StreamingService):
 
         if 'live_stream_mode' in updates:
             mode = str(updates['live_stream_mode']).lower()
-            if mode in ('mjpeg', 'hls'):
+            if mode in ('mjpeg', 'hls', 'ws'):
                 self.live_stream_mode = mode
 
         try:
@@ -923,7 +924,7 @@ class CameraService(StreamingService):
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             return False
             
-        tracker = OpticalFlowTracker()
+        tracker = OpticalFlowTracker(enable_person_detection=self.enable_person_detection)
         ret, _ = cap.read_video()
             
         if ret:

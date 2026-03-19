@@ -19,6 +19,7 @@ system:
       results_rbf_len: 10
       mux_realtime: false
       auto_archive_days: 7
+      enable_person_detection: true
     low_power:
       live_stream_mode: mjpeg
       sensitivity: 2
@@ -35,6 +36,7 @@ system:
       results_rbf_len: 5
       mux_realtime: false
       auto_archive_days: 7
+      enable_person_detection: false
     custom:
       live_stream_mode: mjpeg
       sensitivity: 4
@@ -51,3 +53,4 @@ system:
       results_rbf_len: 10
       mux_realtime: false
       auto_archive_days: 5
+      enable_person_detection: true

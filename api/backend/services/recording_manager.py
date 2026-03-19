@@ -80,8 +80,21 @@ class RecordingManager:
         self.clip_motion_frame_count: Dict[str, int] = {}
         self.clip_no_motion_frame_count: Dict[str, int] = {}
         self.clean_up_extensions = ['.overlay.mp4']  # Extensions to clean up if no motion detected
-        
-        
+        self._metrics_buffer: Dict[str, list] = {}  # camera_id -> buffered lines
+
+    def _flush_metrics(self, camera_id: str, file_path: str) -> None:
+        """Flush buffered metrics lines to the .txt file on disk."""
+        lines = self._metrics_buffer.pop(camera_id, [])
+        if not lines:
+            return
+        _ext = file_path.rsplit('.', 1)[-1]
+        txt_path = file_path.replace(f'.{_ext}', '.txt')
+        try:
+            with open(txt_path, 'a') as f:
+                f.writelines(lines)
+        except Exception:
+            logger.warning(f"{Colors.RED}Failed to flush metrics to {txt_path}{Colors.RESET}")
+
     def load_existing_recordings(self):
         if not os.path.exists(self.recordings_dir):
             return
@@ -172,6 +185,7 @@ class RecordingManager:
         _ext = file_path.split('.')[-1]
         with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
             f.write('vel,bg_diff,loudness\n')
+        self._metrics_buffer[camera_id] = []
         return recording_id, file_path, writer
 
     def _parse_recording_time(self, db_recording: dict) -> datetime:
@@ -403,8 +417,6 @@ class RecordingManager:
             # Track last motion check time
             last_motion_check = start_time
             _ext = file_path.split('.')[1]
-            with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
-                f.write('vel,bg_diff,loudness\n')
 
             while camera_id in self.active_recordings:
         
@@ -468,6 +480,7 @@ class RecordingManager:
                         # Recent motion detected in this interval
                         if clip_duration >= self.max_clip_length:
                             # Clip exceeds max length - save and start new  
+                            self._flush_metrics(camera_id, file_path)
                             final_file_path = writer.release()
                             self.save_recording(
                                 camera_id,
@@ -487,6 +500,7 @@ class RecordingManager:
                             logger.info(f"{Colors.GREEN}⏱️ Continuing recording{Colors.RESET} - recent motion detected vel ={self.clip_vel.get(camera_id, 0.0)}, bg_diff ={self.clip_bg_diff.get(camera_id, 0)}, loudness ={self.clip_loudness.get(camera_id, 0.0)}, duration={int(clip_duration)}s")
                     else:
                         # No recent motion detected - end current clip
+                        self._flush_metrics(camera_id, file_path)
                         final_file_path = writer.release()
                         if self.clip_motion_detected.get(camera_id, False):
                             # Save clip - it had motion earlier
@@ -518,10 +532,10 @@ class RecordingManager:
                     if audio_enabled and audio_chunks:
                         combined_audio = b''.join(audio_chunks)
                         writer.write_audio(combined_audio)
-                    with open(file_path.replace(f'.{_ext}', '.txt'), 'a') as f:
-                        f.write(f"{vel},{bg_diff},{loudness}\n")            
+                    self._metrics_buffer.setdefault(camera_id, []).append(f"{vel},{bg_diff},{loudness}\n")            
                 
             # Final processing when recording worker ends normally
+            self._flush_metrics(camera_id, file_path)
             final_file_path = writer.release()
             writer = None  # Mark as released
             if self.clip_motion_detected.get(camera_id, False):

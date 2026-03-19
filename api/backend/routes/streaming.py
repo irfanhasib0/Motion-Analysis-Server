@@ -1,5 +1,5 @@
-"""Live streaming, HLS, audio, and processing stream endpoints."""
-from fastapi import APIRouter, HTTPException, Request
+"""Live streaming, HLS, WebSocket, audio, and processing stream endpoints."""
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse, FileResponse
 from typing import Optional
 import asyncio
@@ -37,8 +37,15 @@ async def get_camera_stream(camera_id: str, mode: Optional[str] = None):
                 "X-Accel-Buffering": "no",
             },
         )
+    elif selected_mode == "ws":
+        # WebSocket mode: return connection info (actual stream via ws endpoint)
+        deps.camera_service._hls_manager.stop_stream(camera_id)
+        return {
+            "mode": "ws",
+            "ws_url": f"/api/cameras/{camera_id}/ws_stream",
+        }
     else:
-        raise HTTPException(status_code=400, detail="Invalid mode. Supported: mjpeg, hls")
+        raise HTTPException(status_code=400, detail="Invalid mode. Supported: mjpeg, hls, ws")
 
     
 @router.get("/cameras/{camera_id}/hls/index.m3u8")
@@ -112,6 +119,39 @@ async def stop_camera_hls_stream(camera_id: str):
     """Stop HLS process for a camera."""
     deps.camera_service._hls_manager.stop_stream(camera_id)
     return {"message": "Camera HLS stream stopped successfully"}
+
+
+# ----- WebSocket video stream -----
+
+@router.websocket("/cameras/{camera_id}/ws_stream")
+async def ws_camera_stream(websocket: WebSocket, camera_id: str):
+    """WebSocket binary stream of JPEG frames for a camera.
+    
+    Each message is a raw JPEG image (binary). The client renders
+    frames onto a <canvas> or <img> element via createObjectURL.
+    """
+    await websocket.accept()
+
+    # Ensure camera AV stream is running
+    try:
+        deps.camera_service.start_av_stream(camera_id)
+    except Exception as e:
+        deps.logger.warning(f"Failed to start stream for WS {camera_id}: {e}")
+        await websocket.close(code=1011, reason="Camera unavailable")
+        return
+
+    ws_manager = deps.camera_service._ws_manager
+    q = ws_manager.subscribe(camera_id)
+    try:
+        while True:
+            jpeg_bytes = await q.get()
+            await websocket.send_bytes(jpeg_bytes)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        deps.logger.error(f"WS stream error for {camera_id}: {e}")
+    finally:
+        ws_manager.unsubscribe(camera_id, q)
 
 
 @router.get("/cameras/{camera_id}/processing_stream")

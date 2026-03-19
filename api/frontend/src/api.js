@@ -86,13 +86,13 @@ export const api = {
   getLiveStreamMode: async () => {
     const response = await apiClient.get('/system/live-stream-mode');
     const mode = response?.data?.live_stream_mode;
-    return mode === 'hls' ? 'hls' : 'mjpeg';
+    return ['mjpeg', 'hls', 'ws'].includes(mode) ? mode : 'mjpeg';
   },
   setLiveStreamMode: async (mode) => {
-    const normalized = mode === 'hls' ? 'hls' : 'mjpeg';
+    const normalized = ['mjpeg', 'hls', 'ws'].includes(mode) ? mode : 'mjpeg';
     const response = await apiClient.post('/system/live-stream-mode', { mode: normalized });
     const updatedMode = response?.data?.live_stream_mode;
-    return updatedMode === 'hls' ? 'hls' : 'mjpeg';
+    return ['mjpeg', 'hls', 'ws'].includes(updatedMode) ? updatedMode : 'mjpeg';
   },
   appendQueryParams,
 
@@ -130,9 +130,16 @@ export const api = {
   getCameraStreamModeInfo: (cameraId, mode = 'mjpeg') =>
     apiClient.get(`/cameras/${cameraId}/stream`, { params: { mode } }),
   getCameraVideoStreamUrl: (cameraId, mode = 'mjpeg') => {
+    if (mode === 'ws') return null;  // WS mode uses getWsStreamUrl
     return mode === 'hls'
       ? buildUrlWithToken(`/api/cameras/${cameraId}/hls/index.m3u8`)
       : appendQueryParams(buildUrlWithToken(`/api/cameras/${cameraId}/stream`), { mode: 'mjpeg' });
+  },
+  getWsStreamUrl: (cameraId) => {
+    const wsBase = API_BASE_URL.replace(/^http/, 'ws');
+    const base = `${wsBase}/api/cameras/${cameraId}/ws_stream`;
+    const token = getStoredToken();
+    return token ? `${base}?access_token=${encodeURIComponent(token)}` : base;
   },
   getCameraAudioStreamUrl: (cameraId, fmt = 'wav', nonce = null) => {
     const base = buildUrlWithToken(`/api/cameras/${cameraId}/audio_stream?fmt=${encodeURIComponent(fmt)}`);

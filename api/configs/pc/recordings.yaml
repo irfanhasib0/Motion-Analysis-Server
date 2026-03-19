@@ -6295,3 +6295,67 @@ cameras:
         loudness: 0.06
         activity_percentage: 0.12
         audio_recorded: true
+    - id: cam3_webcam_1771887423_1773835044
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773835044.mp4
+      start_time: '2026-03-18T11:57:24.760454'
+      status: completed
+      end_time: '2026-03-18T11:58:04.433079'
+      duration: 40
+      file_size: 1937107
+      created_at: '2026-03-18T11:57:24.760593'
+      metadata:
+        motion_detected: true
+        vel: 1.77
+        diff: 165
+        loudness: 0.06
+        activity_percentage: 1.05
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773835196
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773835196.mp4
+      start_time: '2026-03-18T11:59:56.687626'
+      status: completed
+      end_time: '2026-03-18T12:01:26.865724'
+      duration: 90
+      file_size: 4601694
+      created_at: '2026-03-18T11:59:56.687887'
+      metadata:
+        motion_detected: true
+        vel: 2.71
+        diff: 175
+        loudness: 0.46
+        activity_percentage: 1.8
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773835287
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773835287.mp4
+      start_time: '2026-03-18T12:01:27.698367'
+      status: completed
+      end_time: '2026-03-18T12:02:37.755892'
+      duration: 70
+      file_size: 3956977
+      created_at: '2026-03-18T12:01:27.698534'
+      metadata:
+        motion_detected: true
+        vel: 2.15
+        diff: 182
+        loudness: 0.17
+        activity_percentage: 2.17
+        audio_recorded: true
+    - id: cam3_webcam_1771887423_1773835358
+      camera_id: cam3_webcam_1771887423
+      file_path: /root/Motion-Analysis-Server/api/recordings/cam3_webcam_1771887423/cam3_webcam_1771887423_1773835358.mp4
+      start_time: '2026-03-18T12:02:38.860435'
+      status: completed
+      end_time: '2026-03-18T12:03:01.616105'
+      duration: 23
+      file_size: 1102102
+      created_at: '2026-03-18T12:02:38.860721'
+      metadata:
+        motion_detected: true
+        vel: 1.85
+        diff: 166
+        loudness: 0.24
+        activity_percentage: 5.29
+        audio_recorded: true

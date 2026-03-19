@@ -18,7 +18,7 @@ async def get_system_info():
         info = deps.dashboard_service.get_system_info()
         mode = deps.get_live_stream_mode()
         info['settings'] = {
-            'live_stream_mode': mode if mode in {"mjpeg", "hls"} else "mjpeg",
+            'live_stream_mode': mode if mode in {"mjpeg", "hls", "ws"} else "mjpeg",
             **deps.camera_service.get_runtime_settings(),
         }
         return info
@@ -30,12 +30,12 @@ async def get_system_info():
 @router.get("/system/settings")
 async def get_system_settings():
     mode = deps.get_live_stream_mode()
-    normalized_mode = mode if mode in {"mjpeg", "hls"} else "mjpeg"
+    normalized_mode = mode if mode in {"mjpeg", "hls", "ws"} else "mjpeg"
     runtime_settings = deps.camera_service.get_runtime_settings()
     return {
         'live_stream_mode': normalized_mode,
         **runtime_settings,
-        'supported_live_stream_modes': ['mjpeg', 'hls'],
+        'supported_live_stream_modes': ['mjpeg', 'hls', 'ws'],
         'sensitivity_range': {'min': 0, 'max': int(getattr(deps.camera_service, 'sensitivity_level', 5) or 5)},
         'jpeg_quality_range': {'min': 25, 'max': 95},
         'pipe_buffer_size_range': {'min': 65536, 'max': 268435456},
@@ -50,8 +50,8 @@ async def get_system_settings():
 async def update_system_settings(payload: SystemSettingsUpdateRequest):
     if payload.live_stream_mode is not None:
         requested_mode = str(payload.live_stream_mode or '').strip().lower()
-        if requested_mode not in {"mjpeg", "hls"}:
-            raise HTTPException(status_code=400, detail="Invalid live_stream_mode. Supported: mjpeg, hls")
+        if requested_mode not in {"mjpeg", "hls", "ws"}:
+            raise HTTPException(status_code=400, detail="Invalid live_stream_mode. Supported: mjpeg, hls, ws")
         deps.set_live_stream_mode(requested_mode)
 
     # Collect non-None settings into a dict for custom preset save
@@ -76,7 +76,7 @@ async def update_system_settings(payload: SystemSettingsUpdateRequest):
         'message': 'System settings updated',
         'live_stream_mode': deps.get_live_stream_mode(),
         **runtime_settings,
-        'supported_live_stream_modes': ['mjpeg', 'hls'],
+        'supported_live_stream_modes': ['mjpeg', 'hls', 'ws'],
     }
 
 
@@ -84,11 +84,11 @@ async def update_system_settings(payload: SystemSettingsUpdateRequest):
 async def get_live_stream_mode():
     """Get server-configured default live stream mode."""
     mode = deps.get_live_stream_mode()
-    normalized_mode = mode if mode in {"mjpeg", "hls"} else "mjpeg"
+    normalized_mode = mode if mode in {"mjpeg", "hls", "ws"} else "mjpeg"
     return {
         "mode": normalized_mode,
         "live_stream_mode": normalized_mode,
-        "supported_modes": ["mjpeg", "hls"],
+        "supported_modes": ["mjpeg", "hls", "ws"],
     }
 
 
@@ -96,8 +96,8 @@ async def get_live_stream_mode():
 async def set_live_stream_mode(payload: LiveStreamModeRequest):
     """Update server default live stream mode at runtime."""
     requested_mode = str(payload.mode or "").strip().lower()
-    if requested_mode not in {"mjpeg", "hls"}:
-        raise HTTPException(status_code=400, detail="Invalid mode. Supported: mjpeg, hls")
+    if requested_mode not in {"mjpeg", "hls", "ws"}:
+        raise HTTPException(status_code=400, detail="Invalid mode. Supported: mjpeg, hls, ws")
 
     deps.set_live_stream_mode(requested_mode)
     mode = deps.get_live_stream_mode()
@@ -105,7 +105,7 @@ async def set_live_stream_mode(payload: LiveStreamModeRequest):
         "message": "Live stream mode updated",
         "mode": mode,
         "live_stream_mode": mode,
-        "supported_modes": ["mjpeg", "hls"],
+        "supported_modes": ["mjpeg", "hls", "ws"],
     }
 
 

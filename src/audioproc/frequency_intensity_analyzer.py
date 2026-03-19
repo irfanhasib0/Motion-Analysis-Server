@@ -36,6 +36,10 @@ class FrequencyIntensityAnalyzer:
         self._series_index = 0
         self._loudness_series: deque[Tuple[int, float]] = deque(maxlen=self.config.series_max_points)
         self._peak_frequency_mean_series: deque[Tuple[int, float]] = deque(maxlen=self.config.series_max_points)
+        # Cached FFT arrays (allocated once when chunk size is known)
+        self._cached_window: np.ndarray | None = None
+        self._cached_freqs: np.ndarray | None = None
+        self._cached_size: int = 0
 
     @staticmethod
     def _default_bands(sample_rate: int) -> List[Tuple[float, float]]:
@@ -135,10 +139,14 @@ class FrequencyIntensityAnalyzer:
                 },
             }
 
-        window = np.hanning(samples.size)
+        if samples.size != self._cached_size:
+            self._cached_window = np.hanning(samples.size)
+            self._cached_freqs = np.fft.rfftfreq(samples.size, d=1.0 / self.config.sample_rate)
+            self._cached_size = samples.size
+        window = self._cached_window
+        freqs = self._cached_freqs
         fft_values = np.fft.rfft(samples * window)
         power = np.abs(fft_values) ** 2
-        freqs = np.fft.rfftfreq(samples.size, d=1.0 / self.config.sample_rate)
 
         eps = self.config.epsilon
         overall_rms = float(np.sqrt(np.mean(np.square(samples)) + eps))

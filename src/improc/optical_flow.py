@@ -37,6 +37,15 @@ from improc.kalman_filter import KalmanPoint, CvKalmanPoint
 from improc.memory import FlowMemory, CoresetMemory
 from improc.person_detection import PersonDetector
 
+
+def _copy_pts(pts: dict) -> dict:
+    """Fast copy of points dict — replaces expensive deepcopy on dict-of-dict-of-ndarray."""
+    return {
+        k: {key: val.copy() if isinstance(val, np.ndarray) else val
+             for key, val in v.items()}
+        for k, v in pts.items()
+    }
+
 '''
 # Optional C++ acceleration via pybind11 module
 cpp_lib_path = os.path.join('../', "cpp", "build")
@@ -221,7 +230,7 @@ class OpticalFlowTracker:
         return False
     
     def _detect_forground_bboxes(self, gray):
-        prev_fg_mask = deepcopy(self.fg_mask)
+        prev_fg_mask = self.fg_mask.copy() if isinstance(self.fg_mask, np.ndarray) else self.fg_mask
         bg_mask = self.bgsub.apply(gray)
         if self.bf_detect_shadow:
             bg_mask[bg_mask == self.bg_shadow_pixel_value] = 0
@@ -423,7 +432,7 @@ class OpticalFlowTracker:
             self.viz_div_h = int(gray.shape[0] // (self.num_traj_viz+1))
             self.viz_div_w = int(gray.shape[1])
             if return_pts:
-                return frame, {}, deepcopy(self.prev_pts)
+                return frame, {}, _copy_pts(self.prev_pts)
             return frame, {}
         
         if self.det_method == 'fast':
@@ -439,7 +448,7 @@ class OpticalFlowTracker:
         # Visualization
         self.memory._viz_pos = None
         self.memory._viz_vel = None
-        pts = deepcopy(self.prev_pts)
+        pts = _copy_pts(self.prev_pts)
         self.memory.add(pts)
         sorted_ids  = self.memory.get_sorted_traj_ids(curr_pids=pts.keys(), num_of_kpts=self.num_traj_viz)
         
@@ -456,7 +465,7 @@ class OpticalFlowTracker:
                 }
         
         viz_frame = self._draw_pts_flow(frame, self.prev_pts)
-        pts_out = deepcopy(self.prev_pts)
+        pts_out = _copy_pts(self.prev_pts)
         
         if self.det_method == 'fast':
             self.prev_pts = self._detect_pts(gray, det_feat_pts=False)

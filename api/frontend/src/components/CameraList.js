@@ -97,6 +97,41 @@ const getCameraAspectRatio = (resolution) => {
 // Backend always streams raw PCM wrapped in a WAV header — format is fixed.
 const AUDIO_STREAM_FORMAT = 'wav';
 
+const WsStreamCanvas = ({ cameraId, style }) => {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const wsUrl = api.getWsStreamUrl(cameraId);
+    if (!wsUrl) return undefined;
+
+    let closed = false;
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onmessage = (event) => {
+      if (closed || !canvasRef.current) return;
+      const blob = new Blob([event.data], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        if (closed || !canvasRef.current) { URL.revokeObjectURL(url); return; }
+        const canvas = canvasRef.current;
+        canvas.width = img.width;
+        canvas.height = img.height;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    };
+
+    ws.onerror = () => { if (!closed) ws.close(); };
+
+    return () => { closed = true; ws.close(); };
+  }, [cameraId]);
+
+  return <canvas ref={canvasRef} className="camera-stream" style={style} />;
+};
+
 const CameraList = ({ cameras, setCameras }) => {
   // -----------------------------
   // Page-level state
@@ -120,9 +155,12 @@ const CameraList = ({ cameras, setCameras }) => {
   const [startingCameras, setStartingCameras] = useState({}); // { [camera_id]: boolean }
 
   const isLiveHlsMode = liveStreamMode === 'hls';
+  const isWsMode = liveStreamMode === 'ws';
 
   const handleToggleLiveStreamMode = async () => {
-    const targetMode = liveStreamMode === 'hls' ? 'mjpeg' : 'hls';
+    const modeOrder = ['mjpeg', 'ws', 'hls'];
+    const currentIdx = modeOrder.indexOf(liveStreamMode);
+    const targetMode = modeOrder[(currentIdx + 1) % modeOrder.length];
     setIsTogglingLiveMode(true);
     try {
       const mode = await api.setLiveStreamMode(targetMode);
@@ -695,6 +733,7 @@ const CameraList = ({ cameras, setCameras }) => {
   const CameraVideoPanel = ({ camera, variant = 'primary' }) => {
     const videoRef = useRef(null);
     const isOnline = camera.status === 'online' || camera.status === 'recording';
+    const isWsStream = isWsMode && variant === 'primary';
     const isHlsStream = isLiveHlsMode && variant === 'primary' && !hlsFailedByCamera[camera.id];
 
     useEffect(() => {
@@ -785,6 +824,10 @@ const CameraList = ({ cameras, setCameras }) => {
           style={mediaStyle}
         />
       );
+    }
+
+    if (isWsStream) {
+      return <WsStreamCanvas cameraId={camera.id} style={mediaStyle} />;
     }
 
     if (isHlsStream) {
@@ -1289,7 +1332,7 @@ const CameraList = ({ cameras, setCameras }) => {
             >
               {isTogglingLiveMode
                 ? 'Switching...'
-                : `Mode: ${liveStreamMode.toUpperCase()} (Switch to ${isLiveHlsMode ? 'MJPEG' : 'HLS'})`}
+                : `Mode: ${liveStreamMode.toUpperCase()}`}
             </button>
             <button
               className="btn btn-secondary"

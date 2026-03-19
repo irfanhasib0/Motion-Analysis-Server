@@ -52,9 +52,9 @@ AUTH_SECRET = os.getenv("AUTH_SECRET", secrets.token_hex(32))
 # Load LIVE_STREAM_MODE: env var takes priority, then system.yaml, then default
 _sys_boot = camera_service.get_system_settings()
 _live_stream_env = os.getenv("LIVE_STREAM_MODE")
-LIVE_STREAM_MODE = (_live_stream_env if _live_stream_env in {"mjpeg", "hls"}
+LIVE_STREAM_MODE = (_live_stream_env if _live_stream_env in {"mjpeg", "hls", "ws"}
                     else str(_sys_boot['live_stream_mode']))
-if LIVE_STREAM_MODE not in {"mjpeg", "hls"}:
+if LIVE_STREAM_MODE not in {"mjpeg", "hls", "ws"}:
     LIVE_STREAM_MODE = "mjpeg"
 
 # Hardcoded to False - not configurable from frontend

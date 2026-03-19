@@ -12,6 +12,7 @@ import time
 from typing import Generator, Dict, Optional, Any, Union, List
 import logging
 from services.hls_manager import HLSManager  
+from services.ws_streaming_manager import WSStreamingManager
 from services.drawing_utils import StreamDrawingHelper
 from services.frame_buffer import FrameRingBuffer, AudioRingBuffer, ResultsRingBuffer, FrameBufferManager
 
@@ -48,6 +49,11 @@ class StreamingService:
         )
         self._hls_pipe_threads: Dict[str, threading.Thread] = {}
         self._hls_pipe_stop_events: Dict[str, threading.Event] = {}
+        # Initialize WebSocket streaming manager (mirrors HLS manager pattern)
+        self._ws_manager = WSStreamingManager(
+            streaming_service=self,
+            register_consumer=self.register_consumer,
+        )
         self._latest_audio_chunk_analysis: Dict[str, Dict[str, Any]] = {}
         self._audio_streams: Dict[str, Any] = {}  # camera_id -> audio-only Capture
         self._drawing = StreamDrawingHelper()
@@ -757,7 +763,23 @@ class StreamingService:
                     if should_run_tracker:
                         detect_output = tracker.detect(stream_frame, return_pts=True)
                         stream_frame, points_dict, flow_pts = self._extract_detect_payload(detect_output, stream_frame)
-                        viz_frame, _res = self._draw_motion_analysis_chart(stream_frame, points_dict, camera_id)
+
+                        # Only draw the chart when a processing stream viewer is connected (Q6)
+                        has_proc_viewer = bool(self.active_processing_streams.get(camera_id))
+                        if has_proc_viewer:
+                            viz_frame, _res = self._draw_motion_analysis_chart(stream_frame, points_dict, camera_id)
+                        else:
+                            viz_frame = stream_frame
+                            # Build lightweight result dict matching chart output format
+                            bg_diff_int = 0
+                            for p in points_dict.values():
+                                if isinstance(p, dict) and 'bg_diff' in p:
+                                    bg_diff_int = int(p.get('bg_diff', 0))
+                                    break
+                            _res = {
+                                _id: {'vel': round(float(p.get('mean_vel', 0.0)), 2), 'bg_diff': bg_diff_int}
+                                for _id, p in points_dict.items() if isinstance(p, dict)
+                            }
                         res = self._aggregate_motion_result(_res)
                         
                         with stream_lock:
@@ -787,12 +809,12 @@ class StreamingService:
                         time.sleep(self.no_motion_slow_down_delay_sec)
                     # Primary video stream: clean frame with FPS and optical flow overlays
                     frame_fps = self._update_loop_fps(f"{camera_id}:primary")
-                    primary_frame = self._drawing.draw_fps_overlay(stream_frame.copy(), frame_fps)
+                    primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps)
                     primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
-                    # Use capture timestamp for overlay frames to maintain chronological order
-                    self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(primary_frame, frame_capture_time)
-                    # Convert to bytes and store (thread-safe)
+                    # Encode once — all clients receive pre-encoded JPEG bytes (Q3)
                     frame_bytes = self.frame_to_bytes(primary_frame)
+                    self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(frame_bytes, frame_capture_time)
+                    # Store for fallback path (thread-safe)
                     with video_lock:
                         self._latest_video_frame[camera_id] = frame_bytes
             except Exception:
@@ -897,12 +919,10 @@ class StreamingService:
         while (self.active_streams.get(camera_id) == stream_token and 
                camera_id in self._video_background_threads):
             
-            # Get overlay frame from SPMC ring buffer (with FPS and optical flow overlays)
-            current_overlay_frame = self._get_spmc_data(camera_id, consumer_id, 'overlay')
+            # Get pre-encoded JPEG bytes from SPMC ring buffer (Q3: single encode path)
+            current_frame_bytes = self._get_spmc_data(camera_id, consumer_id, 'overlay')
             
-            # Convert overlay frame to bytes if available
-            if current_overlay_frame is not None:
-                current_frame_bytes = self.frame_to_bytes(current_overlay_frame)
+            if current_frame_bytes is not None:
                 yield current_frame_bytes
                 last_yielded_frame = current_frame_bytes
                 consecutive_empty = 0

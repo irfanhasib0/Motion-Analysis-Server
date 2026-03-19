@@ -30,6 +30,7 @@ _REQUIRED_CONFIG_KEYS = {
     'results_rbf_len',
     'mux_realtime',
     'auto_archive_days',
+    'enable_person_detection',
 }
 
 # Presets that cannot be modified from the frontend
