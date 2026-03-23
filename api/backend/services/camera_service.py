@@ -561,7 +561,7 @@ class CameraService(StreamingService):
         self.pipe_buffer_size = int(_sys['pipe_buffer_size'])
         self.rtsp_unified_demux_enabled = bool(_sys['rtsp_unified_demux_enabled'])
         self.live_stream_mode = str(_sys['live_stream_mode']).lower()
-        self.enable_person_detection = bool(_sys.get('enable_person_detection', True))
+        self.enable_person_detection = bool(_sys.get('enable_person_detection', False))
         self.enable_yolox = bool(_sys.get('enable_yolox', False))
         self.use_multiprocess = bool(_sys.get('tracker_multiprocess', False))
         
