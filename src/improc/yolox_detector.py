@@ -115,7 +115,7 @@ class YOLOXDetector:
     def __init__(self,
                  model_size="nano",
                  input_shape=None,
-                 score_thr=0.3,
+                 score_thr=0.5,
                  nms_thr=0.45,
                  target_class_ids=None):
         """
