@@ -1,0 +1,8 @@
+commit d1bf0191adff59bc8fcfeaa0b33d3d1642552a99
+Merge: 8d47ea5 5e9a77a
+Author: Yifu Zhang <953260160@qq.com>
+Date:   Sun Dec 11 15:05:00 2022 +0800
+
+    Merge pull request #296 from SkalskiP/main
+    
+    football players tracking tutorial with ByteTrack
