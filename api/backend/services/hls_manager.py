@@ -1,5 +1,4 @@
 import os
-import cv2
 import time
 import threading
 import subprocess
@@ -135,9 +134,7 @@ class HLSManager:
             '-hide_banner',
             '-loglevel', 'error',
             '-y',
-            '-f', 'rawvideo',
-            '-pix_fmt', 'bgr24',
-            '-s', f'{width}x{height}',
+            '-f', 'mjpeg',
             '-r', str(fps),
             '-i', 'pipe:0',
         ]
@@ -223,17 +220,14 @@ class HLSManager:
                 if process.poll() is not None or process.stdin is None:
                     break
 
-                # Write video frame using SPMC - direct call to _get_spmc_data
-                frame = self._streaming_service._get_spmc_data(camera_id, f"{self._consumer_id_base}_{camera_id}", 'overlay')
-                if frame is None:
+                # Write video frame using SPMC - pipe JPEG bytes directly from overlay buffer
+                jpeg_bytes = self._streaming_service._get_spmc_data(camera_id, f"{self._consumer_id_base}_{camera_id}", 'overlay')
+                if jpeg_bytes is None:
                     time.sleep(min(0.02, frame_interval))
                     continue
 
-                if frame.shape[1] != width or frame.shape[0] != height:
-                    frame = cv2.resize(frame, (width, height))
-
                 try:
-                    process.stdin.write(frame.tobytes())
+                    process.stdin.write(jpeg_bytes)
                 except Exception:
                     break
 

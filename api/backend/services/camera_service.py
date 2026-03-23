@@ -562,6 +562,8 @@ class CameraService(StreamingService):
         self.rtsp_unified_demux_enabled = bool(_sys['rtsp_unified_demux_enabled'])
         self.live_stream_mode = str(_sys['live_stream_mode']).lower()
         self.enable_person_detection = bool(_sys.get('enable_person_detection', True))
+        self.enable_yolox = bool(_sys.get('enable_yolox', False))
+        self.use_multiprocess = bool(_sys.get('tracker_multiprocess', False))
         
         # Store ring buffer settings for runtime updates
         self.frame_rbf_len = frame_rbf_len
@@ -923,8 +925,14 @@ class CameraService(StreamingService):
             logger.warning(f"{Colors.RED}Failed to start video for {camera_id}{Colors.RESET}")
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             return False
-            
-        tracker = OpticalFlowTracker(enable_person_detection=self.enable_person_detection)
+        
+        if self.use_multiprocess:
+            # Multiprocess mode: tracker process is started by streaming_service
+            tracker = None
+        else:
+            # Sequential mode: create tracker inline (original behavior)
+            tracker = OpticalFlowTracker(enable_person_detection=self.enable_person_detection, enable_yolox=self.enable_yolox)
+        
         ret, _ = cap.read_video()
             
         if ret:
@@ -932,8 +940,8 @@ class CameraService(StreamingService):
             logger.info(f"{Colors.GREEN}Video started for {camera_id}{Colors.RESET}")
             camera_started = True
             self._camera_streams[camera_id] = cap
-            self._camera_trackers[camera_id] = tracker
-            
+            if tracker is not None:
+                self._camera_trackers[camera_id] = tracker
             # Initialize ring buffers for SPMC data distribution
             self._ensure_ring_buffers(camera_id)
         else:
@@ -971,6 +979,10 @@ class CameraService(StreamingService):
                 del tracker
             except Exception:
                 pass
+
+        # Stop tracker process if running in multiprocess mode
+        if hasattr(self, 'ai_service'):
+            self.ai_service.stop_tracker_process(camera_id)
 
         self.stream_locks.pop(camera_id, None)
         self._latest_frames.pop(camera_id, None)

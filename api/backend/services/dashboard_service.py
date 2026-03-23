@@ -23,6 +23,7 @@ class StreamHealthMonitor:
         self.lag_threshold = 120.0  # 5 seconds max lag before considering frozen
         self.recovery_cooldown = 300  # 5 minutes between attempts
         self.max_recovery_attempts = 3
+        self.video_exhausted_cooldown = 900  # 15 minutes before retrying after max attempts
         
         self._last_check = 0
         self._check_interval = 30  # Check every 30 seconds
@@ -58,6 +59,9 @@ class StreamHealthMonitor:
                 'video_recovery_count': 0,
                 'audio_recovery_count': 0,
                 'recorder_recovery_count': 0,
+                'video_exhausted_recording_stopped': False,
+                'video_exhausted_time': None,
+                'was_recording_before_failure': False,
                 'notified_streaming_consumers': set()  # Track which consumers we've already notified about
             }
         
@@ -84,12 +88,36 @@ class StreamHealthMonitor:
         # Check producer video thread lag
         producer_video_lag = current_lag.get('producer_video_lag', {}).get(camera_id, 0)
         if producer_video_lag > self.lag_threshold:
-            self._recover_producer_video(camera_id)
-            history['last_video_recovery'] = now
-            history['video_recovery_count'] += 1
+            if history['video_recovery_count'] >= self.max_recovery_attempts:
+                # Max attempts exhausted — stop recording and wait for cooldown
+                if not history.get('video_exhausted_recording_stopped'):
+                    was_recording = camera_id in self.camera_service.active_recordings
+                    history['was_recording_before_failure'] = was_recording
+                    logger.error(f"🛑 Video recovery exhausted ({self.max_recovery_attempts} attempts) for {camera_id} — stopping recording, will retry in 15 min")
+                    if was_recording:
+                        self.camera_service.stop_recording(camera_id)
+                    history['video_exhausted_recording_stopped'] = True
+                    history['video_exhausted_time'] = now
+                
+                # After 15 min cooldown, reset and try again
+                if now - history.get('video_exhausted_time', now) >= self.video_exhausted_cooldown:
+                    logger.info(f"🔄 15-min cooldown elapsed for {camera_id} — resetting video recovery attempts")
+                    history['video_recovery_count'] = 0
+                    history['video_exhausted_recording_stopped'] = False
+                    history['video_exhausted_time'] = None
+            else:
+                self._recover_producer_video(camera_id)
+                history['last_video_recovery'] = now
+                history['video_recovery_count'] += 1
             history['producer_video_frozen'] = producer_video_lag
         else:
             history['producer_video_frozen'] = None
+            # If we were in exhausted state and stream recovered, restart recording if it was active before
+            if history.get('video_exhausted_recording_stopped'):
+                logger.info(f"✅ Video stream recovered for {camera_id} after exhaustion")
+                self._recover_recording(camera_id)
+                history['video_exhausted_recording_stopped'] = False
+                history['video_exhausted_time'] = None
             history['video_recovery_count'] = 0
             
         # Check producer audio thread lag    
@@ -183,17 +211,17 @@ class StreamHealthMonitor:
     
     def _recover_producer_video(self, camera_id: str):
         """Recover video producer thread by restarting it."""
-        is_recording = camera_id in self.camera_service.active_recordings
-        logger.warning(f"Recovering video producer thread for camera {camera_id}")
+        history = self.lag_history.get(camera_id, {})
+        logger.warning(f"Recovering video producer thread for camera {camera_id} (attempt {history.get('video_recovery_count', 0) + 1}/{self.max_recovery_attempts})")
         self.camera_service.stop_video_stream(camera_id)
         time.sleep(2)  # Allow clean shutdown
         success = self.camera_service.start_video_stream(camera_id)
         if success:
-            logger.info(f"Successfully recovered video producer thread for camera {camera_id}")
-        else:
-            logger.error(f"Failed to recover video producer thread for camera {camera_id}")
-        if is_recording:
+            logger.info(f"✅ Successfully recovered video producer thread for camera {camera_id}")
             self._recover_recording(camera_id)
+        else:
+            logger.error(f"❌ Failed to recover video producer thread for camera {camera_id}")
+        
 
     def _recover_producer_audio(self, camera_id: str):
         """Recover audio producer thread by restarting it."""
@@ -207,12 +235,22 @@ class StreamHealthMonitor:
             logger.error(f"Failed to recover audio producer thread for camera {camera_id}")
         
     def _recover_recording(self, camera_id: str):
-        """Recover recording subscriber by restarting recording."""
-        logger.warning(f"Recovering recording for camera {camera_id}")
-        self.camera_service.stop_recording(camera_id)
-        time.sleep(1)  # Brief pause
+        """Recover recording subscriber by restarting recording if it was active."""
+        is_recording = camera_id in self.camera_service.active_recordings
+        history = self.lag_history.get(camera_id, {})
+        was_recording = is_recording or history.get('was_recording_before_failure', False)
+        
+        if not was_recording:
+            return
+        
+        if is_recording:
+            logger.warning(f"Recovering recording for camera {camera_id}")
+            self.camera_service.stop_recording(camera_id)
+            time.sleep(1)  # Brief pause
+        
         self.camera_service.start_recording(camera_id)
         logger.info(f"Successfully recovered recording for camera {camera_id}")
+        history['was_recording_before_failure'] = False
     
     def _notify_frozen_stream(self, camera_id: str, stream_type: str, lag_seconds: float):
         """Notify when a stream appears frozen based on lag time."""
@@ -251,17 +289,17 @@ class StreamHealthMonitor:
             
             status_parts = []
             if video_thread is not None:
-                status_parts.append(f"video={'✅' if video_alive else '💀'}")
+                status_parts.append(f"video={'✅' if video_alive else '❌'}")
             if audio_thread is not None:
-                status_parts.append(f"audio={'✅' if audio_alive else '💀'}")
+                status_parts.append(f"audio={'✅' if audio_alive else '❌'}")
             if rec_thread is not None:
-                status_parts.append(f"rec={'✅' if rec_alive else '💀'}")
+                status_parts.append(f"rec={'✅' if rec_alive else '❌'}")
             
             if status_parts:
                 logger.info(f"🧵 Thread status for {camera_id}: {', '.join(status_parts)}")
             
             if dead:
-                logger.error(f"💀 Dead threads detected for {camera_id}: {', '.join(dead)} — recovery needed")
+                logger.error(f"⚠️ Dead threads detected for {camera_id}: {', '.join(dead)} — recovery needed")
         
         return thread_status
 
@@ -334,7 +372,7 @@ class DashboardService:
                 self._check_ram_threshold()
                 self.stream_monitor.monitor_streams()  # Add stream health monitoring
             except Exception:
-                logger.exception("💀 _sample_loop iteration failed — monitoring continues")
+                logger.exception("⚠️ _sample_loop iteration failed — monitoring continues")
             time.sleep(self.sample_interval_seconds)
 
     def _collect_sample(self):

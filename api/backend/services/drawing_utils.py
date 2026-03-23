@@ -108,7 +108,7 @@ class StreamDrawingHelper:
         peak_freq_text = str(max(0, int(round(peak_frequency_mean)))).zfill(4)
         return f"Amp: {overall_text} Fq: {peak_freq_text}", has_alert
 
-    def draw_fps_overlay(self, frame: np.ndarray, fps_value: float, res: Optional[dict] = None) -> np.ndarray:
+    def draw_fps_overlay(self, frame: np.ndarray, fps_value: float, res: Optional[dict] = None, tracker_fps: float = 0.0) -> np.ndarray:
         if frame is None:
             return frame
 
@@ -116,7 +116,7 @@ class StreamDrawingHelper:
             frame = np.ascontiguousarray(frame).copy()
 
         res = res or {}
-        texts = [f"FPS: {fps_value:.1f}"]
+        texts = [f"FPS: {fps_value:.1f} | Tracker: {tracker_fps:.1f}"]
         if len(res):
             texts += [f" | Vel: {res['vel']}" f" | Diff: {res['bg_diff']}"]
 

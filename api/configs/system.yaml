@@ -4,7 +4,7 @@ system:
   ram_threshold_bytes: 1073741824
   presets:
     default:
-      live_stream_mode: mjpeg
+      live_stream_mode: ws
       sensitivity: 4
       jpeg_quality: 70
       pipe_buffer_size: 100000000
@@ -19,9 +19,11 @@ system:
       results_rbf_len: 10
       mux_realtime: false
       auto_archive_days: 7
-      enable_person_detection: true
+      enable_person_detection: false
+      enable_yolox: true
+      tracker_multiprocess: true
     low_power:
-      live_stream_mode: mjpeg
+      live_stream_mode: ws
       sensitivity: 2
       jpeg_quality: 55
       pipe_buffer_size: 1000000
@@ -31,14 +33,16 @@ system:
       motion_check_interval: 10
       min_free_storage_bytes: 1073741824
       rtsp_unified_demux_enabled: false
-      frame_rbf_len: 5
+      frame_rbf_len: 3
       audio_rbf_len: 5
       results_rbf_len: 5
       mux_realtime: false
       auto_archive_days: 7
       enable_person_detection: false
+      enable_yolox: false
+      tracker_multiprocess: false
     custom:
-      live_stream_mode: mjpeg
+      live_stream_mode: ws
       sensitivity: 4
       jpeg_quality: 70
       pipe_buffer_size: 100000000
@@ -53,4 +57,6 @@ system:
       results_rbf_len: 10
       mux_realtime: false
       auto_archive_days: 5
-      enable_person_detection: true
+      enable_person_detection: false
+      enable_yolox: true
+      tracker_multiprocess: false

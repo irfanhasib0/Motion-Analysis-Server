@@ -15,6 +15,7 @@ from services.hls_manager import HLSManager
 from services.ws_streaming_manager import WSStreamingManager
 from services.drawing_utils import StreamDrawingHelper
 from services.frame_buffer import FrameRingBuffer, AudioRingBuffer, ResultsRingBuffer, FrameBufferManager
+from services.ai_service import AIService
 
 PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
 if PROJECT_SRC_PATH not in sys.path:
@@ -57,6 +58,7 @@ class StreamingService:
         self._latest_audio_chunk_analysis: Dict[str, Dict[str, Any]] = {}
         self._audio_streams: Dict[str, Any] = {}  # camera_id -> audio-only Capture
         self._drawing = StreamDrawingHelper()
+        self.ai_service = AIService()
     # =====================================================================
     # INITIALIZATION AND CONFIGURATION
     # =====================================================================
@@ -341,21 +343,16 @@ class StreamingService:
     def _extract_detect_payload(
         self,
         detect_output: Any,
-        fallback_frame: np.ndarray,
-    ) -> tuple[np.ndarray, Dict[str, Any], Dict[Any, Dict[str, Any]]]:
-        if isinstance(detect_output, np.ndarray):
-            return detect_output, {}, {}
+    ) -> tuple[Dict[str, Any], Dict[Any, Dict[str, Any]]]:
+        """Extract points_dict and pts_payload from tracker.detect() output.
+        The visualized frame from detect() is discarded — stream_frame is used directly."""
+        if not isinstance(detect_output, tuple) or len(detect_output) == 0:
+            return {}, {}
 
-        if not isinstance(detect_output, tuple):
-            return fallback_frame, {}, {}
-
-        if len(detect_output) == 0:
-            return fallback_frame, {}, {}
-
-        frame_candidate = detect_output[0] if detect_output[0] is not None else fallback_frame
         points_dict: Dict[str, Any] = {}
         pts_payload: Dict[Any, Dict[str, Any]] = {}
 
+        # Skip detect_output[0] (the visualized frame — unused)
         for item in detect_output[1:]:
             if isinstance(item, dict):
                 if not points_dict and any(
@@ -370,7 +367,7 @@ class StreamingService:
                 ):
                     pts_payload = item
 
-        return frame_candidate, points_dict, pts_payload
+        return points_dict, pts_payload
 
     def _draw_motion_analysis_chart(self, plot_array: np.ndarray, points_dict: Dict[str, Any], camera_id: str) -> tuple[np.ndarray, Dict[str, Dict[str, Any]]]:
         return self._drawing.draw_motion_analysis_chart(
@@ -703,9 +700,19 @@ class StreamingService:
         
         cap = self._camera_streams.get(camera_id)
         tracker = self._camera_trackers.get(camera_id)
+    
         
-        if not cap or not tracker:
-            logger.warning(f"{Colors.RED}Camera unavailable for {camera_id}{Colors.RESET}")
+        if not cap:
+            logger.warning(f"{Colors.RED}Camera capture unavailable for {camera_id}{Colors.RESET}")
+            return False
+        
+        if self.use_multiprocess:
+            # Multiprocess mode: tracker runs in a separate process via AIService
+            if not self.ai_service.is_tracker_process_alive(camera_id):
+                tracker_kwargs = {'enable_person_detection': getattr(self, 'enable_person_detection', True), 'enable_yolox': getattr(self, 'enable_yolox', False)}
+                self.ai_service.start_tracker_process(camera_id, tracker_kwargs)
+        elif not tracker:
+            logger.warning(f"{Colors.RED}Tracker unavailable for {camera_id}{Colors.RESET}")
             return False
         
         # Create thread-safe resources
@@ -727,6 +734,7 @@ class StreamingService:
                 consecutive_failures = 0
                 max_failures = 10
                 frame_index = 0
+                _last_tracker_result_ts = None  # Track last seen tracker result to avoid double-counting in FPS
                 
                 while not stop_event.is_set() and cap.is_video_stream_opened():
                     with stream_lock:
@@ -760,17 +768,37 @@ class StreamingService:
                     # Determine if we should run motion tracking on this frame
                     should_run_tracker = (effective_stride == 1 or frame_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
                     
-                    if should_run_tracker:
-                        detect_output = tracker.detect(stream_frame, return_pts=True)
-                        stream_frame, points_dict, flow_pts = self._extract_detect_payload(detect_output, stream_frame)
-
-                        # Only draw the chart when a processing stream viewer is connected (Q6)
+                    # ── Obtain detection output ──
+                    detect_output = None
+                    result_ts = frame_capture_time
+                    
+                    if self.use_multiprocess:
+                        if should_run_tracker:
+                            self.ai_service.submit_frame(camera_id, stream_frame, frame_capture_time, frame_index)
+                        tracker_result = self.ai_service.poll_result(camera_id)
+                        if tracker_result is not None:
+                            detect_output = (tracker_result.points_dict, tracker_result.flow_pts)
+                            result_ts = tracker_result.frame_capture_time
+                            # Only count FPS for genuinely new results (avoid inflating when loop is faster than tracker)
+                            if result_ts != _last_tracker_result_ts:
+                                self._update_loop_fps(f"{camera_id}:tracker")
+                                _last_tracker_result_ts = result_ts
+                    elif should_run_tracker:
+                        _t0 = time.time()
+                        raw = tracker.detect(stream_frame, return_pts=True)
+                        _tracker_dt = time.time() - _t0
+                        tracker_fps = self._update_loop_fps(f"{camera_id}:tracker")
+                        detect_output = self._extract_detect_payload(raw)
+                    
+                    # ── Process detection output (shared path) ──
+                    if detect_output is not None:
+                        points_dict, flow_pts = detect_output
+                        
                         has_proc_viewer = bool(self.active_processing_streams.get(camera_id))
                         if has_proc_viewer:
                             viz_frame, _res = self._draw_motion_analysis_chart(stream_frame, points_dict, camera_id)
                         else:
                             viz_frame = stream_frame
-                            # Build lightweight result dict matching chart output format
                             bg_diff_int = 0
                             for p in points_dict.values():
                                 if isinstance(p, dict) and 'bg_diff' in p:
@@ -785,17 +813,13 @@ class StreamingService:
                         with stream_lock:
                             self._latest_viz[camera_id] = viz_frame
                             self._latest_res_video[camera_id] = res
-                            
-                            # Publish viz frame to ring buffer for SPMC consumers with capture timestamp
                             if camera_id in self._viz_ring_buffers:
-                                self._viz_ring_buffers[camera_id].put_with_timestamp(viz_frame, frame_capture_time)
-                            
-                            # Update current video results and publish only video to ring buffer with capture timestamp
+                                self._viz_ring_buffers[camera_id].put_with_timestamp(viz_frame, result_ts)
                             if camera_id in self._results_ring_buffers:
-                                self._results_ring_buffers[camera_id].put_video_only_with_timestamp(res, frame_capture_time)
+                                self._results_ring_buffers[camera_id].put_video_only_with_timestamp(res, result_ts)
                             self._latest_pts_payload[camera_id] = flow_pts
-                            
                     else:
+                        # No new detection — use cached results
                         with stream_lock:
                             viz_frame = self._latest_viz.get(camera_id)
                             res = self._latest_res_video.get(camera_id, {'vel': 0, 'bg_diff': 0, 'ts': time.time(), 'detected_vel': False, 'detection_bg_diff': False})
@@ -809,7 +833,8 @@ class StreamingService:
                         time.sleep(self.no_motion_slow_down_delay_sec)
                     # Primary video stream: clean frame with FPS and optical flow overlays
                     frame_fps = self._update_loop_fps(f"{camera_id}:primary")
-                    primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps)
+                    _tracker_fps = self._fps_stats.get(f"{camera_id}:tracker", {}).get("fps", 0.0)
+                    primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps)
                     primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
                     # Encode once — all clients receive pre-encoded JPEG bytes (Q3)
                     frame_bytes = self.frame_to_bytes(primary_frame)

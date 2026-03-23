@@ -1,89 +1,232 @@
 import cv2
 import numpy as np
-from collections import deque, defaultdict
+from collections import defaultdict
 from matplotlib import pyplot as plt
 
-class FlowMemory:
-    def __init__(self, maxpid=25, min_traj_len=3, max_traj_len=150, keep_last_seen = 90):
-        self.motion_trajs  = defaultdict(lambda: np.ndarray(shape=(0,2), dtype=np.float32))
-        self.motion_queue  = defaultdict(lambda: deque(maxlen=max_traj_len))
-        self.pid_hist      = {}  # pid -> {'total_seen': int, 'last_seen': int}
 
+class _RingBuffer2D:
+    """Fixed-capacity circular buffer backed by a pre-allocated numpy array.
+
+    Behaves like deque(maxlen=capacity) but stores (x, y) positions
+    directly in a contiguous float32 array — no Python list allocation
+    per append and no list→array conversion when reading.
+    """
+    __slots__ = ('data', 'capacity', 'head', 'count')
+
+    def __init__(self, capacity):
+        self.data = np.zeros((capacity, 2), dtype=np.float32)
+        self.capacity = capacity
+        self.head = 0   # Next write index
+        self.count = 0  # Valid entries (≤ capacity)
+
+    def append(self, x, y):
+        """Write one (x, y) position, overwriting the oldest if full."""
+        self.data[self.head, 0] = x
+        self.data[self.head, 1] = y
+        self.head = (self.head + 1) % self.capacity
+        if self.count < self.capacity:
+            self.count += 1
+
+    def get_ordered(self):
+        """Return all stored positions in chronological order [count, 2]."""
+        return self.get_last_n(self.count)
+
+    def get_last_n(self, n):
+        """Return last n positions in chronological order [n, 2].
+
+        Returns a numpy view (zero-copy) when the slice is contiguous,
+        or a concatenated copy when the window wraps around the buffer.
+        """
+        n = min(n, self.count)
+        if n == 0:
+            return self.data[:0]  # empty [0, 2]
+        start = (self.head - n) % self.capacity
+        if start < self.head:
+            return self.data[start:self.head]       # Contiguous — numpy view
+        # Wrapped: tail portion + head portion
+        return np.concatenate([self.data[start:], self.data[:self.head]])
+
+class FlowMemory:
+    """Stores per-keypoint position history and builds smoothed trajectories.
+
+    Each tracked object (PID) can have multiple keypoints (KPID).
+    Positions are stored in numpy ring buffers keyed by "pid|kpid".
+    Once enough positions accumulate (≥ min_traj_len), a smoothed
+    trajectory is available for velocity calculation and visualization.
+
+    Args:
+        maxpid:         PID wrap-around limit (pid % maxpid) to bound ID space.
+        min_traj_len:   Minimum positions before a smoothed trajectory is built.
+        max_traj_len:   Maximum positions kept per keypoint (ring buffer capacity).
+        keep_last_seen: Frames a disappeared object stays eligible for trajectory selection.
+    """
+
+    def __init__(self, maxpid=2500, min_traj_len=10, max_traj_len=100, keep_last_seen=90):
+        self.max_traj_len = max_traj_len
+        # "pid|kpid" -> _RingBuffer2D (replaces deque + separate motion_trajs)
+        self._buffers = {}
+        # pid -> {'total_seen': int, 'last_seen': int}
+        self.pid_hist = {}
+        # "pid|kpid" -> total buffer count (used for ranking)
         self.traj_len = {}
+
         self.maxpid = maxpid
-        self.maxkpid = 6  # fixed for now
-        self.rolling_win = 1
+        self.maxkpid = 6
+        self.rolling_win = 1  # Rolling mean window size (1 = no smoothing)
         self.min_traj_len = min_traj_len
         self.keep_last_seen = keep_last_seen
 
-    def fill_neg1(self,a):
+    @property
+    def motion_trajs(self):
+        """Backward-compatible dict view: traj_key -> smoothed [L, 2] array.
+
+        Used by eval.py and coreset. Reads directly from ring buffers
+        without maintaining a separate dict.
+        """
+        result = {}
+        for traj_key, buf in self._buffers.items():
+            if buf.count >= self.min_traj_len:
+                result[traj_key] = self._get_smoothed(buf)
+        return result
+
+    def _get_smoothed(self, buf):
+        """Extract smoothed trajectory from a ring buffer.
+
+        When rolling_win == 1 (default), returns the raw last-N slice
+        directly — no convolution overhead.
+        """
+        recent = buf.get_last_n(self.min_traj_len)
+        if self.rolling_win <= 1:
+            # No smoothing needed — return the numpy slice as-is
+            return recent.copy()  # Copy to ensure caller owns the data
+        kernel = np.ones(self.rolling_win, dtype=np.float32) / self.rolling_win
+        smoothed_x = np.convolve(recent[:, 0], kernel, mode='same')
+        smoothed_y = np.convolve(recent[:, 1], kernel, mode='same')
+        return np.column_stack((smoothed_x, smoothed_y))
+
+    def fill_neg1(self, a):
+        """Interpolate -1 sentinel values in a 1D array using linear interpolation."""
         a = a.astype(float)
         x = np.arange(a.size)
-        m = a != -1
-        if m.sum() == 0:  # no known values
+        valid = a != -1
+        if valid.sum() == 0:
             return a
-        a[~m] = np.interp(x[~m], x[m], a[m])
+        a[~valid] = np.interp(x[~valid], x[valid], a[valid])
         return a
-    
-    def fill_array_neg1(self,your_2d_array):
-       filled = np.apply_along_axis(self.fill_neg1, axis=1, arr=your_2d_array)
-       filled = np.apply_along_axis(self.fill_neg1, axis=0, arr=filled)
-       return filled
+
+    def fill_array_neg1(self, arr_2d):
+        """Interpolate -1 sentinels in a 2D array, row-wise then column-wise."""
+        filled = np.apply_along_axis(self.fill_neg1, axis=1, arr=arr_2d)
+        filled = np.apply_along_axis(self.fill_neg1, axis=0, arr=filled)
+        return filled
 
     def add(self, pts):
-        for pid in self.pid_hist.keys():
+        """Add current frame's tracked points to memory.
+
+        1. Age all existing PIDs: last_seen += 1
+        2. For each currently visible PID:
+           - Reset last_seen = 0, increment total_seen
+           - Append each keypoint's (x, y) to its ring buffer
+           - Update traj_len once buffer count ≥ min_traj_len
+
+        Args:
+            pts: dict[int, dict] from _copy_pts(prev_pts).
+                 Each value must contain 'keypoints_1' array of shape [K, 2].
+        """
+        # Step 1: Age all tracked PIDs (those not seen this frame will drift upward)
+        for pid in self.pid_hist:
             self.pid_hist[pid]['last_seen'] += 1
 
-        for pid in pts.keys():
-            pid = pid % self.maxpid
+        # Step 2: Process currently visible objects
+        for pid in pts:
+            pid = pid % self.maxpid  # Wrap to bounded ID space
             if pid not in self.pid_hist:
                 self.pid_hist[pid] = {'last_seen': 0, 'total_seen': 0}
-            self.pid_hist[pid]['last_seen']   = 0
+            self.pid_hist[pid]['last_seen'] = 0
             self.pid_hist[pid]['total_seen'] += 1
-            for kpid in range(len(pts[pid]['keypoints_1'])):
-                curr_pts = pts[pid]['keypoints_1'][kpid].reshape(1,2)
-                
-                self.motion_queue[f'{pid}|{kpid}'].append(list(curr_pts[0]))
-                traj = np.array(self.motion_queue[f'{pid}|{kpid}'])
-                
-                if traj.shape[0] >= self.min_traj_len:
-                    kernel = np.ones(self.rolling_win) / self.rolling_win
-                    smoothed_x = np.convolve(traj[:, 0], kernel, mode='same')
-                    smoothed_y = np.convolve(traj[:, 1], kernel, mode='same')
-                    self.motion_trajs[f'{pid}|{kpid}'] = np.column_stack((smoothed_x, smoothed_y))
-                    self.traj_len[f'{pid}|{kpid}'] = traj.shape[0]
-    
-    def get_sorted_traj_ids(self, curr_pids = [], num_of_kpts = 5):
-        _ids = sorted(self.traj_len.keys(), key=lambda x: self.traj_len[x], reverse=True)
+
+            keypoints = pts[pid]['keypoints_1']
+            for kpid in range(len(keypoints)):
+                x, y = keypoints[kpid].ravel()
+                traj_key = f'{pid}|{kpid}'
+
+                # Get or create ring buffer for this keypoint
+                buf = self._buffers.get(traj_key)
+                if buf is None:
+                    buf = _RingBuffer2D(self.max_traj_len)
+                    self._buffers[traj_key] = buf
+
+                # Append directly to numpy buffer (no Python list creation)
+                buf.append(float(x), float(y))
+
+                # Record buffer count for ranking once we have enough positions
+                if buf.count >= self.min_traj_len:
+                    self.traj_len[traj_key] = buf.count
+
+    def get_sorted_traj_ids(self, curr_pids=(), num_of_kpts=5):
+        """Select top trajectory IDs for visualization, preferring visible objects.
+
+        Trajectories are ranked by total deque length (longest first).
+        Only trajectories with last_seen ≤ keep_last_seen are eligible.
+        Currently visible PIDs are preferred; recently disappeared PIDs
+        backfill remaining slots.
+
+        Args:
+            curr_pids: Currently visible PID set (from pts.keys()).
+            num_of_kpts: Maximum number of trajectory IDs to return.
+
+        Returns:
+            List[str]: Up to num_of_kpts trajectory IDs like ["3|0", "5|1"].
+                       Sorted alphabetically for consistent frame-to-frame ordering.
+        """
+        # Sort all trajectory IDs by length, longest first
+        all_ids = sorted(self.traj_len, key=self.traj_len.get, reverse=True)
+
         if len(curr_pids) == 0:
-            valid_ids = []
-            for tid in _ids:
-                pid = int(tid.split('|')[0])
-                if self.pid_hist[pid]['last_seen'] <= self.keep_last_seen:  # recently seen, keep as candidate
-                    valid_ids.append(tid)
-            return sorted(valid_ids[:num_of_kpts]) # sort alphabetically for consistency
-            
-        sorted_ids =  []    
-        extra_sorted_ids = []
-        for tid in _ids:
+            # No current PIDs — return longest trajectories that are still recent
+            valid_ids = [
+                tid for tid in all_ids
+                if self.pid_hist[int(tid.split('|')[0])]['last_seen'] <= self.keep_last_seen
+            ]
+            return sorted(valid_ids[:num_of_kpts])
+
+        # Split into currently visible vs recently disappeared
+        visible_ids = []
+        stale_ids = []
+        for tid in all_ids:
             pid = int(tid.split('|')[0])
             if pid in curr_pids:
-                sorted_ids.append(tid)
-            else:
-                if self.pid_hist[pid]['last_seen'] <= self.keep_last_seen:  # recently seen, keep as extra candidate
-                    extra_sorted_ids.append(tid)
-        if len(sorted_ids) < num_of_kpts:
-            sorted_ids += extra_sorted_ids[:num_of_kpts - len(sorted_ids)]
-        return sorted(sorted_ids) # sort alphabetically for consistency
-    
-    def get_traj_velocities(self, traj_id = None, traj = None):
+                visible_ids.append(tid)
+            elif self.pid_hist[pid]['last_seen'] <= self.keep_last_seen:
+                stale_ids.append(tid)
+
+        # Prefer visible; backfill with recently disappeared if not enough
+        if len(visible_ids) < num_of_kpts:
+            visible_ids += stale_ids[:num_of_kpts - len(visible_ids)]
+
+        return sorted(visible_ids)
+
+    def get_traj_velocities(self, traj_id=None, traj=None):
+        """Compute frame-to-frame Euclidean speed along a trajectory.
+
+        speed[i] = sqrt((x[i+1]-x[i])² + (y[i+1]-y[i])²)
+
+        Args:
+            traj_id: Key into ring buffers. Used if traj is None.
+            traj:    Direct trajectory array [L, 2]. Overrides traj_id.
+
+        Returns:
+            np.ndarray of shape [L-1] with per-step speeds.
+        """
         if traj is None:
             assert traj_id is not None, "Either traj_id or traj must be provided"
-            traj = self.motion_trajs.get(traj_id, None)
-        velocities = np.sum(np.diff(traj, axis=0)**2, axis=1)**0.5
-        velocities = np.nan_to_num(velocities, nan=0.0, posinf=0.0, neginf=0.0)
-        return velocities
-                
+            buf = self._buffers.get(traj_id)
+            if buf is None or buf.count < 2:
+                return np.array([], dtype=np.float32)
+            traj = self._get_smoothed(buf)
+        velocities = np.sqrt(np.sum(np.diff(traj, axis=0) ** 2, axis=1))
+        return np.nan_to_num(velocities, nan=0.0, posinf=0.0, neginf=0.0)
+
     def save(self):
         pass
 

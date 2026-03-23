@@ -1,6 +1,12 @@
 import sys
+import os
 import cv2
 import numpy as np
+
+# Add bytetrack package path so 'yolox.tracker' imports resolve
+_bytetrack_path = os.path.join(os.path.dirname(__file__), '..', 'improc', 'bytetrack')
+if _bytetrack_path not in sys.path:
+    sys.path.insert(0, os.path.abspath(_bytetrack_path))
     
 class SimpleTracker:
     """Simple tracking based on position similarity"""
@@ -105,14 +111,15 @@ class SimpleTracker:
 class ByteTracker:
     """ByteTracker implementation for multi-object tracking"""
     
-    sys.path.insert(0,'../libs/ByteTrack')
     try:
         from yolox.tracker.byte_tracker import BYTETracker, STrack
         from yolox.tracker.basetrack import BaseTrack, TrackState
-    except ImportError:
-        print("ByteTrack dependencies not found.")
+        _bytetrack_available = True
+    except ImportError as e:
+        print(f"ByteTrack dependencies not available: {e}")
+        _bytetrack_available = False
 
-    def __init__(self, track_thresh=0.5, track_buffer=30, match_thresh=0.8, frame_rate=30):
+    def __init__(self, track_thresh=0.3, track_buffer=30, match_thresh=0.8, frame_rate=30):
         """
         Initialize ByteTracker
         
@@ -122,11 +129,8 @@ class ByteTracker:
             match_thresh: IOU threshold for matching
             frame_rate: Frame rate of the video
         """
-        
-        self.BYTETracker = BYTETracker
-        self.STrack = STrack
-        self.BaseTrack = BaseTrack
-        self.TrackState = TrackState
+        if not self._bytetrack_available:
+            raise ImportError("ByteTrack dependencies are not installed. Cannot create ByteTracker.")
         
         # Create args object for BYTETracker
         class Args:
@@ -139,6 +143,11 @@ class ByteTracker:
         self.args = Args()
         self.tracker = self.BYTETracker(self.args, frame_rate=frame_rate)
         self.frame_id = 0
+        self._frame_size = None  # Set via set_frame_size(h, w)
+    
+    def set_frame_size(self, height, width):
+        """Set frame dimensions for proper BYTETracker scaling."""
+        self._frame_size = (height, width)
     # nbyte_tracer.py: np.float -> np.float32
     # matching.py : cython_bbox -> numpy implementation
     def update(self, detections):
@@ -174,19 +183,24 @@ class ByteTracker:
             # Calculate detection score from keypoint scores if not provided
             if 'score' in det:
                 score = det['score']
-            else:
+            elif 'keypoint_scores' in det:
                 score = np.mean(det['keypoint_scores'][det['keypoint_scores'] > 0.1])
                 score = max(score, 0.3)  # Ensure minimum score
+            else:
+                score = 0.7  # Default score for contour/motion detections
             
             detection_array.append([bbox[0], bbox[1], bbox[2], bbox[3], score])
         
         detection_array = np.array(detection_array)
         
-        # Get image info (use bbox bounds as approximate image size)
-        img_info = [
-            np.max(detection_array[:, 3]),  # max y
-            np.max(detection_array[:, 2])   # max x
-        ]
+        # Use provided frame size or fall back to detection bounds
+        if self._frame_size is not None:
+            img_info = list(self._frame_size)  # [height, width]
+        else:
+            img_info = [
+                np.max(detection_array[:, 3]),  # max y
+                np.max(detection_array[:, 2])   # max x
+            ]
         img_size = img_info
         
         # Update tracker

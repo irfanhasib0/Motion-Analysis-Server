@@ -30,12 +30,11 @@ Detection Modes:
 
 import cv2
 import numpy as np
-from copy import deepcopy
 from scipy.optimize import linear_sum_assignment
-from trackers.trackers import SimpleTracker #, ByteTracker
-from improc.kalman_filter import KalmanPoint, CvKalmanPoint
+from trackers.trackers import SimpleTracker, ByteTracker
 from improc.memory import FlowMemory, CoresetMemory
 from improc.person_detection import PersonDetector
+from improc.yolox_detector import YOLOXDetector
 
 
 def _copy_pts(pts: dict) -> dict:
@@ -46,109 +45,137 @@ def _copy_pts(pts: dict) -> dict:
         for k, v in pts.items()
     }
 
-'''
-# Optional C++ acceleration via pybind11 module
-cpp_lib_path = os.path.join('../', "cpp", "build")
-if os.path.isdir(cpp_lib_path) and cpp_lib_path not in sys.path:
-    sys.path.append(cpp_lib_path)
-
-import motionflow_cpp
-MOTIONFLOW_CPP_AVAILABLE = False
-'''
 class OpticalFlowTracker:
-    def __init__(self, 
-                 min_traj_len=10,
-                 max_traj_len = 100, 
-                 max_pid=2500, 
-                 coreset_k =2, 
-                 matcher_mode="hungarian", 
+    """Motion detection and tracking pipeline.
+
+    Combines MOG2 background subtraction for motion region detection with
+    Lucas-Kanade sparse optical flow for keypoint tracking.  Each detected
+    region is assigned a persistent ID via SimpleTracker; keypoints inside the
+    region are tracked across frames and their trajectories stored in FlowMemory.
+
+    Pipeline per frame (accurate mode):
+        1. _detect_foreground_boxes  — MOG2 → contours → bboxes + optional YOLOX/person det
+        2. SimpleTracker.update      — assign persistent IDs with CamShift refinement
+        3. _detect_keypoints_in_boxes — detect SIFT/FAST/GFTT keypoints inside each bbox
+        4. _compute_sparse_flow      — LK optical flow (forward + backward consistency)
+        5. _detect_and_match         — match new detections to tracked flow points
+        6. memory.add                — store per-keypoint positions in ring buffers
+        7. memory.get_traj_velocities — compute per-trajectory speed for output
+
+    Pipeline per frame (fast mode):
+        Steps 1-2 only, using bbox centroids instead of keypoints (no optical flow).
+    """
+
+    def __init__(self,
+                 mem_min_traj_len=10,
+                 mem_max_traj_len=100,
+                 mem_max_pid=2500,
+                 mem_keep_last_seen=90,
+                 coreset_k=2,
+                 matcher_mode="hungarian",
                  det_method="fast",
                  bg_indoor=True,
                  bg_detect_shadow=True,
                  iou_threshold=0.5,
-                 enable_person_detection=True,
-                 enable_face_detection=True,
-                 enable_body_detection=True):
-        
-        self.prev_gray = None
-        self.prev_pts  = None
-        self.mask      = None
+                 enable_person_detection=False,
+                 enable_face_detection=False,
+                 enable_body_detection=False,
+                 enable_yolox=True):
+
+        # --- Frame state ---
+        self.prev_gray = None   # Previous grayscale frame for flow computation
+        self.prev_pts  = None   # Previous tracked points dict {pid: {keypoints_1, keypoints_2, bbox, ...}}
+        self.mask      = None   # Fading trail overlay for flow visualization
         self.viz_pos   = None
         self.viz_vel   = None
-        self.fg_mask   = 0
-        
-        self.det_method = det_method  # 'fast', 'accurate'
-        self.kpt_det_freq = 1
-        self.bg_min_bbox_area = 500
-        self.bg_min_pix_thr = 200
-        self.bg_mask_dilate_ksize = (3, 3)
+        self.fg_mask   = 0      # Running foreground mask (blended across frames)
+        self.count     = 0      # Frame counter (used for detection frequency)
+
+        # --- Detection parameters ---
+        self.det_method = det_method             # 'fast' (centroid-only) or 'accurate' (keypoints + flow)
+        self.kpt_det_freq = 1                    # Re-detect keypoints every N frames in accurate mode
+        self.kpt_det_idx = 1                     # Keypoint detector: 0=FAST, 1=SIFT, 2=ORB, 3=GFTT
+        self.kpt_max_kpts = 5                    # Max keypoints per bbox (top by response score)
+        self.num_traj_viz = 5                    # Number of trajectories to visualize
+
+        # --- Background subtraction parameters ---
+        self.bg_min_bbox_area = 500              # Ignore contours smaller than this (pixels²)
+        self.bg_min_pix_thr = 200                # Foreground mask threshold (gray → binary)
+        self.bg_mask_dilate_ksize = (3, 3)       # Morphology kernel size for mask cleanup
         self.bf_detect_shadow = bg_detect_shadow
-        self.bg_shadow_pixel_value = 127
-        self.mtc_max_cost_thr = 50
-        self.kpt_max_kpts = 5
-        self.kpt_det_idx = 1  # 0: FAST, 1: SIFT, 2: ORB, 3: GFTT
-        self.num_traj_viz = 5  # Number of trajectories to visualize
+        self.bg_shadow_pixel_value = 127         # MOG2 shadow pixel marker value
 
-        colors = [
-        (0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0),
-        (255, 0, 255), (0, 255, 255), (128, 255, 0), (255, 128, 0)
+        # --- Matching parameters ---
+        self.mtc_max_cost_thr = 50               # Max L2² distance for keypoint assignment
+        self.iou_threshold = iou_threshold       # IoU overlap to merge detection sources
+        self.matcher_mode = matcher_mode         # 'hungarian' (robust) or 'greedy' (faster)
+
+        # --- Visualization colors (8 base colors × 10 repeats) ---
+        _base_colors = [
+            (0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0),
+            (255, 0, 255), (0, 255, 255), (128, 255, 0), (255, 128, 0)
         ]
-        self.colors = []
-        for _ in range(10):
-            self.colors += colors
+        self.colors = _base_colors * 10
         self.n_colors = len(self.colors)
-        self.count = 0
 
-        if bg_indoor == True:
-            # High sensitivity
-            shadowThreshold = 0.7 # lower means more aggressive shadow filtering
-            history = 50 # longer history for more stable background modeling
-            varThreshold = 16 # higher means less sensitive to small changes (tune based on noise level)
-
+        # --- MOG2 background subtractor ---
+        # Indoor: high sensitivity (short history, low variance threshold)
+        # Outdoor: low sensitivity (longer history, higher variance threshold)
+        if bg_indoor:
+            shadow_thr = 0.7    # Lower = more aggressive shadow filtering
+            history = 50        # Shorter history → adapts faster to indoor lighting changes
+            var_thr = 16        # Lower = more sensitive to small changes
         else:
-            # Low sensitivity
-            shadowThreshold = 0.5
+            shadow_thr = 0.5
             history = 200
-            varThreshold = 30
+            var_thr = 30
 
-        self.mog_params = dict(history=history,
-                               varThreshold=varThreshold,
-                               detectShadows=self.bf_detect_shadow)
-        
-        self.kpt_params = dict(threshold=25,
-                               nonmaxSuppression=True)
-        self.flow_params = dict(winSize=(9, 9), # 15 
-                                maxLevel=1, # 2 
-                                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 7, 0.03)) # 10 , 0.03
-        
-        self.bgsub    = cv2.createBackgroundSubtractorMOG2(**self.mog_params) # 500, 16, True
+        self.bgsub = cv2.createBackgroundSubtractorMOG2(
+            history=history, varThreshold=var_thr, detectShadows=self.bf_detect_shadow)
         if self.bf_detect_shadow:
             self.bgsub.setShadowValue(self.bg_shadow_pixel_value)
-            self.bgsub.setShadowThreshold(shadowThreshold)
+            self.bgsub.setShadowThreshold(shadow_thr)
 
-        self.gftt     = cv2.GFTTDetector_create(maxCorners=100, qualityLevel=0.1, minDistance=10, blockSize=10) # 200, 0.01, 10, 10
-        self.orb      = cv2.ORB_create(nfeatures=24)
-        self.fast     = cv2.FastFeatureDetector_create(**self.kpt_params)
-        self.sift     = cv2.SIFT_create(nfeatures=100,  contrastThreshold=0.04, edgeThreshold=10,  sigma=1.6, nOctaveLayers=3)
-        self.tracker  = SimpleTracker(max_disappeared=10, max_distance=400)
-        #self.tracker  = ByteTracker()
+        # --- Keypoint detectors ---
+        self.fast = cv2.FastFeatureDetector_create(threshold=25, nonmaxSuppression=True)
+        self.sift = cv2.SIFT_create(nfeatures=100, contrastThreshold=0.04, edgeThreshold=10, sigma=1.6, nOctaveLayers=3)
+        self.orb  = cv2.ORB_create(nfeatures=24)
+        self.gftt = cv2.GFTTDetector_create(maxCorners=100, qualityLevel=0.1, minDistance=10, blockSize=10)
 
-        self.iou_threshold = iou_threshold
-        self.matcher_mode = matcher_mode  # 'hungarian' (robust) or 'greedy' (faster, C++ accelerated)
-        self.memory = FlowMemory(maxpid=max_pid, min_traj_len=min_traj_len, max_traj_len=max_traj_len)
+        # --- Lucas-Kanade optical flow parameters ---
+        self.flow_params = dict(
+            winSize=(9, 9),
+            maxLevel=1,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 7, 0.03),
+        )
+
+        # --- Object tracker (assigns persistent IDs across frames) ---
+        #self.tracker = SimpleTracker(max_disappeared=10, max_distance=400)
+        self.tracker = ByteTracker()
+
+        # --- Trajectory memory ---
+        self.memory = FlowMemory(
+            maxpid=mem_max_pid, min_traj_len=mem_min_traj_len,
+            max_traj_len=mem_max_traj_len, keep_last_seen=mem_keep_last_seen)
         # Coreset memory (PatchCore-like) for representative motion trajectories
-        self.coreset = CoresetMemory(sample_len=max_traj_len, max_items=max_traj_len)
+        self.coreset = CoresetMemory(sample_len=mem_max_traj_len, max_items=mem_max_traj_len)
         self.coreset_k = coreset_k
 
-        # Person detection initialization
+        # --- Optional deep-learning detectors ---
         self.enable_person_detection = enable_person_detection
         self.person_detector = None
         if enable_person_detection:
             print("Initializing PersonDetector for OpticalFlowTracker...")
             self.person_detector = PersonDetector(
                 enable_face=enable_face_detection,
-                enable_body=enable_body_detection
-            )
+                enable_body=enable_body_detection)
+
+        self.enable_yolox = enable_yolox
+        self.yolox_detector = None
+        if enable_yolox:
+            print("Initializing YOLOXDetector for OpticalFlowTracker...")
+            self.yolox_detector = YOLOXDetector()
+            self.enable_yolox = self.yolox_detector.is_enabled()
 
         self.viz_div_h = None
 
@@ -184,6 +211,19 @@ class OpticalFlowTracker:
         """Check if person detection is enabled"""
         return self.enable_person_detection
     
+    def set_yolox_enabled(self, enabled):
+        self.enable_yolox = enabled and (self.yolox_detector is not None) and self.yolox_detector.is_enabled()
+    
+    def is_yolox_enabled(self):
+        return self.enable_yolox
+    
+    def get_yolox_status(self):
+        if self.yolox_detector is None:
+            return {'enabled': False}
+        status = self.yolox_detector.get_status()
+        status['enabled'] = self.enable_yolox
+        return status
+    
     def get_person_detection_status(self):
         """Get detailed status of person detection features"""
         if self.person_detector is None:
@@ -196,26 +236,22 @@ class OpticalFlowTracker:
         }
     
     def _compute_dense_flow(self, prev_gray, gray):
-            """Compute dense optical flow using Farneback method"""
-            flow = cv2.calcOpticalFlowFarneback(
-                prev_gray, gray, None,
-                pyr_scale=0.5, levels=3, winsize=15,
-                iterations=3, poly_n=5, poly_sigma=1.2, flags=0
-            )
-            
-            # Convert flow to HSV visualization
-            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
-            hsv = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.uint8)
-            hsv[..., 0] = (ang / 2).astype(np.uint8)  # Hue from angle
-            hsv[..., 1] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)  # Saturation from magnitude
-            hsv[..., 2] = 255  # Full value
-            
-            rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-            return rgb
+        """Compute dense optical flow (Farneback) and return an HSV visualization."""
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray, gray, None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+        )
+        mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=True)
+        hsv = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.uint8)
+        hsv[..., 0] = (ang / 2).astype(np.uint8)       # Hue from angle
+        hsv[..., 1] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        hsv[..., 2] = 255                               # Full value
+        return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     
     def contour_in_dets(self, cnt_box, dets):
-        """Check if a contour overlaps with any person detection boxes using IoU threshold"""
-        x1, y1, x2, y2 = cnt_box[0], cnt_box[1], cnt_box[2], cnt_box[3]
+        """Return True if cnt_box overlaps any detection bbox above the IoU threshold."""
+        x1, y1, x2, y2 = cnt_box
         cnt_area = (x2 - x1) * (y2 - y1)
         for det in dets:
             dx1, dy1, dx2, dy2 = det['bbox']
@@ -229,40 +265,70 @@ class OpticalFlowTracker:
                 return True
         return False
     
-    def _detect_forground_bboxes(self, gray):
+    def _detect_foreground_boxes(self, gray):
+        """Detect motion regions via MOG2 background subtraction.
+
+        Steps:
+            1. Apply MOG2 to get raw foreground mask, remove shadow pixels
+            2. Blend with previous mask for temporal smoothing
+            3. Morphological cleanup (erode + dilate) to reduce noise
+            4. Collect detection boxes from: person detector, YOLOX, contours
+            5. Assign persistent IDs with SimpleTracker + CamShift bbox refinement
+
+        Returns:
+            dict[int, dict]: Tracked results keyed by persistent object ID.
+                Each value contains 'bbox', 'bbox_xywh', 'centroid', 'mask', 'type'.
+        """
+        # --- 1. Background subtraction ---
         prev_fg_mask = self.fg_mask.copy() if isinstance(self.fg_mask, np.ndarray) else self.fg_mask
         bg_mask = self.bgsub.apply(gray)
         if self.bf_detect_shadow:
             bg_mask[bg_mask == self.bg_shadow_pixel_value] = 0
+
+        # Temporal blend: 50% previous + 50% current for smoother transitions
         self.fg_mask = np.uint8(0.5 * self.fg_mask) + np.uint8(0.5 * bg_mask)
-        if type(prev_fg_mask) == int:
-            prev_fg_mask = self.fg_mask.copy()
-        diff_mask    = np.abs(self.fg_mask - prev_fg_mask)
-        diff_mask = diff_mask[diff_mask > 0]
-        if len(diff_mask) > 0:
-            self.bg_diff = np.mean(diff_mask)
-        else:
-            self.bg_diff = 0
-        
+
+        # Compute background change metric (used in velocity visualization)
+        if isinstance(prev_fg_mask, int):
+            prev_fg_mask = self.fg_mask.copy()  # First frame — no previous mask
+        diff_mask = np.abs(self.fg_mask - prev_fg_mask)
+        nonzero = diff_mask[diff_mask > 0]
+        self.bg_diff = np.mean(nonzero) if len(nonzero) > 0 else 0
+
+        # --- 2. Morphological cleanup ---
         if self.bg_mask_dilate_ksize[0] > 1:
-            kernel       = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.bg_mask_dilate_ksize)
-            #self.fg_mask = cv2.morphologyEx(self.fg_mask, cv2.MORPH_OPEN, kernel, iterations=3)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.bg_mask_dilate_ksize)
             self.fg_mask = cv2.erode(self.fg_mask, kernel, iterations=1)
             self.fg_mask = cv2.dilate(self.fg_mask, kernel, iterations=1)
-        
+
+        # Binary threshold: pixels above threshold become foreground (255)
         self.fg_mask[self.fg_mask > self.bg_min_pix_thr] = 255
         contours, _ = cv2.findContours(self.fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        results = []
 
-        # Add person detection boxes if enabled
+        # --- 3. Collect detection boxes from all sources ---
+        results = []
         person_detections = []
+        yolox_detections = []
+        frame_bgr = None
+
+        # 3a. Person detector (face/body Haar cascades)
         if self.enable_person_detection and self.person_detector is not None:
-            # Convert grayscale back to BGR for person detection
             frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
             person_detections = self.person_detector.detect(frame_bgr)
             results.extend(person_detections)
 
+        # 3b. YOLOX detector (skip boxes that overlap existing person detections)
+        if self.enable_yolox and self.yolox_detector is not None:
+            if frame_bgr is None:
+                frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            dets = self.yolox_detector.detect(frame_bgr)
+            for det in dets:
+                if not self.contour_in_dets(det['bbox'], results):
+                    yolox_detections.append(det)
+            #print(f"YOLOX detections: {len(yolox_detections)}, Person detections: {len(person_detections)}, Contours: {len(contours)}"  )
+            results.extend(yolox_detections)
+
+        # 3c. MOG2 contour boxes — sorted by area (largest first), skip overlapping DL detections
         areas = np.array([cv2.contourArea(cnt) for cnt in contours])
         indx  = np.argsort(areas)[::-1].astype(np.int32)
         areas = areas[indx]
@@ -270,19 +336,23 @@ class OpticalFlowTracker:
         for cnt, area in zip(contours, areas):
             if area > self.bg_min_bbox_area:
                 x, y, w, h = cv2.boundingRect(cnt)
-                if self.contour_in_dets([x, y, x + w, y + h],person_detections): 
-                    continue  # Skip if this contour overlaps with a person detection (already added)
+                if self.contour_in_dets([x, y, x + w, y + h], yolox_detections + person_detections):
+                    continue  # Skip if this contour overlaps with a prior detection
                 _mask = np.zeros_like(self.fg_mask)
                 _mask[y:y+h, x:x+w] = self.fg_mask[y:y+h, x:x+w]
+                
                 results.append({'bbox': [x, y, x + w, y + h],
                                 'bbox_xywh': [int(x + w/2), int(y + h/2), int(w), int(h)],
                                 'centroid': [y + h / 2, x + w / 2],
                                 'mask': _mask,
                                 'type': 'motion'})
-        
+
+        # --- 4. Assign persistent IDs + CamShift bbox refinement ---
         results = self.tracker.update(results)
         for i in results.keys():
-            ret, track_window = cv2.CamShift(results[i]['mask'], results[i]['bbox_xywh'], (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 1))
+            ret, track_window = cv2.CamShift(
+                results[i]['mask'], results[i]['bbox_xywh'],
+                (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 1))
             results[i]['bbox_xywh'] = track_window
             x, y, w, h = track_window
             results[i]['bbox'] = np.array([x, y, x + w, y + h])
@@ -290,71 +360,121 @@ class OpticalFlowTracker:
         return results
     
     def pts_in_bbox(self, pts, bbox):
+        """Boolean mask: which points (N,1,2) lie inside the given [x1,y1,x2,y2] bbox."""
         x1, y1, x2, y2 = bbox
         in_bbox = (pts[:, 0, 0] >= x1) & (pts[:, 0, 0] <= x2) & (pts[:, 0, 1] >= y1) & (pts[:, 0, 1] <= y2)
         return in_bbox
-    
-    def _detect_pts(self, _gray, det_feat_pts=True):
-        '''
-        Original detection method using background subtraction
-        '''
-        # Detect corners to track (Python path; with per-bbox C++ accel when available)
-        results = self._detect_forground_bboxes(_gray)
+
+    def _detect_keypoints_in_boxes(self, gray, results, det_feat_pts=True):
+        """Detect keypoints inside each tracked bounding box.
+
+        For each bbox, the centroid is always included as keypoint[0].
+        When det_feat_pts=True, additional feature keypoints (SIFT/FAST/ORB/GFTT)
+        are detected in the ROI, scored by response, and the top-K are kept.
+
+        Populates per-result:
+            keypoints_1:      [K, 2] initial positions (pre-flow)
+            keypoints_2:      [K, 2] copy of keypoints_1 (post-flow destination)
+            keypoint_scores:  [K, 1] detector response scores (1.0 for centroid)
+        """
         for i in results.keys():
             bbox = results[i]['bbox']
-            
-            pts = np.array([(bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2], dtype=np.float32).reshape(-1,2)
-            scores = np.array([1.0], dtype=np.float32).reshape(-1,1)
+
+            # Centroid is always the first keypoint
+            cx = (bbox[0] + bbox[2]) / 2
+            cy = (bbox[1] + bbox[3]) / 2
+            pts = np.array([[cx, cy]], dtype=np.float32)
+            scores = np.array([[1.0]], dtype=np.float32)
+
             if det_feat_pts:
-                roi = _gray[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]
+                # Crop ROI and detect feature keypoints
+                roi = gray[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]
                 kpt_det = [self.fast, self.sift, self.orb, self.gftt][self.kpt_det_idx]
                 kps = kpt_det.detect(roi)
                 det_pts = cv2.KeyPoint_convert(kps)
+
                 if len(det_pts) > 0:
+                    # Shift ROI-local coords to frame-global coords
                     det_pts += np.array([bbox[0], bbox[1]], dtype=np.float32)
                     pts = np.concatenate([pts, det_pts], axis=0)
-                    
-                    scores  = np.array([1.0]+[kp.response for kp in kps], dtype=np.float32)
+
+                    # Sort by response score (descending) and keep top-K
+                    scores = np.array([1.0] + [kp.response for kp in kps], dtype=np.float32)
                     inds = np.argsort(scores)[::-1]
-                    pts  = pts[inds][:self.kpt_max_kpts].reshape(-1,2)
-                    scores = scores[inds][:self.kpt_max_kpts].reshape(-1,1)
-                
-            results[i]['keypoints_1']  = pts
-            results[i]['keypoints_2']  = pts.copy()
+                    pts    = pts[inds][:self.kpt_max_kpts].reshape(-1, 2)
+                    scores = scores[inds][:self.kpt_max_kpts].reshape(-1, 1)
+
+            results[i]['keypoints_1'] = pts
+            results[i]['keypoints_2'] = pts.copy()
             results[i]['keypoint_scores'] = scores
-        
+
         return results
-    
-    def _update_init_pts(self, gray):
-        if self.count % self.kpt_det_freq == 0:
-            det_pts = self._detect_pts(gray)
+
+    def _detect_and_match_keypoints_in_boxes(self, gray, _detect):
+        """Re-detect or propagate keypoints, then ensure centroid is keypoint[0].
+
+        When _detect=True (detection frame):
+            - Re-detect keypoints via _detect_keypoints_in_boxes
+            - For existing tracked objects: match new detections to previous flow
+              positions using Hungarian assignment, so keypoint IDs stay consistent
+            - Remove objects that disappeared from detection results
+
+        When _detect=False (propagation frame):
+            - Copy flow destinations (keypoints_2) back to keypoints_1
+            - Shift bboxes by estimated velocity for next flow computation
+
+        Finally, override keypoint[0] with the current bbox centroid for all objects.
+        """
+        if _detect:
+            # Re-detect foreground regions and keypoints, then match with tracked flow
+            results = self._detect_foreground_boxes(gray)
+            det_pts = self._detect_keypoints_in_boxes(gray, results, det_feat_pts=True)
+
             for i in det_pts.keys():
-                if i in self.prev_pts.keys() and len(self.prev_pts[i]['keypoints_1']) >= det_pts[i]['keypoints_1'].shape[0]:
+                if i in self.prev_pts and len(self.prev_pts[i]['keypoints_1']) >= det_pts[i]['keypoints_1'].shape[0]:
+                    # Match previous flow destinations to new detections for ID consistency
                     flow_kpts = self.prev_pts[i]['keypoints_2'].copy()
                     self.prev_pts[i] = det_pts[i]
-                    self.prev_pts[i]['keypoints_1'] = self.match_keypoints_by_distance(flow_kpts, det_pts[i]['keypoints_1'], matcher=self.matcher_mode)
+                    self.prev_pts[i]['keypoints_1'] = self.match_keypoints_by_distance(
+                        flow_kpts, det_pts[i]['keypoints_1'], matcher=self.matcher_mode)
                     self.prev_pts[i]['keypoints_2'] = self.prev_pts[i]['keypoints_1'].copy()
                 else:
+                    # New object or grew more keypoints — accept fresh detections as-is
                     self.prev_pts[i] = det_pts[i]
-            
+
+            # Prune objects no longer in detection results
             for i in list(self.prev_pts.keys()):
-                if i not in det_pts.keys():
+                if i not in det_pts:
                     del self.prev_pts[i]
         else:
+            # Propagation: carry forward flow positions and shift bbox by velocity
             for i in self.prev_pts.keys():
                 self.prev_pts[i]['keypoints_1'] = self.prev_pts[i]['keypoints_2'].copy()
                 vel = self.prev_pts[i].get('vel', np.array([0.0, 0.0]))
                 vel = np.nan_to_num(vel, nan=0.0, posinf=0.0, neginf=0.0)
                 self.prev_pts[i]['bbox'] = self.prev_pts[i]['bbox'] + np.array([vel[0], vel[1], vel[0], vel[1]])
-                
+
+        # Ensure keypoint[0] is always the bbox centroid
         for i in self.prev_pts.keys():
-            center = np.array([[(self.prev_pts[i]['bbox'][0]+self.prev_pts[i]['bbox'][2])/2,
-                                (self.prev_pts[i]['bbox'][1]+self.prev_pts[i]['bbox'][3])/2]], dtype=np.float32)
-            self.prev_pts[i]['keypoints_1'][0] = center.reshape(1,2)
-            self.prev_pts[i]['keypoints_2'][0] = center.reshape(1,2)
+            bbox = self.prev_pts[i]['bbox']
+            center = np.array([[(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]], dtype=np.float32)
+            self.prev_pts[i]['keypoints_1'][0] = center
+            self.prev_pts[i]['keypoints_2'][0] = center
 
     def match_keypoints_by_distance(self, kp1, kp2, matcher='hungarian'):
-        # Handle empty inputs gracefully
+        """Assign kp2 positions to kp1 slots via minimum-cost distance matching.
+
+        Uses scipy's Hungarian (Jonker-Volgenant) algorithm to find the
+        optimal assignment.  Matches with cost >= mtc_max_cost_thr are rejected.
+
+        Args:
+            kp1: Previous keypoints [N, 2].
+            kp2: Newly detected keypoints [M, 2].
+            matcher: Assignment strategy (currently only 'hungarian').
+
+        Returns:
+            [N, 2] array with matched kp2 positions written into kp1 slots.
+        """
         if kp1 is None or kp2 is None:
             return kp1 if kp2 is None else kp2
         if kp1.size == 0:
@@ -362,126 +482,157 @@ class OpticalFlowTracker:
         if kp2.size == 0:
             return kp1
 
+        # Pairwise squared-L2 cost matrix [N, M]
         _kp1 = kp1.reshape(-1, 2)[:, None, :]
         _kp2 = kp2.reshape(-1, 2)[None, :, :]
         dists = ((_kp1 - _kp2) ** 2).sum(axis=2).astype(np.float32)
-        
-        # Sanitize cost matrix to avoid infeasible assignment (NaN/Inf -> large cost)
         dists = np.nan_to_num(dists, nan=0.0, posinf=1e3, neginf=0.0)
-        
+
         kp2s = np.empty_like(kp1)
         row_ind, col_ind = linear_sum_assignment(dists)
-        # Filter out high-cost matches
-        valid_matches = dists[row_ind, col_ind] < self.mtc_max_cost_thr
-        
-        row_ind = row_ind[valid_matches]
-        col_ind = col_ind[valid_matches]
-        kp2s[row_ind] = kp2[col_ind]
-        
+
+        # Reject high-cost matches (object likely different)
+        valid = dists[row_ind, col_ind] < self.mtc_max_cost_thr
+        kp2s[row_ind[valid]] = kp2[col_ind[valid]]
         return kp2s
     
+    @staticmethod
+    def _sanitize_points(pts, h, w):
+        """Replace NaN/Inf and clip coordinates to frame bounds."""
+        pts = np.nan_to_num(pts, nan=0.0, posinf=1e3, neginf=0.0)
+        pts[:, 0, 0] = np.clip(pts[:, 0, 0], 0, w - 1)
+        pts[:, 0, 1] = np.clip(pts[:, 0, 1], 0, h - 1)
+        return pts
+
     def _compute_sparse_flow(self, gray):
+        """Track keypoints via forward-backward Lucas-Kanade optical flow.
+
+        For each tracked object:
+            1. Forward LK:  prev_gray → gray  gives predicted positions (p1)
+            2. Backward LK: gray → prev_gray  back-projects p1 to (p0r)
+            3. Consistency check: |kp1 - p0r| < 1.0 px rejects bad tracks
+            4. Valid keypoints get updated positions; invalid ones get shifted
+               by the mean flow velocity so they don’t freeze in place
+        """
+        h, w = gray.shape[:2]
+
         for i in self.prev_pts.keys():
             if len(self.prev_pts[i]['keypoints_1']) == 0:
                 continue
-                
-            # Ensure keypoints are in correct format
-            kp1 = self.prev_pts[i]['keypoints_1'].astype(np.float32)
-            kp1 = kp1.reshape(-1, 1, 2).astype(np.float32)
-            
-            kp1 = np.nan_to_num(kp1, nan=0.0, posinf=1e3, neginf=0.0)
-            kp1[:,0,0] = np.clip(kp1[:,0,0], 0, gray.shape[1]-1)
-            kp1[:,0,1] = np.clip(kp1[:,0,1], 0, gray.shape[0]-1)
 
-            p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray,
-                                                        gray,
-                                                        kp1, None,
-                                                        **self.flow_params)
-            
-            p1 = np.nan_to_num(p1, nan=0.0, posinf=1e3, neginf=0.0)
-            p1[:,0,0] = np.clip(p1[:,0,0], 0, gray.shape[1]-1)
-            p1[:,0,1] = np.clip(p1[:,0,1], 0, gray.shape[0]-1)
+            kp1 = self.prev_pts[i]['keypoints_1'].astype(np.float32).reshape(-1, 1, 2)
+            kp1 = self._sanitize_points(kp1, h, w)
 
-            p0r, _, _ = cv2.calcOpticalFlowPyrLK(gray,
-                                                 self.prev_gray,
-                                                 p1, None,
-                                                 **self.flow_params)
-            
-            p0r = np.nan_to_num(p0r, nan=0.0, posinf=1e3, neginf=0.0)
-            p0r[:,0,0] = np.clip(p0r[:,0,0], 0, gray.shape[1]-1)
-            p0r[:,0,1] = np.clip(p0r[:,0,1], 0, gray.shape[0]-1)
-            
+            # Forward flow: prev_gray → gray
+            p1, st, _ = cv2.calcOpticalFlowPyrLK(
+                self.prev_gray, gray, kp1, None, **self.flow_params)
+            p1 = self._sanitize_points(p1, h, w)
+
+            # Backward flow: gray → prev_gray (for consistency check)
+            p0r, _, _ = cv2.calcOpticalFlowPyrLK(
+                gray, self.prev_gray, p1, None, **self.flow_params)
+            p0r = self._sanitize_points(p0r, h, w)
+
+            # Forward-backward consistency: reject points that don't round-trip within 1 px
             d = abs(kp1 - p0r)
             good_mask = d.reshape(-1, 2).max(-1) < 1.0
-            val_pts   = (st.flatten() == 1) & good_mask
+            val_pts = (st.flatten() == 1) & good_mask
+
+            # Update valid keypoints with their new flow positions
             bbox = self.prev_pts[i]['bbox']
-            new_center = np.array([[[(bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2]]], dtype=np.float32)
-            self.prev_pts[i]['keypoints_2'][val_pts] = p1[val_pts].reshape(-1,2)
-            
-            if ((kp1[0] - new_center)**2).sum() < self.mtc_max_cost_thr:
+            new_center = np.array([[[(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]]], dtype=np.float32)
+            self.prev_pts[i]['keypoints_2'][val_pts] = p1[val_pts].reshape(-1, 2)
+
+            # If centroid hasn't drifted too far, snap keypoint[0] to bbox center
+            # and apply mean velocity to invalid keypoints as a fallback
+            if ((kp1[0] - new_center) ** 2).sum() < self.mtc_max_cost_thr:
                 self.prev_pts[i]['keypoints_2'][0] = new_center
                 self.prev_pts[i]['vel'] = np.mean(p1[val_pts] - kp1[val_pts], axis=0)
-                self.prev_pts[i]['keypoints_2'][~val_pts] += (self.prev_pts[i]['vel']).reshape(1,2)
+                self.prev_pts[i]['keypoints_2'][~val_pts] += self.prev_pts[i]['vel'].reshape(1, 2)
 
     def detect(self, frame, return_pts: bool = False):
+        """Run full detection + tracking pipeline on one BGR frame.
+
+        Returns:
+            If return_pts=False: (viz_frame, points_dict)
+            If return_pts=True:  (viz_frame, points_dict, pts_out)
+
+            viz_frame:    Frame with flow trails and bounding boxes drawn.
+            points_dict:  {traj_id: {vel, mean_vel, channel, bg_diff}} for top trajectories.
+            pts_out:      Copy of per-object tracked point dict (for recording/external use).
+        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # Set frame size for ByteTracker scaling (no-op for SimpleTracker)
+        if hasattr(self.tracker, 'set_frame_size'):
+            self.tracker.set_frame_size(gray.shape[0], gray.shape[1])
+
+        # --- First frame: bootstrap detection, no flow yet ---
         if self.prev_gray is None:
-            self.prev_pts  = self._detect_pts(gray, det_feat_pts= not (self.det_method == 'fast'))
+            results = self._detect_foreground_boxes(gray)
+            self.prev_pts = self._detect_keypoints_in_boxes(
+                gray, results, det_feat_pts=(self.det_method != 'fast'))
             self.prev_gray = gray
-            self.viz_div_h = int(gray.shape[0] // (self.num_traj_viz+1))
+            self.viz_div_h = int(gray.shape[0] // (self.num_traj_viz + 1))
             self.viz_div_w = int(gray.shape[1])
             if return_pts:
                 return frame, {}, _copy_pts(self.prev_pts)
             return frame, {}
-        
-        if self.det_method == 'fast':
-            for i in self.prev_pts.keys():
-                self.prev_pts[i]['keypoints_2'] = self.prev_pts[i]['keypoints_1'].copy()
-        elif self.det_method == 'accurate':
-            self._compute_sparse_flow(gray)
-        else:  # balanced
-            raise ValueError(f"Unknown detection method: {self.det_method}")
 
         self.prev_gray = gray
-
-        # Visualization
         self.memory._viz_pos = None
         self.memory._viz_vel = None
+
+        # --- Store current keypoints in trajectory memory ---
         pts = _copy_pts(self.prev_pts)
         self.memory.add(pts)
-        sorted_ids  = self.memory.get_sorted_traj_ids(curr_pids=pts.keys(), num_of_kpts=self.num_traj_viz)
-        
+        sorted_ids = self.memory.get_sorted_traj_ids(
+            curr_pids=pts.keys(), num_of_kpts=self.num_traj_viz)
+
+        # --- Build per-trajectory velocity output ---
         points_dict = {}
-        for _ch,_id in enumerate(sorted_ids):
-            _ch += 1
-            vel = 0.1*self.memory.get_traj_velocities(traj_id=_id)#[-200:]
+        for ch, tid in enumerate(sorted_ids, start=1):
+            vel = 0.1 * self.memory.get_traj_velocities(traj_id=tid)
             if len(vel) > 0:
-                points_dict[_id] = {
+                points_dict[tid] = {
                     'vel': np.asarray(vel, dtype=np.float32),
                     'mean_vel': float(np.mean(vel)),
-                    'channel': int(_ch),
+                    'channel': ch,
                     'bg_diff': int(self.bg_diff),
                 }
-        
+
         viz_frame = self._draw_pts_flow(frame, self.prev_pts)
         pts_out = _copy_pts(self.prev_pts)
-        
+
+        # --- Fast mode: centroid-only detection (no optical flow) ---
         if self.det_method == 'fast':
-            self.prev_pts = self._detect_pts(gray, det_feat_pts=False)
+            results = self._detect_foreground_boxes(gray)
+            self.prev_pts = self._detect_keypoints_in_boxes(gray, results, det_feat_pts=False)
             if return_pts:
                 return viz_frame, points_dict, pts_out
             return viz_frame, points_dict
-        
-        self._update_init_pts(gray)
+
+        # --- Accurate mode: sparse optical flow + keypoint re-detection ---
+        self._compute_sparse_flow(gray)
+        _detect = self.count % self.kpt_det_freq == 0
+        self._detect_and_match_keypoints_in_boxes(gray, _detect)
         self.count += 1
+
         if return_pts:
             return viz_frame, points_dict, pts_out
         return viz_frame, points_dict
     
     def plot_velocities(self, plot_array, points_dict):
-        plot_array = 0 * plot_array
+        """Draw per-trajectory velocity waveforms on plot_array.
 
+        Each trajectory gets a horizontal row with a gray baseline and a
+        colored oscillating curve representing frame-to-frame speed.
+        Scales dynamically to the array size.
+
+        Returns:
+            (plot_array, res) where res maps traj_id -> {vel, bg_diff}.
+        """
+        plot_array = 0 * plot_array
         h, w = plot_array.shape[:2]
         top_margin = max(8, int(h * 0.20))
         bottom_margin = max(6, int(h * 0.03))
@@ -540,13 +691,7 @@ class OpticalFlowTracker:
                     lineType=cv2.LINE_AA,
                 )
 
-            #y_pos = top_margin + idx * row_h + text_start_offset
-            #for elem in [f'id: {_id}', f'vel: {mean_vel:.2f} diff: {bg_diff_int}']:
-            #    cv2.putText(plot_array, elem,
-            #                (left_pad, y_pos),
-            #                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, text_thickness, cv2.LINE_AA)
-            #    y_pos += text_gap
-            res[_id] = {'vel': round(mean_vel,2), 'bg_diff': bg_diff_int}
+            res[_id] = {'vel': round(mean_vel, 2), 'bg_diff': bg_diff_int}
             if idx >= self.num_traj_viz - 1:
                 break
 
@@ -576,37 +721,44 @@ class OpticalFlowTracker:
             self.plot_arrays.clear()
     
     def _draw_pts_flow(self, frame, _pts):
+        """Draw optical flow trails, keypoint dots, bounding boxes, and IDs on frame."""
         viz_frame = frame.copy()
+
         for i in _pts.keys():
+            # Skip objects seen fewer than 3 frames (likely noise)
             if self.memory.pid_hist[i]['total_seen'] < 3:
                 continue
+
             good_new = _pts[i]['keypoints_2']
             good_old = _pts[i]['keypoints_1']
-            
+
+            # Initialize or fade the flow trail overlay
             if self.mask is None:
                 self.mask = np.zeros_like(viz_frame)
             else:
                 self.mask = (0.99 * self.mask).astype(np.uint8)
 
+            # Draw flow line + dot for each keypoint
             for j, (new, old) in enumerate(zip(good_new, good_old)):
                 a, b = new.ravel().astype(int)
                 c, d = old.ravel().astype(int)
-                if min(a,b,c,d) < 0:
+                if min(a, b, c, d) < 0:
                     continue
-                try:
-                    self.mask = cv2.line(self.mask, (a, b), (c, d), self.colors[j % self.n_colors], 2)
-                    viz_frame = cv2.circle(viz_frame, (a, b), 3, self.colors[j % self.n_colors], -1)
-                except:
-                    print(a,b,c,d)
-                    
-            try:
+                color = self.colors[j % self.n_colors]
+                self.mask = cv2.line(self.mask, (a, b), (c, d), color, 2)
+                viz_frame = cv2.circle(viz_frame, (a, b), 3, color, -1)
+
+            # Composite the fading trail overlay onto the frame
+            if self.mask.shape == viz_frame.shape:
                 viz_frame = cv2.add(viz_frame, self.mask)
-            except:
-                print(viz_frame.shape, self.mask.shape)
-                print(viz_frame.dtype, self.mask.dtype)
-            cv2.rectangle(viz_frame, (int(_pts[i]['bbox'][0]), int(_pts[i]['bbox'][1])),
-                        (int(_pts[i]['bbox'][2]), int(_pts[i]['bbox'][3])), (0, 255, 0), 2)
+
+            # Draw bounding box and ID label
+            bbox = _pts[i]['bbox']
+            cv2.rectangle(viz_frame,
+                          (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])),
+                          (0, 255, 0), 2)
             cv2.putText(viz_frame, f'ID: {i}',
-                        (int(_pts[i]['bbox'][0]), int(_pts[i]['bbox'][1]) - 10),
+                        (int(bbox[0]), int(bbox[1]) - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
         return viz_frame
