@@ -338,5 +338,7 @@ if __name__ == "__main__":
         "start_server:app", 
         host="0.0.0.0", 
         port=9001, 
-        reload=bool(UVICORN_RELOAD)
+        reload=bool(UVICORN_RELOAD),
+        ws_ping_interval=None,  # Disable keepalive pings — prevents concurrent drain AssertionError
+        ws_ping_timeout=None,
     )

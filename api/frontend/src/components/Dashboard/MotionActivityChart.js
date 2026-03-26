@@ -1,14 +1,15 @@
 import React, { useMemo, useState } from 'react';
-import metricConfig from './metric_config.json';
+import metricConfig from '../metric_config.json';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid, ReferenceLine
 } from 'recharts';
 
 const METRICS = [
   { key: 'vel', label: metricConfig.labels.vel, defaultOn: false },
+  { key: 'person', label: metricConfig.labels.person, defaultOn: false },
+  { key: 'duration', label: metricConfig.labels.duration, defaultOn: true },
   { key: 'diff', label: metricConfig.labels.diff, defaultOn: false },
   { key: 'loudness', label: metricConfig.labels.loudness, defaultOn: false },
-  { key: 'duration', label: metricConfig.labels.duration, defaultOn: true },
 ];
 
 const DAY_COLORS = [
@@ -69,6 +70,7 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick }) => {
         diff: meta.diff != null ? Math.min(Number(meta.diff), DEFAULT_YMAX.diff) : null,
         loudness: meta.loudness != null ? Math.min(Number(meta.loudness), DEFAULT_YMAX.loudness) : null,
         duration: rec.duration != null ? Math.min(Number(rec.duration), DEFAULT_YMAX.duration) : null,
+        person: meta.max_person_count != null ? Math.min(Number(meta.max_person_count), DEFAULT_YMAX.person) : null,
         id: rec.id,
         camera_id: rec.camera_id,
       });
@@ -91,7 +93,7 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick }) => {
           const c = Number(center);
           const avg = { minute: c, id: null, camera_id: null };
           // Average each metric
-          for (const mk of ['vel', 'diff', 'loudness', 'duration']) {
+          for (const mk of ['vel', 'person', 'duration', 'diff', 'loudness']) {
             const vals = group.filter(p => p[mk] != null).map(p => p[mk]);
             avg[mk] = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
           }
@@ -107,7 +109,7 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick }) => {
     }
     // Build per-metric merged data arrays
     const dataByMetric = {};
-    for (const mk of ['vel', 'diff', 'loudness', 'duration']) {
+    for (const mk of ['vel', 'person', 'duration', 'diff', 'loudness']) {
       const minuteMap = {};
       for (const date of days) {
         for (const pt of processedByDate[date]) {

@@ -209,7 +209,8 @@ class YOLOXDetector:
                 'bbox_xywh': [int(x1 + bw / 2), int(y1 + bh / 2), int(bw), int(bh)],
                 'centroid': [y1 + bh / 2, x1 + bw / 2],
                 'mask': mask,
-                'type': f'yolox_{cls_name}',
+                'type': f'{cls_name}',
+                'score': round(float(final_scores[i]), 4),
             })
 
         return detections

@@ -1,14 +1,16 @@
 {
   "labels": {
     "vel": "Speed",
+    "person": "Person",
+    "duration": "Duration",
     "diff": "Crowd",
-    "loudness": "Loudness",
-    "duration": "Duration"
+    "loudness": "Loudness"
   },
   "max": {
     "vel": 6,
+    "person": 20,
+    "duration": 200,
     "diff": 300,
-    "loudness": 30,
-    "duration": 200
+    "loudness": 30
   }
 }

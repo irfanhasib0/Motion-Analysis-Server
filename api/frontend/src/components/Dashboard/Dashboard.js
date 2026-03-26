@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Camera, Video, HardDrive, Clock } from 'lucide-react';
 import MotionActivityChart from './MotionActivityChart';
+import StreamLagChart from './StreamLagChart';
 import './Dashboard.css';
 
 const Dashboard = ({ cameras, recordings, systemInfo }) => {
@@ -145,6 +146,14 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
         <MotionActivityChart recordings={recordings} cameras={cameras} onDayClick={(date, recordingId, cameraId) => navigate('/live', { state: { date, recordingId, cameraId } })} />
       </div>
 
+      {/* Stream Lag History Chart */}
+      <div className="content-section" style={{ marginBottom: 16 }}>
+        <div className="section-header">
+          <h2 className="section-title">24h Stream Lag History</h2>
+        </div>
+        <StreamLagChart cameras={cameras} />
+      </div>
+
       <div className="content-section">
         <div className="section-header">
           <h2 className="section-title">
@@ -208,7 +217,7 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
               </div>
               <div className="metadata-item">
                 <span className="metadata-label">Disk Size (Recording Dir):</span>
-                <span className="metadata-value">{formatIO((normalizedProcessUsage.recording_dir_size_gb ?? normalizedDiskSize.recording_dir_size_gb) * 1024)}</span>
+                <span className="metadata-value">{formatIO((normalizedDiskSize.recording_dir_size_gb) * 1024)}</span>
               </div>
             </div>
           </div>

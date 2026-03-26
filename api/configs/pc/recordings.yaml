@@ -6359,3 +6359,14 @@ cameras:
         loudness: 0.24
         activity_percentage: 5.29
         audio_recorded: true
+  train_mot20:
+    '1970-01-01':
+    - id: train_mot20_01
+      camera_id: train_mot20
+      file_path: /root/Motion-Analysis-Server/api/recordings/train_mot20_01.mp4
+      start_time: '1970-01-01T00:00:01'
+      duration: 0
+      file_size: 32401147
+      status: completed
+      end_time: null
+      created_at: '2026-03-25T14:00:04.482377'

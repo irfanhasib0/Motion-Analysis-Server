@@ -101,6 +101,7 @@ export const api = {
   createCamera: (camera) => apiClient.post('/cameras', camera),
   updateCamera: (cameraId, updates) => apiClient.put(`/cameras/${cameraId}`, updates),
   deleteCamera: (cameraId) => apiClient.delete(`/cameras/${cameraId}`),
+  browseFiles: (path) => apiClient.get('/browse-files', { params: path ? { path } : {} }),
   startCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/start`),
   stopCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/stop`),
   restartCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/restart`),
@@ -182,6 +183,8 @@ export const api = {
   // Stream health monitoring endpoints
   getCameraStreamHealth: (cameraId) => apiClient.get(`/cameras/${cameraId}/stream-health`),
   getAllCamerasStreamHealth: () => apiClient.get('/system/stream-health'),
+  getLagHistory: () => apiClient.get('/system/lag-history'),
+  getCameraLagHistory: (cameraId) => apiClient.get(`/cameras/${cameraId}/lag-history`),
 
   // Archive endpoints
   exportArchive: (filters = {}) => apiClient.post('/recordings/archive/export', filters),

@@ -184,14 +184,16 @@ def _apply_config(tracker, update: TrackerConfigUpdate):
 
 class AIService:
     """
-    Manages per-camera tracker processes (or inline trackers for sequential mode).
+    Unified tracker management — handles both multiprocess and sequential modes.
 
-    Attributes stored per camera_id:
-        _tracker_processes      – multiprocessing.Process
-        _tracker_input_queues   – frames → tracker
-        _tracker_output_queues  – results ← tracker
-        _tracker_config_queues  – config updates → tracker
-        _tracker_stop_events    – clean shutdown signal
+    Callers use the same interface regardless of mode:
+        ensure_tracker(camera_id, tracker_kwargs)  – start tracker
+        submit_frame(camera_id, frame, ...)        – feed a frame
+        poll_result(camera_id)                     – get latest result
+        stop_tracker(camera_id)                    – cleanup
+
+    In *multiprocess* mode, detect() runs in a child process via queues.
+    In *sequential* mode, detect() runs inline inside submit_frame().
     """
 
     INPUT_QUEUE_SIZE = 2    # Small buffer — drop frames if tracker is behind
@@ -199,6 +201,8 @@ class AIService:
     CONFIG_QUEUE_SIZE = 8
 
     def __init__(self):
+        self._use_multiprocess: bool = False
+
         # Per-camera multiprocessing resources
         self._tracker_processes: Dict[str, Any] = {}
         self._tracker_input_queues: Dict[str, Any] = {}
@@ -206,12 +210,59 @@ class AIService:
         self._tracker_config_queues: Dict[str, Any] = {}
         self._tracker_stop_events: Dict[str, Any] = {}
 
+        # Per-camera sequential-mode trackers
+        self._inline_trackers: Dict[str, Any] = {}
+
         # Latest result cache (video thread reads this)
         self._latest_tracker_result: Dict[str, Optional[TrackerResult]] = {}
 
-    # ── lifecycle ────────────────────────────────────────────────────────
+    # ── configuration ────────────────────────────────────────────────────
 
-    def start_tracker_process(self, camera_id: str, tracker_kwargs: dict) -> bool:
+    def set_multiprocess(self, enabled: bool) -> None:
+        """Set whether new trackers should use multiprocess mode."""
+        self._use_multiprocess = enabled
+
+    @property
+    def use_multiprocess(self) -> bool:
+        return self._use_multiprocess
+
+    # ── unified lifecycle ────────────────────────────────────────────────
+
+    def ensure_tracker(self, camera_id: str, tracker_kwargs: dict) -> bool:
+        """Ensure a tracker is running for *camera_id* (multiprocess or sequential)."""
+        if self.is_tracker_alive(camera_id):
+            return True
+        if self._use_multiprocess:
+            return self._start_tracker_process(camera_id, tracker_kwargs)
+        return self._start_inline_tracker(camera_id, tracker_kwargs)
+
+    def stop_tracker(self, camera_id: str) -> None:
+        """Stop the tracker for *camera_id* (either mode)."""
+        self._stop_tracker_process(camera_id)
+        self._inline_trackers.pop(camera_id, None)
+        self._latest_tracker_result.pop(camera_id, None)
+
+    def is_tracker_alive(self, camera_id: str) -> bool:
+        """Check if a tracker is active for *camera_id* (either mode)."""
+        if camera_id in self._inline_trackers:
+            return True
+        proc = self._tracker_processes.get(camera_id)
+        return proc is not None and proc.is_alive()
+
+    # ── sequential (inline) lifecycle ────────────────────────────────────
+
+    def _start_inline_tracker(self, camera_id: str, tracker_kwargs: dict) -> bool:
+        """Create an inline OpticalFlowTracker for sequential mode."""
+        from improc.optical_flow import OpticalFlowTracker
+
+        tracker = OpticalFlowTracker(**tracker_kwargs)
+        self._inline_trackers[camera_id] = tracker
+        logger.info(f"{Colors.GREEN}Inline tracker started for {camera_id}{Colors.RESET}")
+        return True
+
+    # ── multiprocess lifecycle ───────────────────────────────────────────
+
+    def _start_tracker_process(self, camera_id: str, tracker_kwargs: dict) -> bool:
         """Spawn a tracker subprocess for *camera_id*."""
         if camera_id in self._tracker_processes:
             logger.warning(f"Tracker process already running for {camera_id}")
@@ -239,7 +290,7 @@ class AIService:
         logger.info(f"{Colors.GREEN}Tracker process started for {camera_id} (pid={proc.pid}){Colors.RESET}")
         return True
 
-    def stop_tracker_process(self, camera_id: str) -> None:
+    def _stop_tracker_process(self, camera_id: str) -> None:
         """Stop the tracker subprocess for *camera_id* (if running)."""
         stop_event = self._tracker_stop_events.pop(camera_id, None)
         if stop_event:
@@ -272,21 +323,36 @@ class AIService:
                 except Exception:
                     pass
 
-        self._latest_tracker_result.pop(camera_id, None)
-        logger.info(f"{Colors.YELLOW}Tracker process stopped for {camera_id}{Colors.RESET}")
-
-    def is_tracker_process_alive(self, camera_id: str) -> bool:
-        proc = self._tracker_processes.get(camera_id)
-        return proc is not None and proc.is_alive()
+        logger.info(f"{Colors.YELLOW}Tracker stopped for {camera_id}{Colors.RESET}")
 
     # ── frame I/O (called from video thread) ─────────────────────────────
 
     def submit_frame(self, camera_id: str, frame: np.ndarray,
                      frame_capture_time: float, frame_index: int) -> bool:
         """
-        Submit a frame to the tracker process (non-blocking).
-        Returns True if frame was enqueued, False if dropped.
+        Submit a frame to the tracker (unified interface).
+
+        - Sequential mode: runs detect() inline and caches the result.
+        - Multiprocess mode: enqueues the frame (non-blocking, may drop).
         """
+        # ── Sequential (inline) path ──
+        inline_tracker = self._inline_trackers.get(camera_id)
+        if inline_tracker is not None:
+            try:
+                raw = inline_tracker.detect(frame, return_pts=True)
+                points_dict, flow_pts = _extract_dicts(raw)
+                self._latest_tracker_result[camera_id] = TrackerResult(
+                    points_dict=points_dict,
+                    flow_pts=flow_pts,
+                    frame_capture_time=frame_capture_time,
+                    frame_index=frame_index,
+                )
+                return True
+            except Exception:
+                logger.exception(f"Inline tracker detect() failed for {camera_id}")
+                return False
+
+        # ── Multiprocess path ──
         input_q = self._tracker_input_queues.get(camera_id)
         if not input_q:
             return False
@@ -305,10 +371,16 @@ class AIService:
 
     def poll_result(self, camera_id: str) -> Optional[TrackerResult]:
         """
-        Non-blocking poll for the latest tracker result.
-        Drains the output queue and returns only the freshest result.
-        Caches it in _latest_tracker_result for repeat reads.
+        Non-blocking poll for the latest tracker result (unified interface).
+
+        - Sequential mode: returns the result cached by submit_frame().
+        - Multiprocess mode: drains the output queue for the freshest result.
         """
+        # Sequential mode — result already cached by submit_frame()
+        if camera_id in self._inline_trackers:
+            return self._latest_tracker_result.get(camera_id)
+
+        # Multiprocess mode — drain queue
         output_q = self._tracker_output_queues.get(camera_id)
         if not output_q:
             return self._latest_tracker_result.get(camera_id)
@@ -333,9 +405,18 @@ class AIService:
 
     def send_config_update(self, camera_id: str, action: str, value: Any = None) -> bool:
         """
-        Send a config change to the tracker process.
-        Returns False if no process running or queue is full.
+        Send a config change to the tracker (unified interface).
+
+        - Sequential mode: applies directly to the inline tracker.
+        - Multiprocess mode: enqueues to the config queue.
         """
+        # Sequential mode — apply directly
+        inline_tracker = self._inline_trackers.get(camera_id)
+        if inline_tracker is not None:
+            _apply_config(inline_tracker, TrackerConfigUpdate(action=action, value=value))
+            return True
+
+        # Multiprocess mode — enqueue
         config_q = self._tracker_config_queues.get(camera_id)
         if not config_q:
             return False
@@ -349,6 +430,6 @@ class AIService:
     # ── cleanup ──────────────────────────────────────────────────────────
 
     def stop_all(self) -> None:
-        """Stop all tracker processes (e.g. on server shutdown)."""
-        for camera_id in list(self._tracker_processes.keys()):
-            self.stop_tracker_process(camera_id)
+        """Stop all trackers (e.g. on server shutdown)."""
+        for camera_id in list(self._tracker_processes.keys()) + list(self._inline_trackers.keys()):
+            self.stop_tracker(camera_id)

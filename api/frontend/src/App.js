@@ -3,12 +3,12 @@ import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-do
 import { Toaster } from 'react-hot-toast';
 import { Camera, Video, Settings, BarChart3, Monitor } from 'lucide-react';
 
-import Dashboard from './components/Dashboard';
-import CameraList from './components/CameraList';
-import RecordingList from './components/RecordingList';
-import EventView from './components/EventView';
-import SystemSettings from './components/SystemSettings';
-import LoginScreen from './components/LoginScreen';
+import Dashboard from './components/Dashboard/Dashboard';
+import CameraList from './components/CameraList/CameraList';
+import RecordingList from './components/RecordingList/RecordingList';
+import EventView from './components/EventView/EventView';
+import SystemSettings from './components/SystemSettings/SystemSettings';
+import LoginScreen from './components/LoginScreen/LoginScreen';
 import { api } from './api';
 
 import './App.css';

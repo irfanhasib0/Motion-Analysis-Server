@@ -79,6 +79,10 @@ class RecordingManager:
         self.clip_motion_frame: Dict[str, Optional[np.ndarray]] = {}
         self.clip_motion_frame_count: Dict[str, int] = {}
         self.clip_no_motion_frame_count: Dict[str, int] = {}
+        self.clip_max_person_count: Dict[str, int] = {}
+        self.clip_max_person_density: Dict[str, float] = {}
+        self.clip_max_person_conf: Dict[str, float] = {}
+        self.clip_max_person_frame: Dict[str, Optional[np.ndarray]] = {}
         self.clean_up_extensions = ['.overlay.mp4']  # Extensions to clean up if no motion detected
         self._metrics_buffer: Dict[str, list] = {}  # camera_id -> buffered lines
 
@@ -181,6 +185,10 @@ class RecordingManager:
         self.clip_motion_frame[camera_id] = None
         self.clip_motion_frame_count[camera_id] = 0
         self.clip_no_motion_frame_count[camera_id] = 0
+        self.clip_max_person_count[camera_id] = 0
+        self.clip_max_person_density[camera_id] = 0.0
+        self.clip_max_person_conf[camera_id] = 0.0
+        self.clip_max_person_frame[camera_id] = None
 
         _ext = file_path.split('.')[-1]
         with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
@@ -345,9 +353,12 @@ class RecordingManager:
         
         # Log successful recording save
         logger.info(f"{Colors.GREEN}💾 Saved recording:{Colors.RESET} {final_file_path} (duration: {clip_duration}s, size: {file_size} bytes, vel: {self.clip_vel.get(camera_id, 0.0):.2f}, bg_diff: {self.clip_bg_diff.get(camera_id, 0)})")
-        motion_frame = self.clip_motion_frame.get(camera_id)
-        if motion_frame is not None:
-            cv2.imwrite(final_file_path.replace('.mp4', '.jpg'), motion_frame)
+        # Thumbnail: prefer frame with max person count, fallback to max-velocity motion frame
+        thumbnail_frame = self.clip_max_person_frame.get(camera_id)
+        if thumbnail_frame is None:
+            thumbnail_frame = self.clip_motion_frame.get(camera_id)
+        if thumbnail_frame is not None:
+            cv2.imwrite(final_file_path.replace('.mp4', '.jpg'), thumbnail_frame)
 
         self.clip_vel[camera_id] = round(self.clip_vel[camera_id] / self.clip_motion_frame_count[camera_id] if self.clip_motion_frame_count[camera_id] > 0 else 0.0, 2)
         self.clip_bg_diff[camera_id] = round(self.clip_bg_diff[camera_id] / self.clip_motion_frame_count[camera_id] if self.clip_motion_frame_count[camera_id] > 0 else 0, 2)
@@ -368,6 +379,8 @@ class RecordingManager:
                     'loudness': float(self.clip_loudness.get(camera_id, 0.0)),
                     'activity_percentage': float(clip_activity_percentage),   
                     'audio_recorded': audio_enabled,
+                    'max_person_count': int(self.clip_max_person_count.get(camera_id, 0)),
+                    'max_person_density': round(float(self.clip_max_person_density.get(camera_id, 0.0)), 4),
                 },
             },
         )
@@ -451,6 +464,21 @@ class RecordingManager:
                 vel = float(res.get('vel', 0.0))
                 bg_diff = int(res.get('bg_diff', 0))
                 loudness = audio_res.get('int', 0.0)  # Default value
+
+                # Track person count & density — pick frame with most persons for thumbnail;
+                # use average confidence as tie-breaker when person count is equal.
+                person_count = int(res.get('person_count', 0))
+                person_density = float(res.get('person_density', 0.0))
+                avg_conf = float(res.get('avg_person_conf', 0.0))
+                max_count = self.clip_max_person_count.get(camera_id, 0)
+                if person_count > max_count or (
+                    person_count == max_count and person_count > 0
+                    and avg_conf > self.clip_max_person_conf.get(camera_id, 0.0)
+                ):
+                    self.clip_max_person_count[camera_id] = person_count
+                    self.clip_max_person_density[camera_id] = person_density
+                    self.clip_max_person_conf[camera_id] = avg_conf
+                    self.clip_max_person_frame[camera_id] = frame
 
                 if detected_vel or detection_bg_diff:
                     if self.clip_motion_frame[camera_id] is None or vel > self.clip_max_vel[camera_id]:
@@ -827,7 +855,9 @@ class RecordingManager:
             'processed_frames': 0,
         }
 
-        tracker = OpticalFlowTracker()
+        tracker = OpticalFlowTracker(
+            enable_yolox=True,
+        )
         draw_mask = None
 
         tmp_path = f"{root}_overlay_tmp.mp4"

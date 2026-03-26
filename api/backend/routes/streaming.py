@@ -142,10 +142,12 @@ async def ws_camera_stream(websocket: WebSocket, camera_id: str):
 
     ws_manager = deps.camera_service._ws_manager
     q = ws_manager.subscribe(camera_id)
+    send_lock = asyncio.Lock()
     try:
         while True:
             jpeg_bytes = await q.get()
-            await websocket.send_bytes(jpeg_bytes)
+            async with send_lock:
+                await websocket.send_bytes(jpeg_bytes)
     except WebSocketDisconnect:
         pass
     except Exception as e:

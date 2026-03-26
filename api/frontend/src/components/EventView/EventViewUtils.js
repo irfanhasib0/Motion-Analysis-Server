@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clock, Activity, BarChart3, Volume2, ChevronLeft, ChevronRight, Image } from 'lucide-react';
+import { Clock, Activity, BarChart3, Volume2, Users, ChevronLeft, ChevronRight, Image } from 'lucide-react';
 
 export const TimeFrameBadge = ({ timeText, frame }) => (
   <span className="reel-time-frame-badge">
@@ -33,7 +33,7 @@ export const FrameStepButtons = ({ disabled, onStepBack, onStepForward }) => (
   </div>
 );
 
-export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessValue, MOTION_COLORS = {} }) => (
+export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessValue, personValue, MOTION_COLORS = {} }) => (
   <div className="recording-meta">
     <div className="meta-item">
       <Clock size={12} />
@@ -42,6 +42,14 @@ export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessV
     <div className="meta-item">
       <Activity size={12} style={{ color: MOTION_COLORS.velocity || '#009688' }} />
       <span style={{ color: MOTION_COLORS.velocity || '#009688' }}>{velValue ?? 'N/A'}</span>
+    </div>
+    <div className="meta-item">
+      <Users size={12} style={{ color: MOTION_COLORS.person || '#8e24aa' }} />
+      <span style={{ color: MOTION_COLORS.person || '#8e24aa' }}>{personValue != null ? personValue : 'N/A'}</span>
+    </div>
+    <div className="meta-item">
+      <Clock size={12} />
+      <span>{durationText}</span>
     </div>
     <div className="meta-item">
       <BarChart3 size={12} style={{ color: MOTION_COLORS.bgDiff || '#5c6bc0' }} />
@@ -139,6 +147,7 @@ export const getRecordingPlaybackViewData = (recording, playbackStatsInput) => {
   const velValue = metadata.vel;
   const diffValue = metadata.diff;
   const loudnessValue = metadata.loudness ?? null;
+  const personValue = metadata.max_person_count ?? null;
 
   const playbackStats = playbackStatsInput || { currentTime: 0, duration: 0 };
   const playbackDuration = playbackStats.duration > 0
@@ -158,6 +167,7 @@ export const getRecordingPlaybackViewData = (recording, playbackStatsInput) => {
     velValue,
     diffValue,
     loudnessValue,
+    personValue,
     playbackStats,
     playbackDuration,
     playbackProgress,
@@ -200,6 +210,7 @@ export const buildRowMetricsData = (recordings = [], zoomHours = 24, scrollOffse
     const bgDiff = Number(metadata.diff);
     const loudness = Number(metadata.loudness);
     const duration = Number(recording.duration);
+    const person = Number(metadata.max_person_count);
 
     return {
       id: recording.id,
@@ -212,6 +223,7 @@ export const buildRowMetricsData = (recordings = [], zoomHours = 24, scrollOffse
       bgDiff: Number.isFinite(bgDiff) ? Math.max(0, bgDiff) : 0,
       loudness: Number.isFinite(loudness) ? Math.max(0, loudness) : 0,
       duration: Number.isFinite(duration) ? Math.max(0, duration) : 0,
+      person: Number.isFinite(person) ? Math.max(0, person) : 0,
     };
   });
 
@@ -243,6 +255,7 @@ export const buildRowMetricsData = (recordings = [], zoomHours = 24, scrollOffse
   const chartMaxBgDiff = Math.max(1, ...chartMetrics.map((metric) => metric.bgDiff));
   const chartMaxLoudness = Math.max(1, ...chartMetrics.map((metric) => metric.loudness));
   const chartMaxDuration = Math.max(1, ...chartMetrics.map((metric) => metric.duration));
+  const chartMaxPerson = Math.max(1, ...chartMetrics.map((metric) => metric.person));
 
   const tickInterval = Math.max(1, Math.floor(zoomHours / 8)); // Show ~8 ticks max
   const tickCount = Math.floor(zoomHours / tickInterval) + 1;
@@ -263,6 +276,7 @@ export const buildRowMetricsData = (recordings = [], zoomHours = 24, scrollOffse
     chartMaxBgDiff,
     chartMaxLoudness,
     chartMaxDuration,
+    chartMaxPerson,
     axisTicks,
     totalDataSpanHours,
     latestTimestampMs,
@@ -288,6 +302,7 @@ export const buildDateMetricsData = (recordings = [], dateStr) => {
     const bgDiff = Number(metadata.diff);
     const loudness = Number(metadata.loudness);
     const duration = Number(recording.duration);
+    const person = Number(metadata.max_person_count);
 
     return {
       id: recording.id,
@@ -300,6 +315,7 @@ export const buildDateMetricsData = (recordings = [], dateStr) => {
       bgDiff: Number.isFinite(bgDiff) ? Math.max(0, bgDiff) : 0,
       loudness: Number.isFinite(loudness) ? Math.max(0, loudness) : 0,
       duration: Number.isFinite(duration) ? Math.max(0, duration) : 0,
+      person: Number.isFinite(person) ? Math.max(0, person) : 0,
     };
   });
 
@@ -314,6 +330,7 @@ export const buildDateMetricsData = (recordings = [], dateStr) => {
   const chartMaxBgDiff = Math.max(1, ...chartMetrics.map(m => m.bgDiff));
   const chartMaxLoudness = Math.max(1, ...chartMetrics.map(m => m.loudness));
   const chartMaxDuration = Math.max(1, ...chartMetrics.map(m => m.duration));
+  const chartMaxPerson = Math.max(1, ...chartMetrics.map(m => m.person));
 
   // Fixed 24h axis ticks every 3 hours (newest=left, oldest=right)
   const axisTicks = Array.from({ length: 9 }, (_, i) => {
@@ -335,6 +352,7 @@ export const buildDateMetricsData = (recordings = [], dateStr) => {
     chartMaxBgDiff,
     chartMaxLoudness,
     chartMaxDuration,
+    chartMaxPerson,
     axisTicks,
     nowPercent,
   };

@@ -69,6 +69,7 @@ class StreamingService:
         self._audio_chunk_index: Dict[str, int] = {}
         self._latest_pts_payload: Dict[str, Dict[Any, Dict[str, Any]]] = {}
         self._overlay_masks: Dict[str, np.ndarray] = {}
+        self._latest_person_stats: Dict[str, Dict[str, float]] = {}
         
         # Simple audio streaming with background threads
         self._audio_background_threads: Dict[str, threading.Thread] = {}
@@ -284,9 +285,6 @@ class StreamingService:
             if audio_enabled and camera_id not in self._audio_background_threads:
                 self.start_audio_stream(camera_id)
             
-            # Wait briefly for threads to initialize and start producing frames
-            time.sleep(0.5)
-                
         except Exception as error:
             logger.warning(f"{Colors.RED}Failed to start AV streams for {camera_id}: {error}{Colors.RESET}")
 
@@ -699,20 +697,20 @@ class StreamingService:
                 return False
         
         cap = self._camera_streams.get(camera_id)
-        tracker = self._camera_trackers.get(camera_id)
-    
         
         if not cap:
             logger.warning(f"{Colors.RED}Camera capture unavailable for {camera_id}{Colors.RESET}")
             return False
         
-        if self.use_multiprocess:
-            # Multiprocess mode: tracker runs in a separate process via AIService
-            if not self.ai_service.is_tracker_process_alive(camera_id):
-                tracker_kwargs = {'enable_person_detection': getattr(self, 'enable_person_detection', True), 'enable_yolox': getattr(self, 'enable_yolox', False)}
-                self.ai_service.start_tracker_process(camera_id, tracker_kwargs)
-        elif not tracker:
-            logger.warning(f"{Colors.RED}Tracker unavailable for {camera_id}{Colors.RESET}")
+        # Ensure tracker is running (AIService handles multiprocess vs sequential)
+        tracker_kwargs = {
+            'enable_person_detection': getattr(self, 'enable_person_detection', False),
+            'enable_yolox': getattr(self, 'enable_yolox', False),
+            'yolox_model_size': getattr(self, 'yolox_model_size', 'nano'),
+            'yolox_score_thr': getattr(self, 'yolox_score_thr', 0.5),
+        }
+        if not self.ai_service.ensure_tracker(camera_id, tracker_kwargs):
+            logger.warning(f"{Colors.RED}Failed to start tracker for {camera_id}{Colors.RESET}")
             return False
         
         # Create thread-safe resources
@@ -772,27 +770,20 @@ class StreamingService:
                     detect_output = None
                     result_ts = frame_capture_time
                     
-                    if self.use_multiprocess:
-                        if should_run_tracker:
-                            self.ai_service.submit_frame(camera_id, stream_frame, frame_capture_time, frame_index)
-                        tracker_result = self.ai_service.poll_result(camera_id)
-                        if tracker_result is not None:
-                            detect_output = (tracker_result.points_dict, tracker_result.flow_pts)
-                            result_ts = tracker_result.frame_capture_time
-                            # Only count FPS for genuinely new results (avoid inflating when loop is faster than tracker)
-                            if result_ts != _last_tracker_result_ts:
-                                self._update_loop_fps(f"{camera_id}:tracker")
-                                _last_tracker_result_ts = result_ts
-                    elif should_run_tracker:
-                        _t0 = time.time()
-                        raw = tracker.detect(stream_frame, return_pts=True)
-                        _tracker_dt = time.time() - _t0
-                        tracker_fps = self._update_loop_fps(f"{camera_id}:tracker")
-                        detect_output = self._extract_detect_payload(raw)
+                    if should_run_tracker:
+                        self.ai_service.submit_frame(camera_id, stream_frame, frame_capture_time, frame_index)
+                    tracker_result = self.ai_service.poll_result(camera_id)
+                    if tracker_result is not None:
+                        detect_output = (tracker_result.points_dict, tracker_result.flow_pts)
+                        result_ts = tracker_result.frame_capture_time
+                        if result_ts != _last_tracker_result_ts:
+                            self._update_loop_fps(f"{camera_id}:tracker")
+                            _last_tracker_result_ts = result_ts
                     
                     # ── Process detection output (shared path) ──
                     if detect_output is not None:
                         points_dict, flow_pts = detect_output
+                        self._latest_person_stats[camera_id] = points_dict.get('_stats', {})
                         
                         has_proc_viewer = bool(self.active_processing_streams.get(camera_id))
                         if has_proc_viewer:
@@ -806,9 +797,12 @@ class StreamingService:
                                     break
                             _res = {
                                 _id: {'vel': round(float(p.get('mean_vel', 0.0)), 2), 'bg_diff': bg_diff_int}
-                                for _id, p in points_dict.items() if isinstance(p, dict)
+                                for _id, p in points_dict.items() if isinstance(p, dict) and _id != '_stats'
                             }
                         res = self._aggregate_motion_result(_res)
+                        res['person_count'] = self._latest_person_stats.get(camera_id, {}).get('person_count', 0)
+                        res['person_density'] = self._latest_person_stats.get(camera_id, {}).get('person_density', 0.0)
+                        res['avg_person_conf'] = self._latest_person_stats.get(camera_id, {}).get('avg_person_conf', 0.0)
                         
                         with stream_lock:
                             self._latest_viz[camera_id] = viz_frame
@@ -834,7 +828,8 @@ class StreamingService:
                     # Primary video stream: clean frame with FPS and optical flow overlays
                     frame_fps = self._update_loop_fps(f"{camera_id}:primary")
                     _tracker_fps = self._fps_stats.get(f"{camera_id}:tracker", {}).get("fps", 0.0)
-                    primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps)
+                    _person_stats = self._latest_person_stats.get(camera_id, {})
+                    primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps, person_stats=_person_stats)
                     primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
                     # Encode once — all clients receive pre-encoded JPEG bytes (Q3)
                     frame_bytes = self.frame_to_bytes(primary_frame)
@@ -1100,7 +1095,7 @@ class StreamingService:
     
     def generate_result_json_stream(self, camera_id: str) -> Generator[Dict[str, Union[int, float]], None, None]:
         """Generate JSON stream of processing results for a camera"""
-        while camera_id in self._camera_trackers:
+        while self.ai_service.is_tracker_alive(camera_id):
             res = getattr(self, '_latest_res_video', {}).get(camera_id, None)
             if res is not None:
                 yield json.dumps(res)

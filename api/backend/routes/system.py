@@ -214,3 +214,26 @@ async def get_all_cameras_stream_health():
             'max_recovery_attempts': deps.dashboard_service.stream_monitor.max_recovery_attempts
         }
     }
+
+
+@router.get("/system/lag-history")
+async def get_all_lag_history():
+    """Get 24h lag history for all cameras for dashboard plotting."""
+    try:
+        return deps.dashboard_service.stream_monitor.get_lag_history()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get lag history: {str(e)}")
+
+
+@router.get("/cameras/{camera_id}/lag-history")
+async def get_camera_lag_history(camera_id: str):
+    """Get 24h lag history for a specific camera."""
+    try:
+        camera = deps.camera_service.get_camera(camera_id)
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        return deps.dashboard_service.stream_monitor.get_lag_history(camera_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get lag history: {str(e)}")

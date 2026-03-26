@@ -20,13 +20,20 @@ class StreamHealthMonitor:
         self.lag_history = {}  # camera_id -> lag_data
         
         # Recovery policies
-        self.lag_threshold = 120.0  # 5 seconds max lag before considering frozen
+        self.lag_threshold = 120.0  # 2 minutes max lag before considering frozen
         self.recovery_cooldown = 300  # 5 minutes between attempts
         self.max_recovery_attempts = 3
         self.video_exhausted_cooldown = 900  # 15 minutes before retrying after max attempts
         
         self._last_check = 0
         self._check_interval = 30  # Check every 30 seconds
+        
+        # Lag history queue for 24-hour plotting
+        self._lag_queue_maxlen = (24 * 3600) // self._check_interval  # 2880 samples at 30s interval
+        self._lag_queues: Dict[str, deque] = {}  # camera_id -> deque of lag samples
+        
+        # Error log snapshot directory
+        self._error_log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'error_logs')
         
     def monitor_streams(self):
         """Check stream health and trigger recovery if needed."""
@@ -62,32 +69,40 @@ class StreamHealthMonitor:
                 'video_exhausted_recording_stopped': False,
                 'video_exhausted_time': None,
                 'was_recording_before_failure': False,
-                'notified_streaming_consumers': set()  # Track which consumers we've already notified about
+                'notified_streaming_consumers': set(),  # Track which consumers we've already notified about
+                'error_logged': False,
             }
         
         history = self.lag_history[camera_id]
         now = time.time()
         
-        # Check streaming consumer lags and notify if threshold exceeded
-        video_stream_lag = current_lag.get('video_stream_lag', {}).get(camera_id, 0)
-        if video_stream_lag > self.lag_threshold:
-            if 'video_stream_lag' not in history['notified_streaming_consumers']:
-                self._notify_frozen_stream(camera_id, 'video_stream', video_stream_lag)
-                history['notified_streaming_consumers'].add('video_stream_lag')
-        elif video_stream_lag <= self.lag_threshold:
-            history['notified_streaming_consumers'].discard('video_stream_lag')
+        # Append lag sample for 24h history plot
+        if camera_id not in self._lag_queues:
+            self._lag_queues[camera_id] = deque(maxlen=self._lag_queue_maxlen)
+        self._lag_queues[camera_id].append({
+            'ts': now,
+            'video': current_lag.get('producer_video_lag', {}).get(camera_id, 0),
+            'audio': current_lag.get('producer_audio_lag', {}).get(camera_id, 0),
+            'recorder': current_lag.get('recorder_lag', {}).get(camera_id, 0),
+        })
         
-        audio_stream_lag = current_lag.get('audio_stream_lag', {}).get(camera_id, 0)
-        if audio_stream_lag > self.lag_threshold:
-            if 'audio_stream_lag' not in history['notified_streaming_consumers']:
-                self._notify_frozen_stream(camera_id, 'audio_stream', audio_stream_lag)
-                history['notified_streaming_consumers'].add('audio_stream_lag')
-        elif audio_stream_lag <= self.lag_threshold:
-            history['notified_streaming_consumers'].discard('audio_stream_lag')
+        # Check streaming consumer lags and notify if threshold exceeded
+        for lag_key, stream_type in [('video_stream_lag', 'video_stream'), ('audio_stream_lag', 'audio_stream')]:
+            lag_val = current_lag.get(lag_key, {}).get(camera_id, 0)
+            if lag_val > self.lag_threshold:
+                if lag_key not in history['notified_streaming_consumers']:
+                    self._notify_frozen_stream(camera_id, stream_type, lag_val)
+                    history['notified_streaming_consumers'].add(lag_key)
+            else:
+                history['notified_streaming_consumers'].discard(lag_key)
         
         # Check producer video thread lag
         producer_video_lag = current_lag.get('producer_video_lag', {}).get(camera_id, 0)
         if producer_video_lag > self.lag_threshold:
+            # Save error log snapshot on first detection
+            if not history.get('error_logged'):
+                self._save_error_log_snapshot(camera_id)
+                history['error_logged'] = True
             if history['video_recovery_count'] >= self.max_recovery_attempts:
                 # Max attempts exhausted — stop recording and wait for cooldown
                 if not history.get('video_exhausted_recording_stopped'):
@@ -119,6 +134,7 @@ class StreamHealthMonitor:
                 history['video_exhausted_recording_stopped'] = False
                 history['video_exhausted_time'] = None
             history['video_recovery_count'] = 0
+            history['error_logged'] = False
             
         # Check producer audio thread lag    
         producer_audio_lag = current_lag.get('producer_audio_lag', {}).get(camera_id, 0)
@@ -142,6 +158,30 @@ class StreamHealthMonitor:
             history['recorder_frozen'] = None
             history['recorder_recovery_count'] = 0
     
+    def _extract_buffer_lags(self, buffer, camera_id: str, now: float,
+                              producer_key: str, stream_consumer_prefix: str,
+                              stream_lag_key: str, lag_stats: dict):
+        """Extract producer and consumer lag from a single ring buffer."""
+        if not buffer or not hasattr(buffer, 'last_write_time'):
+            return
+        last_write = buffer.last_write_time
+        if last_write:
+            lag_stats[producer_key][camera_id] = now - last_write
+        if not hasattr(buffer, '_consumer_read_times'):
+            return
+        for consumer_id, read_times in buffer._consumer_read_times.items():
+            if not read_times or len(read_times) == 0:
+                continue
+            last_read = read_times[-1]
+            if not last_read:
+                continue
+            consumer_lag = now - last_read
+            if f'recorder_{camera_id}' in consumer_id:
+                lag_stats['recorder_lag'][camera_id] = max(
+                    lag_stats['recorder_lag'].get(camera_id, 0), consumer_lag)
+            if f'{stream_consumer_prefix}_{camera_id}' in consumer_id:
+                lag_stats[stream_lag_key][camera_id] = consumer_lag
+
     def _get_current_lag_stats(self, camera_id: str) -> Dict[str, float]:
         """Get current lag statistics for a camera."""
         lag_stats = {
@@ -154,56 +194,15 @@ class StreamHealthMonitor:
         
         now = time.time()
         
-        # Get frame ring buffer for video lag
-        frame_buffer = self.camera_service._frame_ring_buffers.get(camera_id)
-        if frame_buffer and hasattr(frame_buffer, 'last_write_time'):
-            # Get producer write time
-            last_write = frame_buffer.last_write_time
-            if last_write:
-                video_producer_lag = now - last_write
-                lag_stats['producer_video_lag'][camera_id] = video_producer_lag
-            
-            # Get consumer lag for each consumer
-            if hasattr(frame_buffer, '_consumer_read_times'):
-                for consumer_id, read_times in frame_buffer._consumer_read_times.items():
-                    if read_times and len(read_times) > 0:
-                        last_read = read_times[-1]
-                        if last_read:  # Only calculate lag if we have a valid read time
-                            consumer_lag = now - last_read
-                            
-                            # Special handling for recording consumer (only when lag is valid)
-                            if f'recorder_{camera_id}' in consumer_id:
-                                lag_stats['recorder_lag'][camera_id] = consumer_lag
-                            elif f'video_stream_{camera_id}' in consumer_id:
-                                lag_stats['video_stream_lag'][camera_id] = consumer_lag
-        
-        # Get audio ring buffer for audio lag
-        audio_buffer = self.camera_service._audio_ring_buffers.get(camera_id)
-        if audio_buffer and hasattr(audio_buffer, 'last_write_time'):
-            last_write = audio_buffer.last_write_time
-            if last_write:
-                audio_producer_lag = now - last_write
-                lag_stats['producer_audio_lag'][camera_id] = audio_producer_lag
-            
-            # Get audio consumer lag
-            if hasattr(audio_buffer, '_consumer_read_times'):
-                for consumer_id, read_times in audio_buffer._consumer_read_times.items():
-                    if read_times and len(read_times) > 0:
-                        last_read = read_times[-1]
-                        if last_read:  # Only calculate lag if we have a valid read time
-                            consumer_lag = now - last_read
-                            # Special handling for recording consumer (only when lag is valid)
-                            if f'recorder_{camera_id}' in consumer_id:
-                                lag_stats['recorder_lag'][camera_id] = max(lag_stats['recorder_lag'].get(camera_id, 0), consumer_lag)
-                            if f'audio_stream_{camera_id}' in consumer_id:
-                                lag_stats['audio_stream_lag'][camera_id] = consumer_lag
+        self._extract_buffer_lags(
+            self.camera_service._frame_ring_buffers.get(camera_id), camera_id, now,
+            'producer_video_lag', 'video_stream', 'video_stream_lag', lag_stats)
+        self._extract_buffer_lags(
+            self.camera_service._audio_ring_buffers.get(camera_id), camera_id, now,
+            'producer_audio_lag', 'audio_stream', 'audio_stream_lag', lag_stats)
         
         # Summary log for high-level lag overview
-        lag_summary = []
-        for lag_type, lag_data in lag_stats.items():
-            if lag_data and camera_id in lag_data:
-                lag_summary.append(f"{lag_type}: {lag_data[camera_id]:.3f}s")
-        
+        lag_summary = [f"{k}: {v[camera_id]:.3f}s" for k, v in lag_stats.items() if camera_id in v]
         if lag_summary:
             logger.info(f"📊 Lag summary for {camera_id}: {', '.join(lag_summary)}")
   
@@ -213,6 +212,9 @@ class StreamHealthMonitor:
         """Recover video producer thread by restarting it."""
         history = self.lag_history.get(camera_id, {})
         logger.warning(f"Recovering video producer thread for camera {camera_id} (attempt {history.get('video_recovery_count', 0) + 1}/{self.max_recovery_attempts})")
+        # Track recording state BEFORE stopping (stop_video_stream stops recording too)
+        was_recording = camera_id in self.camera_service.active_recordings
+        history['was_recording_before_failure'] = was_recording or history.get('was_recording_before_failure', False)
         self.camera_service.stop_video_stream(camera_id)
         time.sleep(2)  # Allow clean shutdown
         success = self.camera_service.start_video_stream(camera_id)
@@ -252,6 +254,24 @@ class StreamHealthMonitor:
         logger.info(f"Successfully recovered recording for camera {camera_id}")
         history['was_recording_before_failure'] = False
     
+    def _save_error_log_snapshot(self, camera_id: str):
+        """Save last 500 lines of nvr.log when lag exceeds threshold for the first time."""
+        try:
+            log_path = os.path.join(os.path.dirname(self._error_log_dir), 'nvr.log')
+            if not os.path.exists(log_path):
+                logger.warning(f"Cannot save error log snapshot: {log_path} not found")
+                return
+            os.makedirs(self._error_log_dir, exist_ok=True)
+            with open(log_path, 'r') as f:
+                tail = deque(f, maxlen=500)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            snapshot_path = os.path.join(self._error_log_dir, f'error_{camera_id}_{timestamp}.txt')
+            with open(snapshot_path, 'w') as f:
+                f.writelines(tail)
+            logger.info(f"📋 Saved error log snapshot ({len(tail)} lines) to {snapshot_path}")
+        except Exception as e:
+            logger.error(f"Failed to save error log snapshot for {camera_id}: {e}")
+
     def _notify_frozen_stream(self, camera_id: str, stream_type: str, lag_seconds: float):
         """Notify when a stream appears frozen based on lag time."""
         logger.warning(f"Stream frozen detected: camera {camera_id}, {stream_type} stream, lag: {lag_seconds:.2f}s")
@@ -263,41 +283,21 @@ class StreamHealthMonitor:
         thread_status = {}
         
         for camera_id in list(self.camera_service._camera_streams.keys()):
-            video_thread = self.camera_service._video_background_threads.get(camera_id)
-            audio_thread = self.camera_service._audio_background_threads.get(camera_id)
             rec_info = self.camera_service.recording_manager.active_recordings.get(camera_id)
-            rec_thread = rec_info.get('thread') if rec_info else None
-            
-            video_alive = video_thread.is_alive() if video_thread else None
-            audio_alive = audio_thread.is_alive() if audio_thread else None
-            rec_alive = rec_thread.is_alive() if rec_thread else None
-            
-            thread_status[camera_id] = {
-                'video': video_alive,
-                'audio': audio_alive,
-                'recording': rec_alive,
+            threads = {
+                'video': self.camera_service._video_background_threads.get(camera_id),
+                'audio': self.camera_service._audio_background_threads.get(camera_id),
+                'rec': rec_info.get('thread') if rec_info else None,
             }
             
-            # Warn on dead threads that should be alive
-            dead = []
-            if video_thread and not video_alive:
-                dead.append('video')
-            if audio_thread and not audio_alive:
-                dead.append('audio')
-            if rec_thread and not rec_alive:
-                dead.append('recording')
+            alive = {name: t.is_alive() if t else None for name, t in threads.items()}
+            thread_status[camera_id] = alive
             
-            status_parts = []
-            if video_thread is not None:
-                status_parts.append(f"video={'✅' if video_alive else '❌'}")
-            if audio_thread is not None:
-                status_parts.append(f"audio={'✅' if audio_alive else '❌'}")
-            if rec_thread is not None:
-                status_parts.append(f"rec={'✅' if rec_alive else '❌'}")
-            
+            status_parts = [f"{name}={'✅' if ok else '❌'}" for name, ok in alive.items() if ok is not None]
             if status_parts:
                 logger.info(f"🧵 Thread status for {camera_id}: {', '.join(status_parts)}")
             
+            dead = [name for name, t in threads.items() if t and not alive[name]]
             if dead:
                 logger.error(f"⚠️ Dead threads detected for {camera_id}: {', '.join(dead)} — recovery needed")
         
@@ -327,6 +327,12 @@ class StreamHealthMonitor:
                 history.get('audio_recovery_count', 0) >= self.max_recovery_attempts
             )
         }
+
+    def get_lag_history(self, camera_id: str = None) -> Dict:
+        """Get lag history for 24-hour plotting."""
+        if camera_id:
+            return {camera_id: list(self._lag_queues.get(camera_id, []))}
+        return {cid: list(q) for cid, q in self._lag_queues.items()}
 
 
 class DashboardService:
@@ -523,7 +529,6 @@ class DashboardService:
                 'disk_io_write_mb': latest.get('process_disk_io_write_mb_total', 0.0),
                 'disk_io_read_mb_s': latest.get('process_disk_io_read_mb_s', 0.0),
                 'disk_io_write_mb_s': latest.get('process_disk_io_write_mb_s', 0.0),
-                'recording_dir_size_gb': recording_dir_size_bytes / (1024 ** 3),
             },
             'averages_5m': {
                 'window_seconds': self.window_seconds,

@@ -65,6 +65,31 @@ class StreamDrawingHelper:
     AUDIO_PEAKFREQ_COLOR = (180, 255, 100)
     AUDIO_SERIES_GAIN = 1.0 #0.82
     VELOCITY_ROW_GAIN = 0.1
+    # --- Detection-type color map (BGR) for bounding boxes ---
+    BBOX_TYPE_COLORS = {
+        'motion': (0, 255, 0),        # Green — MOG2 motion contours
+        'face':   (255, 0, 255),       # Magenta — Haar face
+        'body':   (255, 165, 0),       # Orange — Haar body
+    }
+    BBOX_YOLOX_COLORS = {
+        'person': (0, 255, 255),       # Yellow — YOLOX person
+        'car':    (255, 0, 0),         # Blue — YOLOX car
+        'truck':  (200, 50, 0),        # Dark blue — YOLOX truck
+        'bus':    (200, 100, 0),       # Navy — YOLOX bus
+    }
+    BBOX_YOLOX_DEFAULT_COLOR = (0, 200, 200)  # Teal — other YOLOX classes
+    BBOX_DEFAULT_COLOR = (0, 255, 0)           # Green fallback
+    
+    
+    @classmethod
+    def bbox_color_for_type(cls, det_type: str) -> tuple:
+        """Return BGR color tuple for a detection type string."""
+        if det_type in cls.BBOX_TYPE_COLORS:
+            return cls.BBOX_TYPE_COLORS[det_type]
+        if det_type in cls.BBOX_YOLOX_COLORS:
+            return cls.BBOX_YOLOX_COLORS.get(det_type, cls.BBOX_YOLOX_DEFAULT_COLOR)
+        return cls.BBOX_DEFAULT_COLOR
+
     OVERLAY_COLORS = (
         (0, 255, 0),
         (255, 0, 0),
@@ -108,7 +133,7 @@ class StreamDrawingHelper:
         peak_freq_text = str(max(0, int(round(peak_frequency_mean)))).zfill(4)
         return f"Amp: {overall_text} Fq: {peak_freq_text}", has_alert
 
-    def draw_fps_overlay(self, frame: np.ndarray, fps_value: float, res: Optional[dict] = None, tracker_fps: float = 0.0) -> np.ndarray:
+    def draw_fps_overlay(self, frame: np.ndarray, fps_value: float, res: Optional[dict] = None, tracker_fps: float = 0.0, person_stats: Optional[dict] = None) -> np.ndarray:
         if frame is None:
             return frame
 
@@ -121,16 +146,22 @@ class StreamDrawingHelper:
             texts += [f" | Vel: {res['vel']}" f" | Diff: {res['bg_diff']}"]
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
-        thickness = 2
-        margin = 10
-        y_ofs = margin
-        x = frame.shape[1] - 300
+        font_scale = 0.5
+        thickness = 1
+        margin = 5
+        x = frame.shape[1]
         y = margin
         for text in texts:
             (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
-            frame = cv2.putText(frame, text, (x, y + y_ofs), font, font_scale, (0, 255, 0), thickness, cv2.LINE_AA)
-            y_ofs += text_h + margin
+            frame = cv2.putText(frame, text, (x - (text_w + margin), y + text_h), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+            y += text_h
+
+        # Person count & density (top-left)
+        p_count = person_stats.get('person_count', 0) if person_stats else 0
+        p_density = person_stats.get('person_density', 0.0) if person_stats else 0.0
+        stats_text = f"Persons: {p_count} | Density: {p_density:.2f}"
+        (tw, th), _ = cv2.getTextSize(stats_text, font, font_scale, thickness)
+        frame = cv2.putText(frame, stats_text, (margin, margin + th), font, font_scale, (0, 255, 255), thickness, cv2.LINE_AA)
 
         return frame
 
@@ -161,7 +192,7 @@ class StreamDrawingHelper:
         graph_x0 = max(left_pad + 4, int(round(w * 0.18)))
         max_pts = max(1, w - graph_x0 - left_pad)
 
-        points_items = list(points_dict.items())
+        points_items = list((k, v) for k, v in points_dict.items() if k != '_stats')
         
         # Extract background difference from any trajectory (they should all have the same bg_diff)
         bg_diff_int = 0
@@ -324,14 +355,17 @@ class StreamDrawingHelper:
             if bbox is not None and len(bbox) >= 4:
                 try:
                     x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
-                    cv2.rectangle(viz_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    det_type = track_data.get('type', 'motion')
+                    bbox_color = self.bbox_color_for_type(det_type)
+                    cv2.rectangle(viz_frame, (x1, y1), (x2, y2), bbox_color, 2)
+                    label = f'ID:{track_id} {det_type}'
                     cv2.putText(
                         viz_frame,
-                        f'ID: {track_id}',
+                        label,
                         (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
-                        (0, 255, 0),
+                        bbox_color,
                         2,
                     )
                 except Exception:

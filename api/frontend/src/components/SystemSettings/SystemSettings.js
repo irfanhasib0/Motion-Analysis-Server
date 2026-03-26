@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { api } from '../api';
+import { api } from '../../api';
 
 const AUDIO_SAMPLE_RATE_OPTIONS = [8000, 16000, 22050, 32000, 44100, 48000];
 const AUDIO_CHUNK_SIZE_OPTIONS = [256, 512, 1024, 2048, 4096];

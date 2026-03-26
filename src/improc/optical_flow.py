@@ -35,6 +35,7 @@ from trackers.trackers import SimpleTracker, ByteTracker
 from improc.memory import FlowMemory, CoresetMemory
 from improc.person_detection import PersonDetector
 from improc.yolox_detector import YOLOXDetector
+from improc.shared_detectors import get_shared_yolox, get_shared_person_detector
 
 
 def _copy_pts(pts: dict) -> dict:
@@ -77,10 +78,10 @@ class OpticalFlowTracker:
                  bg_indoor=True,
                  bg_detect_shadow=True,
                  iou_threshold=0.5,
+                 enable_yolox=False,
                  enable_person_detection=False,
-                 enable_face_detection=False,
-                 enable_body_detection=False,
-                 enable_yolox=True):
+                 yolox_model_size='nano',
+                 yolox_score_thr=0.5):
 
         # --- Frame state ---
         self.prev_gray = None   # Previous grayscale frame for flow computation
@@ -162,20 +163,12 @@ class OpticalFlowTracker:
         self.coreset_k = coreset_k
 
         # --- Optional deep-learning detectors ---
-        self.enable_person_detection = enable_person_detection
-        self.person_detector = None
-        if enable_person_detection:
-            print("Initializing PersonDetector for OpticalFlowTracker...")
-            self.person_detector = PersonDetector(
-                enable_face=enable_face_detection,
-                enable_body=enable_body_detection)
+        self.person_detector = get_shared_person_detector() if enable_person_detection else None
+        self.enable_person_detection = self.person_detector is not None
 
-        self.enable_yolox = enable_yolox
-        self.yolox_detector = None
-        if enable_yolox:
-            print("Initializing YOLOXDetector for OpticalFlowTracker...")
-            self.yolox_detector = YOLOXDetector()
-            self.enable_yolox = self.yolox_detector.is_enabled()
+        yolox = get_shared_yolox(model_size=yolox_model_size, score_thr=yolox_score_thr) if enable_yolox else None
+        self.yolox_detector = yolox
+        self.enable_yolox = yolox is not None and yolox.is_enabled()
 
         self.viz_div_h = None
 
@@ -191,6 +184,8 @@ class OpticalFlowTracker:
     
     def set_person_detection_enabled(self, enabled):
         """Enable or disable person detection feature"""
+        if enabled and self.person_detector is None:
+            self.person_detector = get_shared_person_detector()
         self.enable_person_detection = enabled and (self.person_detector is not None)
         if self.enable_person_detection:
             print("Person detection enabled.")
@@ -212,6 +207,8 @@ class OpticalFlowTracker:
         return self.enable_person_detection
     
     def set_yolox_enabled(self, enabled):
+        if enabled and self.yolox_detector is None:
+            self.yolox_detector = get_shared_yolox()
         self.enable_yolox = enabled and (self.yolox_detector is not None) and self.yolox_detector.is_enabled()
     
     def is_yolox_enabled(self):
@@ -234,7 +231,75 @@ class OpticalFlowTracker:
             'face': self.person_detector.is_face_enabled(),
             'body': self.person_detector.is_body_enabled()
         }
-    
+
+    def get_person_stats(self, frame_shape=None):
+        """Return person count and inter-person density for currently visible PIDs.
+
+        Density is computed as::
+
+            person_density = person_count / mean_normalized_distance
+
+        where *mean_normalized_distance* is the average pairwise Euclidean
+        distance between person centroids, divided by the mean bbox height
+        (a perspective-correction proxy).  Higher value → people are packed
+        closer together relative to their apparent size.
+
+        When fewer than 2 persons are visible, density is 0.
+
+        Args:
+            frame_shape: unused (kept for backward compat).
+
+        Returns:
+            dict with 'person_count' and 'person_density'.
+        """
+        current_pids = list(self.prev_pts.keys()) if self.prev_pts else []
+        person_count = self.memory.get_person_count(current_pids)
+
+        person_density = 0.0
+        if person_count >= 2 and self.prev_pts:
+            # Collect centroids and bbox heights for person-class PIDs
+            centroids = []
+            heights = []
+            for pid in current_pids:
+                wpid = pid % self.memory.maxpid
+                if self.memory.classify_pid(wpid) not in self.memory.PERSON_TYPES:
+                    continue
+                bbox = self.prev_pts[pid]['bbox']
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+                h = abs(bbox[3] - bbox[1])
+                centroids.append((cx, cy))
+                heights.append(max(h, 1.0))
+
+            if len(centroids) >= 2:
+                pts = np.array(centroids, dtype=np.float32)
+                avg_h = float(np.mean(heights))
+                # Pairwise Euclidean distances (upper triangle)
+                total_dist = 0.0
+                n_pairs = 0
+                for i in range(len(pts)):
+                    for j in range(i + 1, len(pts)):
+                        d = np.sqrt((pts[i, 0] - pts[j, 0]) ** 2 + (pts[i, 1] - pts[j, 1]) ** 2)
+                        total_dist += d
+                        n_pairs += 1
+                mean_norm_dist = (total_dist / n_pairs) / avg_h if n_pairs > 0 else 0.0
+                person_density = person_count / mean_norm_dist if mean_norm_dist > 0 else 0.0
+
+        # Average detection confidence for person-type PIDs
+        avg_person_conf = 0.0
+        if person_count > 0 and self.prev_pts:
+            scores = []
+            for pid in current_pids:
+                wpid = pid % self.memory.maxpid
+                if self.memory.classify_pid(wpid) not in self.memory.PERSON_TYPES:
+                    continue
+                scores.append(self.prev_pts[pid].get('score', 0.0))
+            if scores:
+                avg_person_conf = float(np.mean(scores))
+
+        return {'person_count': person_count, 'person_density': round(person_density, 4),
+                'avg_person_conf': round(avg_person_conf, 4)}
+
     def _compute_dense_flow(self, prev_gray, gray):
         """Compute dense optical flow (Farneback) and return an HSV visualization."""
         flow = cv2.calcOpticalFlowFarneback(
@@ -594,12 +659,18 @@ class OpticalFlowTracker:
         for ch, tid in enumerate(sorted_ids, start=1):
             vel = 0.1 * self.memory.get_traj_velocities(traj_id=tid)
             if len(vel) > 0:
+                pid = int(tid.split('|')[0])
                 points_dict[tid] = {
                     'vel': np.asarray(vel, dtype=np.float32),
                     'mean_vel': float(np.mean(vel)),
                     'channel': ch,
                     'bg_diff': int(self.bg_diff),
+                    'type': self.memory.classify_pid(pid),
                 }
+
+        # --- Person count & density ---
+        person_stats = self.get_person_stats()
+        points_dict['_stats'] = person_stats
 
         viz_frame = self._draw_pts_flow(frame, self.prev_pts)
         pts_out = _copy_pts(self.prev_pts)
@@ -652,7 +723,7 @@ class OpticalFlowTracker:
         graph_x0 = max(left_pad + 4, int(round(w * 0.18)))
         max_pts = max(1, w - graph_x0 - left_pad)
 
-        points_items = list(points_dict.items())
+        points_items = list((k, v) for k, v in points_dict.items() if k != '_stats')
         bg_diff_int = int(self.bg_diff)
         n_colors = self.n_colors
         colors = self.colors
@@ -724,9 +795,25 @@ class OpticalFlowTracker:
         """Draw optical flow trails, keypoint dots, bounding boxes, and IDs on frame."""
         viz_frame = frame.copy()
 
+        # Color map for detection types (BGR)
+        _type_colors = {
+            'motion': (0, 255, 0),        # Green — MOG2 motion contours
+            'face':   (255, 0, 255),       # Magenta — Haar face
+            'body':   (255, 165, 0),       # Orange — Haar body
+        }
+        _yolox_colors = {
+            'person': (0, 255, 255),       # Yellow — YOLOX person
+            'car':    (255, 0, 0),         # Blue — YOLOX car
+            'truck':  (200, 50, 0),        # Dark blue — YOLOX truck
+            'bus':    (200, 100, 0),       # Navy — YOLOX bus
+        }
+        _yolox_default_color = (0, 200, 200)  # Teal — other YOLOX classes
+
         for i in _pts.keys():
             # Skip objects seen fewer than 3 frames (likely noise)
-            if self.memory.pid_hist[i]['total_seen'] < 3:
+            wrapped_pid = i % self.memory.maxpid
+            hist = self.memory.pid_hist.get(wrapped_pid)
+            if hist is None or hist['total_seen'] < 3:
                 continue
 
             good_new = _pts[i]['keypoints_2']
@@ -752,13 +839,24 @@ class OpticalFlowTracker:
             if self.mask.shape == viz_frame.shape:
                 viz_frame = cv2.add(viz_frame, self.mask)
 
-            # Draw bounding box and ID label
+            # Resolve bbox color from detection type
+            det_type = _pts[i].get('type', 'motion')
+            if det_type in _type_colors:
+                bbox_color = _type_colors[det_type]
+            elif det_type.startswith('yolox_'):
+                cls = det_type[6:]  # strip 'yolox_' prefix
+                bbox_color = _yolox_colors.get(cls, _yolox_default_color)
+            else:
+                bbox_color = (0, 255, 0)  # Fallback green
+
+            # Draw bounding box and ID + type label
             bbox = _pts[i]['bbox']
             cv2.rectangle(viz_frame,
                           (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])),
-                          (0, 255, 0), 2)
-            cv2.putText(viz_frame, f'ID: {i}',
+                          bbox_color, 2)
+            label = f'ID:{i} {det_type}'
+            cv2.putText(viz_frame, label,
                         (int(bbox[0]), int(bbox[1]) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, bbox_color, 2)
 
         return viz_frame

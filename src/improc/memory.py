@@ -61,6 +61,9 @@ class FlowMemory:
         keep_last_seen: Frames a disappeared object stays eligible for trajectory selection.
     """
 
+    # Detection types considered as "person" for counting/density
+    PERSON_TYPES = frozenset(('person', 'yolox_person', 'face', 'body'))
+
     def __init__(self, maxpid=2500, min_traj_len=10, max_traj_len=100, keep_last_seen=90):
         self.max_traj_len = max_traj_len
         # "pid|kpid" -> _RingBuffer2D (replaces deque + separate motion_trajs)
@@ -69,6 +72,8 @@ class FlowMemory:
         self.pid_hist = {}
         # "pid|kpid" -> total buffer count (used for ranking)
         self.traj_len = {}
+        # pid -> {type_str: int} — detection type histogram per object
+        self._type_counts = defaultdict(lambda: defaultdict(int))
 
         self.maxpid = maxpid
         self.maxkpid = 6
@@ -138,14 +143,18 @@ class FlowMemory:
             self.pid_hist[pid]['last_seen'] += 1
 
         # Step 2: Process currently visible objects
-        for pid in pts:
-            pid = pid % self.maxpid  # Wrap to bounded ID space
+        for orig_pid in pts:
+            pid = orig_pid % self.maxpid  # Wrap to bounded ID space
             if pid not in self.pid_hist:
                 self.pid_hist[pid] = {'last_seen': 0, 'total_seen': 0}
             self.pid_hist[pid]['last_seen'] = 0
             self.pid_hist[pid]['total_seen'] += 1
 
-            keypoints = pts[pid]['keypoints_1']
+            # Track detection type histogram for this PID
+            det_type = pts[orig_pid].get('type', 'motion')
+            self._type_counts[pid][det_type] += 1
+
+            keypoints = pts[orig_pid]['keypoints_1']
             for kpid in range(len(keypoints)):
                 x, y = keypoints[kpid].ravel()
                 traj_key = f'{pid}|{kpid}'
@@ -162,6 +171,34 @@ class FlowMemory:
                 # Record buffer count for ranking once we have enough positions
                 if buf.count >= self.min_traj_len:
                     self.traj_len[traj_key] = buf.count
+
+    def classify_pid(self, pid, min_ratio=0.2):
+        """Return the dominant detection type for *pid*.
+
+        Returns the type that appears most often, but only if it accounts
+        for at least *min_ratio* of all observations.  Falls back to 'motion'.
+        """
+        counts = self._type_counts.get(pid)
+        if not counts:
+            return 'motion'
+        total = sum(counts.values())
+        best_type, best_count = max(counts.items(), key=lambda kv: kv[1])
+        if best_count / total >= min_ratio:
+            return best_type
+        return 'motion'
+
+    def get_person_count(self, current_pids=()):
+        """Count currently visible PIDs classified as a person type.
+
+        A PID is a "person" if its dominant type (≥20%) is in PERSON_TYPES.
+        Only PIDs in *current_pids* (visible this frame) are counted.
+        """
+        count = 0
+        for pid in current_pids:
+            pid = pid % self.maxpid
+            if self.classify_pid(pid) in self.PERSON_TYPES:
+                count += 1
+        return count
 
     def get_sorted_traj_ids(self, curr_pids=(), num_of_kpts=5):
         """Select top trajectory IDs for visualization, preferring visible objects.

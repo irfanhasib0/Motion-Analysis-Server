@@ -1,7 +1,8 @@
 """Camera management endpoints: CRUD, start/stop/restart, sensitivity."""
-from fastapi import APIRouter, HTTPException
-from typing import List
+from fastapi import APIRouter, HTTPException, Query
+from typing import List, Optional
 import asyncio
+import os
 
 from models.camera import Camera, CameraCreate, CameraUpdate
 from models.requests import CameraSensitivityRequest
@@ -55,22 +56,16 @@ async def delete_camera(camera_id: str):
 @router.post("/cameras/{camera_id}/start")
 async def start_camera(camera_id: str):
     """Start camera with both video and audio streams (unified approach)"""
-    success = deps.camera_service.start_video(camera_id)
-    if success:
-        # Also start background audio/video streaming threads if camera started successfully
-        await asyncio.to_thread(deps.camera_service.start_av_stream, camera_id)
-        #await deps.broadcast_message({"type": "camera_started", "camera_id": camera_id})
-        return {"message": "Camera and streaming started successfully"}
-    else:
-        deps.camera_service.stop_video(camera_id)
-        success = deps.camera_service.start_video(camera_id)
-    if success:
-        # Also start background streaming on retry
-        await asyncio.to_thread(deps.camera_service.start_av_stream, camera_id)
-        #await deps.broadcast_message({"type": "camera_started", "camera_id": camera_id})
-        return {"message": "Camera and streaming started successfully on retry"}
-    else:
+    success = await asyncio.to_thread(deps.camera_service.start_video, camera_id)
+    if not success:
+        # Retry once: stop then start
+        await asyncio.to_thread(deps.camera_service.stop_video, camera_id)
+        success = await asyncio.to_thread(deps.camera_service.start_video, camera_id)
+    if not success:
         raise HTTPException(status_code=400, detail="Failed to start camera - camera may be unavailable or in use")
+    # Start background AV streaming threads (non-blocking thread spawn)
+    await asyncio.to_thread(deps.camera_service.start_av_stream, camera_id)
+    return {"message": "Camera and streaming started successfully"}
 
 
 @router.post("/cameras/{camera_id}/stop")
@@ -148,3 +143,30 @@ async def set_camera_sensitivity(camera_id: str, payload: CameraSensitivityReque
     except Exception as e:
         deps.logger.error(f"Failed to set camera sensitivity: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+VIDEO_EXTENSIONS = frozenset(('.mp4', '.avi', '.mkv', '.mov', '.webm', '.flv', '.wmv', '.ts'))
+
+@router.get("/browse-files")
+async def browse_files(path: Optional[str] = Query(None)):
+    """Browse local directories for video files. Returns folders and video files."""
+    base = os.path.expanduser(path) if path else os.path.expanduser("~")
+    base = os.path.abspath(base)
+
+    if not os.path.isdir(base):
+        raise HTTPException(status_code=400, detail="Not a valid directory")
+
+    items = []
+    try:
+        for entry in sorted(os.scandir(base), key=lambda e: (not e.is_dir(), e.name.lower())):
+            if entry.name.startswith('.'):
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                items.append({"name": entry.name, "path": entry.path, "type": "directory"})
+            elif entry.is_file() and os.path.splitext(entry.name)[1].lower() in VIDEO_EXTENSIONS:
+                items.append({"name": entry.name, "path": entry.path, "type": "file"})
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    parent = os.path.dirname(base) if base != "/" else None
+    return {"current": base, "parent": parent, "items": items}

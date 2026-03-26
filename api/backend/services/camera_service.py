@@ -19,7 +19,6 @@ from services.colors import Colors
 
 import sys
 sys.path.append('../../src')
-from improc.optical_flow import OpticalFlowTracker
 from audioproc import FrequencyIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -80,6 +79,8 @@ class Capture:
             self.cam_type = 'rtsp'
         elif isinstance(source, str) and source.startswith(('http://', 'https://')):
             self.cam_type = 'http'
+        elif isinstance(source, str) and os.path.isfile(source):
+            self.cam_type = 'recorded'
         elif type(source) == int or (isinstance(source, str) and source.split('.')[-1] in ['mp4', 'avi', 'mkv', 'mov']):
             self.cam_type = 'webcam'
         else:
@@ -229,6 +230,34 @@ class Capture:
         
         return self
 
+    def open_video_stream_file(self):
+        """Open a local video file for playback with real-time pacing and looping."""
+        if self.cap:
+            self.release_video_stream_webcam()
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-re",                       # read input at native frame rate (real-time pacing)
+            "-stream_loop", "-1",        # loop the file indefinitely
+            "-i", str(self.source),
+            "-an",                       # disable audio in video pipeline
+            "-vf", f"fps={self.fps},scale={self.width}:{self.height}",
+            "-pix_fmt", "bgr24",
+            "-f", "rawvideo",
+            "pipe:1",
+        ]
+
+        pipe_buffer_size = self._resolve_pipe_buffer_size()
+        self.cap = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=pipe_buffer_size,
+        )
+        return self
+
     def open_video_stream_rtsp(self):
         if self.cap:
             self.release_video_stream_rtsp()
@@ -352,13 +381,15 @@ class Capture:
     def open_video(self):
         if self.cam_type in ['rtsp', 'http']:
             return self.open_video_stream_rtsp()
+        elif self.cam_type == 'recorded':
+            return self.open_video_stream_file()
         elif self.cam_type == 'webcam':
             return self.open_video_stream_webcam()
 
     def open_audio(self):
         if self.cam_type in ['rtsp', 'http']:
             return self.open_audio_stream_rtsp()
-        elif self.cam_type == 'webcam':
+        elif self.cam_type in ['webcam', 'recorded']:
             return self.open_audio_stream_webcam()
         
     def is_video_stream_opened(self):
@@ -563,7 +594,9 @@ class CameraService(StreamingService):
         self.live_stream_mode = str(_sys['live_stream_mode']).lower()
         self.enable_person_detection = bool(_sys.get('enable_person_detection', False))
         self.enable_yolox = bool(_sys.get('enable_yolox', False))
-        self.use_multiprocess = bool(_sys.get('tracker_multiprocess', False))
+        self.yolox_model_size = str(_sys.get('yolox_model_size', 'nano'))
+        self.yolox_score_thr = float(_sys.get('yolox_score_thr', 0.5))
+        self.ai_service.set_multiprocess(bool(_sys.get('tracker_multiprocess', False)))
         
         # Store ring buffer settings for runtime updates
         self.frame_rbf_len = frame_rbf_len
@@ -926,13 +959,6 @@ class CameraService(StreamingService):
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             return False
         
-        if self.use_multiprocess:
-            # Multiprocess mode: tracker process is started by streaming_service
-            tracker = None
-        else:
-            # Sequential mode: create tracker inline (original behavior)
-            tracker = OpticalFlowTracker(enable_person_detection=self.enable_person_detection, enable_yolox=self.enable_yolox)
-        
         ret, _ = cap.read_video()
             
         if ret:
@@ -940,8 +966,6 @@ class CameraService(StreamingService):
             logger.info(f"{Colors.GREEN}Video started for {camera_id}{Colors.RESET}")
             camera_started = True
             self._camera_streams[camera_id] = cap
-            if tracker is not None:
-                self._camera_trackers[camera_id] = tracker
             # Initialize ring buffers for SPMC data distribution
             self._ensure_ring_buffers(camera_id)
         else:
@@ -980,9 +1004,9 @@ class CameraService(StreamingService):
             except Exception:
                 pass
 
-        # Stop tracker process if running in multiprocess mode
+        # Stop tracker (handles both multiprocess and sequential modes)
         if hasattr(self, 'ai_service'):
-            self.ai_service.stop_tracker_process(camera_id)
+            self.ai_service.stop_tracker(camera_id)
 
         self.stream_locks.pop(camera_id, None)
         self._latest_frames.pop(camera_id, None)
