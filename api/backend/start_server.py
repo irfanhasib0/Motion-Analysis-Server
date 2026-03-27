@@ -311,8 +311,8 @@ deps.broadcast_message = broadcast_message
 # =====================================================================
 @app.get("/")
 async def serve_react_app():
-    if os.path.exists("../frontend/build/index.html"):
-        return FileResponse("../frontend/build/index.html")
+    if os.path.exists("./api/frontend/build/index.html"):
+        return FileResponse("./api/frontend/build/index.html")
     else:
         return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
 
@@ -321,11 +321,11 @@ async def serve_react_routes(path: str):
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
 
-    file_path = f"../frontend/build/{path}"
+    file_path = f"./api/frontend/build/{path}"
     if os.path.exists(file_path) and os.path.isfile(file_path):
         return FileResponse(file_path)
-    elif os.path.exists("../frontend/build/index.html"):
-        return FileResponse("../frontend/build/index.html")
+    elif os.path.exists("./api/frontend/build/index.html"):
+        return FileResponse("./api/frontend/build/index.html")
     else:
         return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
 
