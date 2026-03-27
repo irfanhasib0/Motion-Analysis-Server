@@ -32,8 +32,8 @@ class StreamHealthMonitor:
         self._lag_queue_maxlen = (24 * 3600) // self._check_interval  # 2880 samples at 30s interval
         self._lag_queues: Dict[str, deque] = {}  # camera_id -> deque of lag samples
         
-        # Error log snapshot directory
-        self._error_log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'error_logs')
+        # Error log snapshot directory (project root)
+        self._error_log_dir = os.path.join('.', 'error_logs')
         
     def monitor_streams(self):
         """Check stream health and trigger recovery if needed."""

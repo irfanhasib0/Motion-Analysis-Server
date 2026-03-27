@@ -37,11 +37,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Root of the api folder (this script lives in api/)
-API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api"
+# Project root (this script lives at the repository root)
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+API_DIR="$PROJECT_DIR/api"
 BACKEND_DIR="$API_DIR/backend"
 FRONTEND_DIR="$API_DIR/frontend"
-LOG_FILE="$API_DIR/nvr.log"
+LOG_FILE="$PROJECT_DIR/nvr.log"
 LOGROTATE_CONF="/etc/logrotate.d/nvr"
 RUN_USER="${USER:-$(id -un)}"
 RUN_GROUP="${GROUP:-$(id -gn)}"
@@ -80,7 +81,7 @@ echo "Stopping existing backend process (if any)..."
 pgrep -f "$START_SCRIPT_NAME" || true
 
 echo "Starting backend and writing logs to: $LOG_FILE"
-cd "$BACKEND_DIR"
+cd "$PROJECT_DIR"
 nohup python3 api/backend/"$START_SCRIPT_NAME".py >> "$LOG_FILE" 2>&1 &
 
 echo '' > "$LOG_FILE"  # Clear log file on each start
