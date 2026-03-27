@@ -13,11 +13,15 @@ Usage:
     )
 """
 
+import os
 import threading
 
 _lock = threading.Lock()
 _yolox_instance = None
 _person_instance = None
+
+# data/ lives at project root (CWD-relative for portability)
+_DATA_DIR = os.path.join('.', 'data')
 
 
 def get_shared_yolox(**kwargs):
@@ -27,6 +31,7 @@ def get_shared_yolox(**kwargs):
         with _lock:
             if _yolox_instance is None:
                 from improc.yolox_detector import YOLOXDetector
+                kwargs.setdefault('data_dir', _DATA_DIR)
                 _yolox_instance = YOLOXDetector(**kwargs)
     return _yolox_instance
 
@@ -38,5 +43,6 @@ def get_shared_person_detector(**kwargs):
         with _lock:
             if _person_instance is None:
                 from improc.person_detection import PersonDetector
+                kwargs.setdefault('data_dir', _DATA_DIR)
                 _person_instance = PersonDetector(**kwargs)
     return _person_instance

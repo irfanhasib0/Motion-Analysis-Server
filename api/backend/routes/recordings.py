@@ -1,4 +1,5 @@
 """Recording management, storage, archive, playback, and motion data endpoints."""
+import asyncio
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from typing import Optional, List
@@ -21,7 +22,7 @@ async def start_recording(camera_id: str, background_tasks: BackgroundTasks):
     camera = deps.camera_service.cameras[camera_id]
     deps.logger.info(f"Camera status: {camera.status}, name: {camera.name}")
 
-    recording_id = deps.camera_service.start_recording(camera_id)
+    recording_id = await asyncio.to_thread(deps.camera_service.start_recording, camera_id)
     deps.logger.info(f"Recording started successfully: {recording_id}")
 
     #await deps.broadcast_message({
@@ -35,7 +36,7 @@ async def start_recording(camera_id: str, background_tasks: BackgroundTasks):
 @router.post("/cameras/{camera_id}/stop-recording")
 async def stop_recording(camera_id: str):
     """Stop recording from a camera"""
-    deps.camera_service.stop_recording(camera_id)
+    await asyncio.to_thread(deps.camera_service.stop_recording, camera_id)
     #await deps.broadcast_message({"type": "recording_stopped", "camera_id": camera_id})
     return {"message": "Recording stopped"}
 

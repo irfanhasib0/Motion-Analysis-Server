@@ -102,16 +102,16 @@ export const api = {
   updateCamera: (cameraId, updates) => apiClient.put(`/cameras/${cameraId}`, updates),
   deleteCamera: (cameraId) => apiClient.delete(`/cameras/${cameraId}`),
   browseFiles: (path) => apiClient.get('/browse-files', { params: path ? { path } : {} }),
-  startCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/start`),
-  stopCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/stop`),
-  restartCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/restart`),
+  startCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/start`, null, { timeout: 60000 }),
+  stopCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/stop`, null, { timeout: 60000 }),
+  restartCamera: (cameraId) => apiClient.post(`/cameras/${cameraId}/restart`, null, { timeout: 60000 }),
   
   // Recording endpoints
   startRecording: (cameraId) => {
     console.log('API startRecording called for camera:', cameraId);
-    return apiClient.post(`/cameras/${cameraId}/start-recording`);
+    return apiClient.post(`/cameras/${cameraId}/start-recording`, null, { timeout: 60000 });
   },
-  stopRecording: (cameraId) => apiClient.post(`/cameras/${cameraId}/stop-recording`),
+  stopRecording: (cameraId) => apiClient.post(`/cameras/${cameraId}/stop-recording`, null, { timeout: 60000 }),
   getRecordings: (cameraId = null) => {
     const params = cameraId ? { camera_id: cameraId } : {};
     return apiClient.get('/recordings', { params });

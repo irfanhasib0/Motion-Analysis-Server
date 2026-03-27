@@ -110,9 +110,10 @@ class RecordingManager:
                 continue
 
             file_path = os.path.join(self.recordings_dir, filename)
+            rel_path = filename
             file_stat = os.stat(file_path)
 
-            if file_path in db_recordings:
+            if rel_path in db_recordings:
                 continue
 
             base_name = filename[:-4]
@@ -129,7 +130,7 @@ class RecordingManager:
                 recording_data = {
                     'id': recording_id,
                     'camera_id': camera_id,
-                    'file_path': file_path,
+                    'file_path': rel_path,
                     'start_time': created_at.isoformat(),
                     'duration': 0,
                     'file_size': file_stat.st_size,
@@ -146,13 +147,14 @@ class RecordingManager:
         timestamp = int(time.time())
         filename = f"{camera_id}_{timestamp}.mp4"
         recording_id = f"{camera_id}_{timestamp}"
-        file_path = os.path.join(self.recordings_dir, str(camera_id), filename)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        rel_path = os.path.join(str(camera_id), filename)
+        full_path = os.path.join(self.recordings_dir, rel_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
         recording_data = {
             'id': recording_id,
             'camera_id': camera_id,
-            'file_path': file_path,
+            'file_path': rel_path,
             'start_time': datetime.now().isoformat(),
             'status': 'recording',
         }
@@ -165,7 +167,7 @@ class RecordingManager:
 
         # Create flexible AV writer with separate files mode (mux_realtime=False)
         writer = AVWriter(
-            path=file_path,
+            path=full_path,
             fps=fps,
             width=width,
             height=height,
@@ -190,11 +192,11 @@ class RecordingManager:
         self.clip_max_person_conf[camera_id] = 0.0
         self.clip_max_person_frame[camera_id] = None
 
-        _ext = file_path.split('.')[-1]
-        with open(file_path.replace(f'.{_ext}', '.txt'), 'w') as f:
+        _ext = full_path.split('.')[-1]
+        with open(full_path.replace(f'.{_ext}', '.txt'), 'w') as f:
             f.write('vel,bg_diff,loudness\n')
         self._metrics_buffer[camera_id] = []
-        return recording_id, file_path, writer
+        return recording_id, full_path, writer
 
     def _parse_recording_time(self, db_recording: dict) -> datetime:
         for key in ('start_time', 'created_at', 'end_time'):
@@ -371,7 +373,7 @@ class RecordingManager:
                 'end_time': datetime.now().isoformat(),
                 'duration': clip_duration,
                 'file_size': file_size,
-                'file_path': final_file_path,
+                'file_path': os.path.relpath(final_file_path, self.recordings_dir),
                 'metadata': {
                     'motion_detected': True,
                     'vel': float(self.clip_vel.get(camera_id, 0.0)),
@@ -679,6 +681,10 @@ class RecordingManager:
 
         return recordings
 
+    def _resolve_file_path(self, rel_path: str) -> str:
+        """Resolve a stored relative path to a full path under recordings_dir."""
+        return os.path.join(self.recordings_dir, rel_path)
+
     def get_recording_path(self, recording_id: str) -> str:
         db_recording = self.db.get_recording(recording_id)
         if not db_recording:
@@ -688,12 +694,12 @@ class RecordingManager:
         if not file_path:
             raise ValueError(f"Recording file path missing: {recording_id}")
 
-        normalized_path = os.path.abspath(file_path)
-        if os.path.exists(normalized_path):
-            if db_recording.get('file_path') != normalized_path:
-                self.db.update_recording(recording_id, {'file_path': normalized_path})
-            return normalized_path
+        # file_path is relative to recordings_dir (e.g. cam_id/file.mp4)
+        full_path = self._resolve_file_path(file_path)
+        if os.path.exists(full_path):
+            return full_path
 
+        # Fallback: search by filename in common locations
         candidates: List[str] = []
         filename = os.path.basename(file_path)
         camera_id = db_recording.get('camera_id')
@@ -703,11 +709,12 @@ class RecordingManager:
             candidates.append(os.path.join(self.recordings_dir, filename))
 
         for candidate in candidates:
-            candidate_abs = os.path.abspath(candidate)
-            if os.path.exists(candidate_abs):
-                if db_recording.get('file_path') != candidate_abs:
-                    self.db.update_recording(recording_id, {'file_path': candidate_abs})
-                return candidate_abs
+            if os.path.exists(candidate):
+                # Update stored relative path
+                new_rel = os.path.relpath(candidate, self.recordings_dir)
+                if db_recording.get('file_path') != new_rel:
+                    self.db.update_recording(recording_id, {'file_path': new_rel})
+                return candidate
 
         raise ValueError(f"Recording file not found: {recording_id}")
 
@@ -1229,7 +1236,7 @@ class RecordingManager:
             recording_data = {
                 'id': rec_id,
                 'camera_id': rec.get('camera_id', ''),
-                'file_path': abs_path,
+                'file_path': dst_rel_path,
                 'start_time': rec.get('started_at') or rec.get('created_at') or datetime.now().isoformat(),
                 'end_time': rec.get('ended_at'),
                 'duration': rec.get('duration'),
@@ -1297,7 +1304,7 @@ class RecordingManager:
         if not db_recording:
             raise ValueError(f"Recording not found: {recording_id}")
 
-        file_path = db_recording['file_path']
+        file_path = self._resolve_file_path(db_recording['file_path'])
         
         # Delete main file
         if os.path.exists(file_path):

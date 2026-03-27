@@ -37,6 +37,8 @@ const CameraList = ({ cameras, setCameras }) => {
   const [refreshingStreams, setRefreshingStreams] = useState({}); // { [camera_id]: boolean }
   const [restartingCameras, setRestartingCameras] = useState({}); // { [camera_id]: boolean }
   const [startingCameras, setStartingCameras] = useState({}); // { [camera_id]: boolean }
+  const [stoppingCameras, setStoppingCameras] = useState({}); // { [camera_id]: boolean }
+  const [recordingLoading, setRecordingLoading] = useState({}); // { [camera_id]: 'starting' | 'stopping' | null }
 
   const isLiveHlsMode = liveStreamMode === 'hls';
   const isWsMode = liveStreamMode === 'ws';
@@ -421,50 +423,53 @@ const CameraList = ({ cameras, setCameras }) => {
             <div className="camera-controls-card">
               {camera.status === 'offline' || camera.status === 'error' ? (
                 <button
-                  className="btn btn-success"
+                  className={`btn btn-success${startingCameras[camera.id] ? ' btn-starting' : ''}`}
                   onClick={() => handleStartCamera(camera.id)}
                   disabled={startingCameras[camera.id]}
-                  style={{
-                    ...COMPACT_BUTTON_STYLE,
-                    animation: startingCameras[camera.id] ? 'pulse 1.5s ease-in-out infinite' : 'none',
-                    opacity: startingCameras[camera.id] ? 0.8 : 1,
-                  }}
+                  style={COMPACT_BUTTON_STYLE}
                 >
                   <Power 
                     size={14} 
                     style={{
-                      transform: startingCameras[camera.id] ? 'scale(1.2)' : 'scale(1)',
-                      transition: 'transform 0.3s ease'
+                      animation: startingCameras[camera.id] ? 'btn-spin 1s linear infinite' : 'none',
                     }} 
                   />
                   {startingCameras[camera.id] ? 'Starting...' : 'Start'}
                 </button>
               ) : (
                 <button
-                  className="btn btn-secondary"
+                  className={`btn btn-secondary${stoppingCameras[camera.id] ? ' btn-stopping' : ''}`}
                   onClick={() => handleStopCamera(camera.id)}
-                  disabled={camera.status === 'recording'}
+                  disabled={camera.status === 'recording' || stoppingCameras[camera.id]}
                   style={COMPACT_BUTTON_STYLE}
                 >
-                  <PowerOff size={14} />
-                  Stop
+                  <PowerOff
+                    size={14}
+                    style={{
+                      animation: stoppingCameras[camera.id] ? 'btn-spin 1s linear infinite' : 'none',
+                    }}
+                  />
+                  {stoppingCameras[camera.id] ? 'Stopping...' : 'Stop'}
                 </button>
               )}
 
               {camera.status === 'recording' ? (
                 <button
-                  className="btn btn-danger"
+                  className={`btn btn-danger${recordingLoading[camera.id] === 'stopping' ? ' btn-rec-stopping' : ' btn-recording-active'}`}
                   onClick={() => handleStopRecording(camera.id)}
+                  disabled={recordingLoading[camera.id] === 'stopping'}
                   style={COMPACT_BUTTON_STYLE}
                 >
-                  <Square size={14} />
-                  Stop Rec
+                  {recordingLoading[camera.id] === 'stopping'
+                    ? <Square size={14} style={{ animation: 'btn-spin 1s linear infinite' }} />
+                    : <span className="rec-dot" />}
+                  {recordingLoading[camera.id] === 'stopping' ? 'Stopping...' : 'Stop Rec'}
                 </button>
               ) : (
                 <button
-                  className="btn btn-success"
+                  className={`btn btn-success${recordingLoading[camera.id] === 'starting' ? ' btn-rec-starting' : ''}`}
                   onClick={() => handleStartRecording(camera.id)}
-                  disabled={camera.status !== 'online'}
+                  disabled={camera.status !== 'online' || recordingLoading[camera.id] === 'starting'}
                   title={camera.status !== 'online' ? `Camera must be online to record (current: ${camera.status})` : 'Start recording'}
                   style={{
                     ...COMPACT_BUTTON_STYLE,
@@ -475,8 +480,13 @@ const CameraList = ({ cameras, setCameras }) => {
                     color: camera.status !== 'online' ? '#e8f5eb' : undefined,
                   }}
                 >
-                  <Play size={14} />
-                  Record
+                  <Play
+                    size={14}
+                    style={{
+                      animation: recordingLoading[camera.id] === 'starting' ? 'btn-spin 1s linear infinite' : 'none',
+                    }}
+                  />
+                  {recordingLoading[camera.id] === 'starting' ? 'Starting...' : 'Record'}
                 </button>
               )}
 
@@ -690,6 +700,7 @@ const CameraList = ({ cameras, setCameras }) => {
 
   const handleStopCamera = async (cameraId) => {
     try {
+      setStoppingCameras(prev => ({ ...prev, [cameraId]: true }));
       await api.stopCamera(cameraId);
       try { await api.stopCamera(cameraId); } catch {}
       patchCameraInState(cameraId, { status: 'offline' });
@@ -697,28 +708,36 @@ const CameraList = ({ cameras, setCameras }) => {
     } catch (error) {
       console.error('Stop camera error:', error);
       toast.error('Failed to stop camera: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setStoppingCameras(prev => ({ ...prev, [cameraId]: false }));
     }
   };
 
   const handleStartRecording = async (cameraId) => {
     try {
+      setRecordingLoading(prev => ({ ...prev, [cameraId]: 'starting' }));
       await api.startRecording(cameraId);
       patchCameraInState(cameraId, { status: 'recording' });
       toast.success('Recording started');
     } catch (error) {
       console.error('Start recording error:', error);
       toast.error('Failed to start recording: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setRecordingLoading(prev => ({ ...prev, [cameraId]: null }));
     }
   };
 
   const handleStopRecording = async (cameraId) => {
     try {
+      setRecordingLoading(prev => ({ ...prev, [cameraId]: 'stopping' }));
       await api.stopRecording(cameraId);
       patchCameraInState(cameraId, { status: 'online' });
       toast.success('Recording stopped');
     } catch (error) {
       console.error('Stop recording error:', error);
       toast.error('Failed to stop recording: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setRecordingLoading(prev => ({ ...prev, [cameraId]: null }));
     }
   };
 

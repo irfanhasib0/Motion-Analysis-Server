@@ -556,7 +556,7 @@ class Capture:
 
 class CameraService(StreamingService):
     def __init__(self, configs: Optional[str] = 'default'):
-        self.root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        self.root_dir = '.'
         self.db = ConfigManager(configs_dir=os.path.join(self.root_dir, 'configs', configs))
         
         # Load system settings from system.yaml (no fallbacks - raises on missing keys)

@@ -1,3 +1,8 @@
 models
 extra
 *__pycache__*
+data
+recordings
+archive
+configs/pc
+configs/pi

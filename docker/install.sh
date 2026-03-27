@@ -1,7 +1,9 @@
 pip install fastapi 
 pip install uvicorn
 pip install python-multipart
-pip install websocket
+pip install websockets==16.0
+pip install onnxruntime==1.23.2
+pip install numpy==1.26.3
 apt-get update
 apt-get install -y ffmpeg
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash

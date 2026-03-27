@@ -110,14 +110,8 @@ class SimpleTracker:
     
 class ByteTracker:
     """ByteTracker implementation for multi-object tracking"""
-    
-    try:
-        from yolox.tracker.byte_tracker import BYTETracker, STrack
-        from yolox.tracker.basetrack import BaseTrack, TrackState
-        _bytetrack_available = True
-    except ImportError as e:
-        print(f"ByteTrack dependencies not available: {e}")
-        _bytetrack_available = False
+    from trackers.byte_tracker.byte_tracker import BYTETracker, STrack
+    from trackers.byte_tracker.basetrack import BaseTrack, TrackState
 
     def __init__(self, track_thresh=0.3, track_buffer=30, match_thresh=0.8, frame_rate=30):
         """
@@ -129,9 +123,6 @@ class ByteTracker:
             match_thresh: IOU threshold for matching
             frame_rate: Frame rate of the video
         """
-        if not self._bytetrack_available:
-            raise ImportError("ByteTrack dependencies are not installed. Cannot create ByteTracker.")
-        
         # Create args object for BYTETracker
         class Args:
             def __init__(self):

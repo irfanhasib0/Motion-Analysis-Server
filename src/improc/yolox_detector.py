@@ -18,11 +18,7 @@ import os
 import numpy as np
 import cv2
 
-try:
-    import onnxruntime
-    ONNXRUNTIME_AVAILABLE = True
-except ImportError:
-    ONNXRUNTIME_AVAILABLE = False
+import onnxruntime
 
 # --- Inlined YOLOX utilities (avoids heavy import chain from yolox repo) ---
 
@@ -117,7 +113,8 @@ class YOLOXDetector:
                  input_shape=None,
                  score_thr=0.5,
                  nms_thr=0.45,
-                 target_class_ids=None):
+                 target_class_ids=None,
+                 data_dir=None):
         """
         Args:
             model_size: 'nano' or 'tiny' — sets default input shape & model filename.
@@ -138,8 +135,9 @@ class YOLOXDetector:
         else:
             self.input_shape = self.MODEL_CONFIGS.get(model_size, (416, 416))
 
-        data_dir = os.path.join(os.path.dirname(__file__), "data")
-        model_path = os.path.join(data_dir, f"yolox_{model_size}.onnx")
+        if data_dir is None:
+            data_dir = os.path.join('.', 'data')
+        model_path = os.path.join(data_dir, f"y{model_size[0]}.onnx")
 
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f"Warning: YOLOX model not found at {model_path} — detector disabled.")

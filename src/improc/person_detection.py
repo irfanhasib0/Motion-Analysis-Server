@@ -27,7 +27,8 @@ class PersonDetector:
                  body_scale_factor=1.1,
                  body_min_neighbors=3,
                  min_face_size=(30, 30),
-                 min_body_size=(50, 50)):
+                 min_body_size=(50, 50),
+                 data_dir=None):
         """
         Initialize person detector with Haar cascades
         
@@ -57,11 +58,11 @@ class PersonDetector:
         # Initialize Haar cascade classifiers
         self.face_cascade = None
         self.body_cascade = None
-        xml_dir = os.path.join(os.path.dirname(__file__), 'data')   
+        xml_dir = data_dir if data_dir is not None else os.path.join('.', 'data')   
         if self.enable_face:
             try:
                 self.face_cascade = cv2.CascadeClassifier(
-                    os.path.join(xml_dir, 'haarcascade_frontalface_default.xml') # cv2.data.haarcascades
+                    os.path.join(xml_dir, 'hfd.xml') # cv2.data.haarcascades
                 )
                 if self.face_cascade.empty():
                     print("Warning: Face cascade failed to load")
@@ -73,7 +74,7 @@ class PersonDetector:
         if self.enable_body:
             try:
                 self.body_cascade = cv2.CascadeClassifier(
-                    os.path.join(xml_dir, 'haarcascade_fullbody.xml')
+                    os.path.join(xml_dir, 'hfb.xml')
                 )
                 if self.body_cascade.empty():
                     print("Warning: Body cascade failed to load")

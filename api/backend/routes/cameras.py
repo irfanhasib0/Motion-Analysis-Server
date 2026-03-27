@@ -71,8 +71,8 @@ async def start_camera(camera_id: str):
 @router.post("/cameras/{camera_id}/stop")
 async def stop_camera(camera_id: str):
     """Stop camera and all associated streams (video, audio, HLS, recordings)"""
-    deps.camera_service.stop_video_stream(camera_id)
-    deps.camera_service.stop_audio_stream(camera_id)
+    await asyncio.to_thread(deps.camera_service.stop_video_stream, camera_id)
+    await asyncio.to_thread(deps.camera_service.stop_audio_stream, camera_id)
     #await deps.broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
     return {"message": "Camera and all streams stopped successfully"}
 
@@ -81,7 +81,7 @@ async def stop_camera(camera_id: str):
 async def restart_camera(camera_id: str):
     """Restart camera (stop recording, stop camera, start camera)"""
     try:
-        success = deps.camera_service.restart_camera(camera_id)
+        success = await asyncio.to_thread(deps.camera_service.restart_camera, camera_id)
         if success:
             #await deps.broadcast_message({"type": "camera_restarted", "camera_id": camera_id})
             return {"message": "Camera restarted successfully"}
