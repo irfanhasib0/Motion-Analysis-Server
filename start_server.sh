@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Root of the api folder (this script lives in api/)
-API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api"
 BACKEND_DIR="$API_DIR/backend"
 FRONTEND_DIR="$API_DIR/frontend"
 LOG_FILE="$API_DIR/nvr.log"
