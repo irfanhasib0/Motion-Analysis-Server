@@ -163,6 +163,42 @@ class SPMCRingBuffer:
             
             return None
     
+    def get_by_timestamp(self, consumer_id: str, since_timestamp: float) -> Optional[Any]:
+        """Get the first item written strictly after since_timestamp, skipping all stale slots.
+
+        Unlike get(), which advances one slot per call and returns None for each
+        stale slot, this method scans forward past all stale slots in a single call
+        and returns the first genuinely fresh item. Useful for slow consumers (e.g.
+        the recording worker on Pi) that fall behind by many slots at once.
+        """
+        with self._lock:
+            if consumer_id not in self._consumer_cursors:
+                self._consumer_cursors[consumer_id] = self._write_idx
+                self._consumer_last_timestamps[consumer_id] = since_timestamp
+                if self._stats_enabled:
+                    self._consumer_read_times[consumer_id] = deque(maxlen=100)
+                return None
+
+            cursor = self._consumer_cursors[consumer_id]
+            steps = 0
+            while cursor != self._write_idx and steps < self.capacity:
+                item, write_timestamp = self._buffer[cursor]
+                cursor = (cursor + 1) % self.capacity
+                steps += 1
+                if item is not None and write_timestamp > since_timestamp:
+                    self._consumer_cursors[consumer_id] = cursor
+                    self._consumer_last_timestamps[consumer_id] = write_timestamp
+                    if self._stats_enabled:
+                        if consumer_id not in self._consumer_read_times:
+                            self._consumer_read_times[consumer_id] = deque(maxlen=100)
+                        self._consumer_read_times[consumer_id].append(time.time())
+                    return item
+
+            # No item newer than since_timestamp found; advance cursor to write_idx
+            # to avoid re-scanning the same stale range on the next call.
+            self._consumer_cursors[consumer_id] = self._write_idx
+            return None
+
     def get_last_read_time(self, consumer_id: str) -> Optional[float]:
         """Get last read time for consumer (stats-based)"""
         with self._lock:

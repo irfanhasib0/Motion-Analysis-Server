@@ -394,8 +394,12 @@ class AIService:
 
         if latest is not None:
             self._latest_tracker_result[camera_id] = latest
+            return latest
 
-        return self._latest_tracker_result.get(camera_id)
+        # Queue was empty — no new result this poll cycle.
+        # Return None so the video thread does not re-use a stale result_ts,
+        # which would write duplicate timestamps into the viz/results ring buffers.
+        return None
 
     def get_cached_result(self, camera_id: str) -> Optional[TrackerResult]:
         """Return the last polled result without touching the queue."""

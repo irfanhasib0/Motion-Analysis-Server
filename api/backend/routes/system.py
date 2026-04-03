@@ -58,7 +58,7 @@ async def update_system_settings(payload: SystemSettingsUpdateRequest):
     custom_updates = {}
     for field in ('sensitivity', 'jpeg_quality', 'pipe_buffer_size', 'max_vel',
                    'bg_diff', 'max_clip_length', 'motion_check_interval',
-                   'min_free_storage_bytes', 'rtsp_unified_demux_enabled',
+                   'min_free_storage_gb', 'rtsp_unified_demux_enabled',
                    'frame_rbf_len', 'audio_rbf_len', 'results_rbf_len', 'mux_realtime',
                    'auto_archive_days'):
         val = getattr(payload, field, None)

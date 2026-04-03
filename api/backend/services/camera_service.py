@@ -586,7 +586,7 @@ class CameraService(StreamingService):
         self.max_velocity = float(_sys['max_vel'])
         self.max_bg_diff = int(_sys['bg_diff'])
         self.motion_result_max_age_sec = 3.0  # not persisted
-        self.min_free_storage_bytes = int(_sys['min_free_storage_bytes'])
+        self.min_free_storage_gb = int(_sys['min_free_storage_gb'])
         self.sensitivity = int(_sys['sensitivity'])
         self.jpeg_quality = int(_sys['jpeg_quality'])
         self.pipe_buffer_size = int(_sys['pipe_buffer_size'])
@@ -617,7 +617,7 @@ class CameraService(StreamingService):
             db=self.db,
             recordings_dir=self.recordings_dir,
             audio_utils=audio_utils,
-            min_free_storage_bytes=self.min_free_storage_bytes,
+            min_free_storage_gb=self.min_free_storage_gb,
             motion_check_interval=self.motion_check_interval,
             max_clip_length=self.max_clip_length,
             max_velocity=self.max_velocity,
@@ -673,7 +673,7 @@ class CameraService(StreamingService):
             'bg_diff': int(self.max_bg_diff),
             'max_clip_length': int(self.max_clip_length),
             'motion_check_interval': int(self.motion_check_interval),
-            'min_free_storage_bytes': int(self.min_free_storage_bytes),
+            'min_free_storage_gb': int(self.min_free_storage_gb),
             'rtsp_unified_demux_enabled': bool(self.rtsp_unified_demux_enabled),
             'live_stream_mode': str(self.live_stream_mode),
             'total_memory_bytes': total_memory_bytes,
@@ -719,10 +719,10 @@ class CameraService(StreamingService):
         if 'motion_check_interval' in updates:
             self.motion_check_interval = max(1, min(120, int(updates['motion_check_interval'])))
 
-        if 'min_free_storage_bytes' in updates:
-            self.min_free_storage_bytes = max(0, int(updates['min_free_storage_bytes']))
+        if 'min_free_storage_gb' in updates:
+            self.min_free_storage_gb = max(0, int(updates['min_free_storage_gb']))
             try:
-                self.recording_manager.min_free_storage_bytes = self.min_free_storage_bytes
+                self.recording_manager.min_free_storage_gb = self.min_free_storage_gb
             except Exception:
                 pass
 
@@ -773,7 +773,7 @@ class CameraService(StreamingService):
             self.recording_manager.max_bg_diff = int(self.max_bg_diff)
             self.recording_manager.max_clip_length = int(self.max_clip_length)
             self.recording_manager.motion_check_interval = int(self.motion_check_interval)
-            self.recording_manager.min_free_storage_bytes = int(self.min_free_storage_bytes)
+            self.recording_manager.min_free_storage_gb = int(self.min_free_storage_gb)
             self.recording_manager.mux_realtime = bool(self.mux_realtime)
         except Exception:
             pass

@@ -23,7 +23,7 @@ _REQUIRED_CONFIG_KEYS = {
     'bg_diff',
     'max_clip_length',
     'motion_check_interval',
-    'min_free_storage_bytes',
+    'min_free_storage_gb',
     'rtsp_unified_demux_enabled',
     'frame_rbf_len',
     'audio_rbf_len',
@@ -35,6 +35,8 @@ _REQUIRED_CONFIG_KEYS = {
 
 # Presets that cannot be modified from the frontend
 _PROTECTED_PRESETS = {'default', 'low_power'}
+
+_GB = 1_073_741_824  # bytes per gigabyte
 
 
 class ConfigManager:
@@ -173,7 +175,7 @@ class ConfigManager:
         
         preset_values = presets[active_preset]
         self._validate_preset_keys(active_preset, preset_values)
-        result.update(preset_values)
+        result.update(self._preset_gb_to_bytes(preset_values))
         
         return result
 
@@ -195,8 +197,9 @@ class ConfigManager:
             default_preset = data['system']['presets'].get('default', {})
             data['system']['presets']['custom'] = dict(default_preset)
         
-        # Write only config values to custom preset
-        for key, value in updates.items():
+        # Write only config values to custom preset (convert bytes → GB for storage)
+        yaml_updates = self._preset_bytes_to_gb(updates)
+        for key, value in yaml_updates.items():
             if key not in _SYSTEM_META_KEYS:
                 data['system']['presets']['custom'][key] = value
         
@@ -207,9 +210,26 @@ class ConfigManager:
         return self.get_system_settings()
 
     def get_presets(self) -> Dict[str, Dict[str, Any]]:
-        """Get available presets from system.yaml."""
+        """Get available presets from system.yaml (units converted to runtime values)."""
         data = self._read_yaml(self.system_path)
-        return data.get('system', {}).get('presets', {})
+        raw = data.get('system', {}).get('presets', {})
+        return {name: self._preset_gb_to_bytes(values) for name, values in raw.items()}
+
+    @staticmethod
+    def _preset_gb_to_bytes(preset: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a copy of preset with min_free_storage_gb converted from GB to bytes."""
+        result = dict(preset)
+        if 'min_free_storage_gb' in result:
+            result['min_free_storage_gb'] = int(float(result['min_free_storage_gb']) * _GB)
+        return result
+
+    @staticmethod
+    def _preset_bytes_to_gb(updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a copy of updates with min_free_storage_gb converted from bytes to GB."""
+        result = dict(updates)
+        if 'min_free_storage_gb' in result:
+            result['min_free_storage_gb'] = float(result['min_free_storage_gb']) / _GB
+        return result
 
     def apply_preset(self, preset_name: str) -> Dict[str, Any]:
         """Apply a preset by updating active_preset metadata.

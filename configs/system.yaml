@@ -7,12 +7,12 @@ system:
       live_stream_mode: ws
       sensitivity: 4
       jpeg_quality: 70
-      pipe_buffer_size: 100000000
+      pipe_buffer_size: 1000000
       max_vel: 1.5
       bg_diff: 1000
       max_clip_length: 300
       motion_check_interval: 10
-      min_free_storage_bytes: 1073741824
+      min_free_storage_gb: 1
       rtsp_unified_demux_enabled: false
       frame_rbf_len: 10
       audio_rbf_len: 10
@@ -33,7 +33,7 @@ system:
       bg_diff: 1000
       max_clip_length: 300
       motion_check_interval: 10
-      min_free_storage_bytes: 1073741824
+      min_free_storage_gb: 1
       rtsp_unified_demux_enabled: false
       frame_rbf_len: 3
       audio_rbf_len: 5
@@ -49,12 +49,12 @@ system:
       live_stream_mode: ws
       sensitivity: 4
       jpeg_quality: 70
-      pipe_buffer_size: 100000000
+      pipe_buffer_size: 1000000
       max_vel: 1.5
       bg_diff: 1000
       max_clip_length: 300
       motion_check_interval: 10
-      min_free_storage_bytes: 1073741824
+      min_free_storage_gb: 1
       rtsp_unified_demux_enabled: false
       frame_rbf_len: 10
       audio_rbf_len: 10

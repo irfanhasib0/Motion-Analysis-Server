@@ -39,7 +39,7 @@ class RecordingManager:
         db,
         recordings_dir: str,
         audio_utils: AudioRecordingUtils,
-        min_free_storage_bytes: int,
+        min_free_storage_gb: int,
         motion_check_interval: int,
         max_clip_length: int,
         max_velocity: float,
@@ -55,7 +55,7 @@ class RecordingManager:
         self.recordings_dir = recordings_dir
         self.audio_utils = audio_utils
         self.archive_dir = archive_dir or os.path.join(os.path.dirname(recordings_dir), 'archive')
-        self.min_free_storage_bytes = min_free_storage_bytes
+        self.min_free_storage_gb = min_free_storage_gb
         self.motion_check_interval = motion_check_interval
         self.max_clip_length = max_clip_length
         self.max_velocity = max_velocity
@@ -238,7 +238,7 @@ class RecordingManager:
         deleted_count = 0
         while True:
             usage = psutil.disk_usage(self.recordings_dir)
-            if usage.free >= self.min_free_storage_bytes:
+            if usage.free >= self.min_free_storage_gb:
                 break
 
             oldest_recording_id = self._get_oldest_deletable_recording_id()
@@ -315,7 +315,7 @@ class RecordingManager:
             'used_gb': round(disk.used / (1024 ** 3), 2),
             'free_gb': round(disk.free / (1024 ** 3), 2),
             'percent_used': round(float(disk.percent), 2),
-            'min_free_bytes': int(self.min_free_storage_bytes),
+            'min_free_bytes': int(self.min_free_storage_gb),
             'deleted_oldest_count': int(deleted_count),
         }
 
@@ -324,8 +324,8 @@ class RecordingManager:
      
     def delete_no_motion_recording(self, camera_id: str, recording_id: str, final_file_path: str):
         # Release writer - returns immediately in separate files mode
-        _ext = final_file_path.split('.')[1]
-        for file in [final_file_path, final_file_path.replace(f'.{_ext}', '.wav'), final_file_path.replace(f'.{_ext}', '.txt')]:
+        _ext = final_file_path.split('.')[-1]
+        for file in [final_file_path, final_file_path.replace(f'.{_ext}', '.wav'), final_file_path.replace(f'.{_ext}', '.txt'), final_file_path.replace(f'.{_ext}', '.jpg')]:
             if os.path.exists(file):
                 os.system(f'rm -f {file}')
                 logger.info(f"{Colors.RED}🗑️ Deleted no-motion recording:{Colors.RESET} {file}")
@@ -411,16 +411,19 @@ class RecordingManager:
             recording_id, file_path, writer = self.init_recording(camera_id)
             curr_time = start_time
             recent_motion_detected = False
-            prev_frame = None
-            
+            prev_frame = None  # last real frame; written as still when no new frame arrives
+            _last_written_frame_ts = -1.0  # timestamp of the last frame written to disk
+
+            camera_fps = int(db_camera.get('fps', 30))
+            frame_interval = 1.0 / max(1, camera_fps)  # target wall-clock gap between writes
+
             # Audio sync: track sample deficit to keep audio aligned with video
             if audio_enabled:
                 audio_sample_rate = int(db_camera.get('audio_sample_rate', 16000) or 16000)
                 audio_channels = int(db_camera.get('audio_channels', 1) or 1)
                 audio_chunk_size = int(db_camera.get('audio_chunk_size', 512) or 512)
-                camera_fps = int(db_camera.get('fps', 30))
-                samples_per_frame = audio_sample_rate / camera_fps
                 audio_sample_deficit = 0.0
+                _last_audio_drain_time = time.time()
                 # Chunk size in bytes: samples * channels * 2 bytes (s16le)
                 chunk_bytes = audio_chunk_size * audio_channels * 2
                 silence_chunk = b'\x00' * chunk_bytes
@@ -434,23 +437,37 @@ class RecordingManager:
             _ext = file_path.split('.')[1]
 
             while camera_id in self.active_recordings:
-        
+                _loop_start = time.time()
+
                 frame = None
                 audio_chunks = []
                 res = {'vel': 0.0, 'bg_diff': 0}
                 audio_res = {}
-                
-                frame = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'frames')
+
+                # Use get_by_timestamp to skip all stale slots in one call instead
+                # of advancing one slot per iteration (which causes prev_frame floods).
+                frame_rbf = self.streaming_service._frame_ring_buffers.get(camera_id, None)
+                if frame_rbf is not None:
+                    frame = frame_rbf.get_by_timestamp(f"recorder_{camera_id}", _last_written_frame_ts)
                 if frame is not None:
                     prev_frame = frame
-                elif prev_frame is not None:
-                    frame = prev_frame  # Use last frame if current is missing to keep recording alive
-                else:
-                    time.sleep(0.01)  # No frame available yet, wait briefly before retrying
+                    _last_written_frame_ts = frame_rbf.get_last_read_timestamp(f"recorder_{camera_id}") or _last_written_frame_ts
+                elif prev_frame is None:
+                    # No frame at all yet — nothing to write, poll quickly and wait
+                    time.sleep(0.01)
                     continue
+                else:
+                    # No new frame but we have a previous one: use it as a still so
+                    # video duration keeps pace with wall-clock time (and audio length).
+                    frame = prev_frame
 
+                # Always drain audio every iteration to prevent ring buffer overflow.
+                # Wall-clock-based accumulation keeps the drain rate at exactly
+                # audio_sample_rate samples/sec regardless of video frame arrival.
                 if audio_enabled:
-                    audio_sample_deficit += samples_per_frame
+                    _now = time.time()
+                    audio_sample_deficit += (_now - _last_audio_drain_time) * audio_sample_rate
+                    _last_audio_drain_time = _now
                     while audio_sample_deficit >= audio_chunk_size:
                         chunk = self.streaming_service._get_spmc_data(camera_id, f"recorder_{camera_id}", 'audio')
                         audio_chunks.append(chunk if chunk is not None else silence_chunk)
@@ -562,7 +579,13 @@ class RecordingManager:
                     if audio_enabled and audio_chunks:
                         combined_audio = b''.join(audio_chunks)
                         writer.write_audio(combined_audio)
-                    self._metrics_buffer.setdefault(camera_id, []).append(f"{vel},{bg_diff},{loudness}\n")            
+                    self._metrics_buffer.setdefault(camera_id, []).append(f"{vel},{bg_diff},{loudness}\n")
+
+                # Rate-limit to camera FPS. Prevents the loop from writing
+                # prev_frame hundreds of times/second when the video thread is slow.
+                _elapsed = time.time() - _loop_start
+                if _elapsed < frame_interval:
+                    time.sleep(frame_interval - _elapsed)            
                 
             # Final processing when recording worker ends normally
             self._flush_metrics(camera_id, file_path)
@@ -579,7 +602,7 @@ class RecordingManager:
             else:
                 self.delete_no_motion_recording(camera_id, recording_id, final_file_path)
         except Exception:
-            logger.exception(f"{Colors.RED}💀 Recording worker crashed for camera {camera_id}{Colors.RESET}")
+            logger.exception(f"{Colors.RED} Recording worker crashed for camera {camera_id}{Colors.RESET}")
             # Emergency: release writer if not already released
             if writer is not None:
                 try:
