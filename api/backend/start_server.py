@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Dict
+import argparse
 import asyncio
 import json
 import os
@@ -13,6 +14,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import threading
 import time
 
 from services.camera_service import CameraService
@@ -39,6 +41,15 @@ else:
     configs = 'default'
 
 print("Running with config:", configs)
+
+# Parse CLI flags early (parse_known_args ignores uvicorn's own argv)
+_arg_parser = argparse.ArgumentParser(add_help=False)
+_arg_parser.add_argument(
+    '--prd', action='store_true',
+    help='Production mode: auto-start stream and recording for all RTSP cameras at startup'
+)
+_cli_args, _ = _arg_parser.parse_known_args()
+PRODUCTION_MODE: bool = _cli_args.prd
 
 # Initialize services
 camera_service = CameraService(configs=configs)
@@ -235,6 +246,45 @@ async def check_camera_status_changes():
         # Check every 2 seconds
         await asyncio.sleep(2)
 
+def _start_production_cameras():
+    """Production mode: start stream and recording for every RTSP camera.
+    Runs in a daemon thread after a short delay so the server is fully up."""
+    time.sleep(3)  # Wait for server to be ready
+    cameras = camera_service.get_cameras()
+    rtsp_cameras = [c for c in cameras if c.source.startswith('rtsp://')]
+    if not rtsp_cameras:
+        logger.info('[prd] No RTSP cameras found — nothing to auto-start')
+        return
+    logger.info(f'[prd] Auto-starting {len(rtsp_cameras)} RTSP camera(s)')
+    for camera in rtsp_cameras:
+        logger.info(f'[prd] Starting camera {camera.id} ({camera.source})')
+        stream_ok = False
+        for attempt in range(1, 4):
+            result = camera_service.start_av_stream(camera.id)
+            if camera.id in camera_service._video_background_threads:
+                stream_ok = True
+                break
+            if result is None:
+                logger.error(f'[prd] Fatal error for {camera.id} (bad host/port/URL) — skipping retries')
+                break
+            logger.warning(f'[prd] Stream did not start for {camera.id}, attempt {attempt}/3')
+            if attempt < 3:
+                time.sleep(2)
+        if not stream_ok:
+            logger.error(f'[prd] Giving up on {camera.id} after 3 attempts, skipping recording')
+            continue
+
+        logger.info(f'[prd] Starting recording for {camera.id}')
+        for attempt in range(1, 4):
+            result = camera_service.start_recording(camera.id)
+            if result is not None:
+                break
+            logger.warning(f'[prd] Recording did not start for {camera.id}, attempt {attempt}/3')
+            if attempt < 3:
+                time.sleep(2)
+        else:
+            logger.error(f'[prd] Giving up on recording for {camera.id} after 3 attempts')
+
 # Start the background task
 @app.on_event("startup")
 async def startup_event():
@@ -247,6 +297,10 @@ async def startup_event():
     # Start status checking task
     asyncio.create_task(check_camera_status_changes())
     logger.info("Started camera status monitoring")
+
+    if PRODUCTION_MODE:
+        logger.info('[prd] Production mode active — scheduling RTSP camera auto-start')
+        threading.Thread(target=_start_production_cameras, daemon=True, name='prd-autostart').start()
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):

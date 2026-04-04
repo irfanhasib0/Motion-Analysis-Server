@@ -618,8 +618,8 @@ class RecordingManager:
     def start_recording(self, camera_id: str) -> Optional[str]:
         db_camera = self.db.get_camera(camera_id)
         if camera_id in self.active_recordings:
-            self.stop_recording(camera_id)
-            #return self.active_recordings[camera_id]['recording_id']
+            #self.stop_recording(camera_id)
+            return camera_id
         
         if camera_id not in self.camera_service._camera_streams:
             success = self.camera_service.start_video(camera_id)
@@ -657,6 +657,8 @@ class RecordingManager:
 
         if camera_id not in self.active_recordings or camera_id not in self.clip_start_time:
             logger.error(f"{Colors.RED}❌ Camera is not recording:{Colors.RESET} {camera_id}")
+            # Clean up any stale active_recordings entry so start_recording() can proceed cleanly
+            self.active_recordings.pop(camera_id, None)
             return
         
         recording_info = self.active_recordings.pop(camera_id)

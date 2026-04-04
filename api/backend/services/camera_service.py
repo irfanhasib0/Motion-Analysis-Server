@@ -133,6 +133,7 @@ class Capture:
             "-hide_banner",                         # suppress version/config noise on startup
             "-loglevel", "error",                   # surface only actual ffmpeg errors
             "-rtsp_transport", "tcp",               # use TCP for RTSP — more reliable than UDP on lossy networks
+            #"-rw_timeout", "5000000",               # abort if no data received within 5 s (catches bad credentials / dead streams)
             "-threads", "1",                        # limit decoder threads to avoid CPU contention
             "-fflags", "nobuffer+discardcorrupt",   # disable input buffering for low latency; drop corrupt packets
             "-flags", "low_delay",                  # hint decoder to prefer low-latency over quality
@@ -273,7 +274,6 @@ class Capture:
             "-loglevel", "error",               # surface only ffmpeg errors
             "-rtsp_transport", "tcp",           # prefer TCP for RTSP reliability
             "-threads", "1",                    # bounded decoder thread usage
-            #"-rw_timeout", "5000000",
             "-fflags", "nobuffer+discardcorrupt",  # low-latency read; drop corrupt packets
             "-flags", "low_delay",              # low-latency decode behavior
             "-avioflags", "direct",             # reduce protocol-layer buffering
@@ -917,6 +917,74 @@ class CameraService(StreamingService):
         self.db.delete_camera(camera_id)
         logger.info(f"Removed camera: {camera_name} ({camera_id})")
     
+    @staticmethod
+    def _check_rtsp_reachable(url: str, timeout: float = 3.0) -> tuple:
+        """TCP reachability check for RTSP/RTMP. Returns (reachable: bool, reason: str)."""
+        import socket
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname
+            port = parsed.port or 554
+            if not host:
+                return False, f"invalid URL — could not parse hostname from '{url}'"
+            with socket.create_connection((host, port), timeout=timeout):
+                return True, f"{host}:{port}"
+        except socket.timeout:
+            return False, f"TCP timeout — {parsed.hostname}:{parsed.port or 554} unreachable or firewalled"
+        except ConnectionRefusedError:
+            return False, f"TCP connection refused — wrong port or service not running on {parsed.hostname}:{parsed.port or 554}"
+        except socket.gaierror as e:
+            return False, f"hostname resolution failed for '{parsed.hostname}': {e}"
+        except OSError as e:
+            return False, f"network error — {e}"
+
+    @staticmethod
+    def _probe_rtsp_stream(url: str, timeout: float = 5.0) -> tuple:
+        """Diagnose RTSP failure using ffprobe. Call only after TCP check passes and ffmpeg fails.
+
+        Returns (result_code, human_message) where result_code is one of:
+          'ok'           — stream valid (probe succeeded)
+          'unauthorized' — 401/403: wrong credentials
+          'not_found'    — 404: credentials likely OK but wrong stream path/suffix
+          'network_error'— timeout or connection issue (retryable)
+          'unavailable'  — ffprobe not installed (skip probe, treat as retryable)
+          'error'        — other ffprobe error
+        """
+        try:
+            proc = subprocess.run(
+                [
+                    'ffprobe',
+                    '-rtsp_transport', 'tcp',
+                    '-rw_timeout', '5000000',
+                    '-loglevel', 'warning',
+                    '-show_entries', 'format=nb_streams',
+                    '-of', 'default=noprint_wrappers=1',
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout + 2,
+            )
+            stderr = proc.stderr
+            sl = stderr.lower()
+            if proc.returncode == 0:
+                return 'ok', 'stream probed successfully'
+            if '401' in stderr or 'unauthorized' in sl or '403' in stderr or 'forbidden' in sl:
+                return 'unauthorized', '401/403 — wrong username or password'
+            if '404' in stderr or 'not found' in sl or 'no such file' in sl:
+                return 'not_found', '404 — wrong stream path/suffix (credentials likely OK)'
+            if 'connection refused' in sl:
+                return 'network_error', 'connection refused during probe'
+            if 'timeout' in sl or 'timed out' in sl:
+                return 'network_error', 'ffprobe timed out'
+            first_error = next((l.strip() for l in stderr.splitlines() if l.strip()), stderr[:200])
+            return 'error', first_error
+        except subprocess.TimeoutExpired:
+            return 'network_error', f'ffprobe probe timed out after {timeout}s'
+        except FileNotFoundError:
+            return 'unavailable', 'ffprobe not installed — install ffmpeg package'
+
     def video_capture(self, camera_id: str):
         db_camera = self.db.get_camera(camera_id)
         source = db_camera['source']
@@ -949,31 +1017,66 @@ class CameraService(StreamingService):
         )
         return cap
     
-    def start_video(self, camera_id: str) -> bool:
-        """Start video capture for a camera"""
-        camera_started = False
+    def start_video(self, camera_id: str, timeout: float = 6.0) -> Optional[bool]:
+        """Start video capture. True=success, False=retryable failure, None=fatal (don't retry)."""
+        db_camera = self.db.get_camera(camera_id)
+        source = (db_camera or {}).get('source', '')
+
+        # TCP pre-check for RTSP/RTMP — fast-fail for bad host/port without spawning ffmpeg
+        if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
+            reachable, tcp_reason = self._check_rtsp_reachable(source)
+            if reachable:
+                logger.info(f"{Colors.GREEN}TCP check OK for {camera_id} ({tcp_reason}){Colors.RESET}")
+            else:
+                logger.error(f"{Colors.RED}TCP check FAILED for {camera_id}: {tcp_reason}{Colors.RESET}")
+                self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
+                return None  # Fatal — bad host/port/URL, caller should not retry
+
         cap = self.video_capture(camera_id)
-        
         if cap is None:
-            logger.warning(f"{Colors.RED}Failed to start video for {camera_id}{Colors.RESET}")
+            logger.warning(f"{Colors.RED}Failed to create capture for {camera_id}{Colors.RESET}")
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             return False
-        
-        ret, _ = cap.read_video()
-            
-        if ret:
-            self.db.update_camera(camera_id, {'status': CameraStatus.ONLINE.value})
-            logger.info(f"{Colors.GREEN}Video started for {camera_id}{Colors.RESET}")
-            camera_started = True
-            self._camera_streams[camera_id] = cap
-            # Initialize ring buffers for SPMC data distribution
-            self._ensure_ring_buffers(camera_id)
-        else:
+
+        # Poll until ffmpeg opens the stream, exits early, or deadline expires
+        deadline = time.time() + timeout
+        ffmpeg_start = time.time()
+        while time.time() < deadline:
+            if cap.is_video_stream_opened():
+                break
+            if cap.cap is not None and cap.cap.poll() is not None:
+                break  # ffmpeg exited (auth failure, bad path, etc.)
+            time.sleep(0.05)
+
+        if not cap.is_video_stream_opened():
             cap.release_video()
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
-            logger.warning(f"{Colors.RED}Failed to read frames for {camera_id}{Colors.RESET}")
+            if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
+                probe_code, probe_msg = self._probe_rtsp_stream(source)
+                if probe_code == 'unauthorized':
+                    logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} — credential error: {probe_msg}{Colors.RESET}")
+                    return None  # fatal — wrong credentials, no point retrying
+                elif probe_code == 'not_found':
+                    logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} — stream path error: {probe_msg}{Colors.RESET}")
+                    return None  # fatal — wrong path/suffix, no point retrying
+                elif probe_code == 'ok':
+                    logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} — ffmpeg failed but ffprobe succeeded; possible codec/format issue{Colors.RESET}")
+                elif probe_code == 'unavailable':
+                    elapsed = time.time() - ffmpeg_start
+                    hint = "check credentials or stream path" if elapsed < 4.0 else "check network/rw_timeout"
+                    logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} ({hint}) — ffprobe unavailable for details{Colors.RESET}")
+                else:
+                    logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id}: {probe_msg}{Colors.RESET}")
+            else:
+                logger.error(f"{Colors.RED}Stream FAILED for {camera_id}: ffmpeg process exited or stream not opened{Colors.RESET}")
+            return False  # retryable (network flap, transient error)
 
-        return camera_started
+        logger.info(f"{Colors.GREEN}RTSP stream opened OK for {camera_id}{Colors.RESET}")
+        self.db.update_camera(camera_id, {'status': CameraStatus.ONLINE.value})
+        self._camera_streams[camera_id] = cap
+        # Initialize ring buffers for SPMC data distribution
+        self._ensure_ring_buffers(camera_id)
+        return True
         
     def stop_video(self, camera_id: str):
         """Stop video capture for a camera"""
@@ -1087,7 +1190,18 @@ class CameraService(StreamingService):
         
     def start_audio(self, camera_id: str) -> bool:
         """Start audio capture and verify it works (mirrors start_video)."""
-        
+        db_camera = self.db.get_camera(camera_id)
+        source = (db_camera or {}).get('source', '')
+
+        # TCP pre-check for RTSP audio (same host as video)
+        if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
+            reachable, tcp_reason = self._check_rtsp_reachable(source)
+            if reachable:
+                logger.info(f"{Colors.GREEN}Audio TCP check OK for {camera_id} ({tcp_reason}){Colors.RESET}")
+            else:
+                logger.error(f"{Colors.RED}Audio TCP check FAILED for {camera_id}: {tcp_reason}{Colors.RESET}")
+                return False
+
         cap = self.audio_capture(camera_id)  # Initialize audio_cap for the camera
 
         if cap is None:
@@ -1100,29 +1214,31 @@ class CameraService(StreamingService):
         ret = False
         for attempt in range(_MAX_PROBE_ATTEMPTS):
             if not cap.is_audio_stream_opened():
-                stderr_msg = ''
-                if cap.audio_cap and cap.audio_cap.stderr:
-                    try:
-                        stderr_msg = cap.audio_cap.stderr.read().decode(errors='replace').strip()
-                    except Exception:
-                        pass
                 exit_code = cap.audio_cap.poll() if cap.audio_cap else None
                 logger.warning(
                     f"{Colors.RED}Failed to start audio for {camera_id} - attempt {attempt + 1}/{_MAX_PROBE_ATTEMPTS}"
                     + (f" (exit {exit_code})" if exit_code is not None else "")
-                    + (f": {stderr_msg}" if stderr_msg else "")
                     + f"{Colors.RESET}"
                 )
             else:   
                 _, _ = cap.read_audio()
                 self._audio_streams[camera_id] = cap
                 ret = True
-                db_camera = self.db.get_camera(camera_id)
                 logger.info(f"{Colors.GREEN}Audio started for {camera_id}{Colors.RESET}")
                 break
 
         if not ret:
-            logger.warning(f"{Colors.RED}Failed to read audio data for {camera_id}{Colors.RESET}")
+            # Diagnose RTSP audio failure via ffprobe
+            if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
+                probe_code, probe_msg = self._probe_rtsp_stream(source)
+                if probe_code == 'unauthorized':
+                    logger.error(f"{Colors.RED}Audio FAILED for {camera_id} — credential error: {probe_msg}{Colors.RESET}")
+                elif probe_code == 'not_found':
+                    logger.error(f"{Colors.RED}Audio FAILED for {camera_id} — stream path error: {probe_msg}{Colors.RESET}")
+                else:
+                    logger.error(f"{Colors.RED}Audio FAILED for {camera_id}: {probe_msg}{Colors.RESET}")
+            else:
+                logger.warning(f"{Colors.RED}Failed to read audio data for {camera_id}{Colors.RESET}")
             cap.release_audio()
             return ret
 

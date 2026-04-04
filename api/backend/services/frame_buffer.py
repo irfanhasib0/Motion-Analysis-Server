@@ -185,7 +185,7 @@ class SPMCRingBuffer:
                 item, write_timestamp = self._buffer[cursor]
                 cursor = (cursor + 1) % self.capacity
                 steps += 1
-                if item is not None and write_timestamp > since_timestamp:
+                if item is not None and write_timestamp >= since_timestamp:
                     self._consumer_cursors[consumer_id] = cursor
                     self._consumer_last_timestamps[consumer_id] = write_timestamp
                     if self._stats_enabled:

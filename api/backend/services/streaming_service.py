@@ -269,24 +269,27 @@ class StreamingService:
     # =====================================================================
     
     def start_av_stream(self, camera_id: str):
-        """Start background video and audio streams directly (checks audio_enabled setting)."""
+        """Start background video and audio streams directly (checks audio_enabled setting).
+        Returns True=success, False=retryable failure, None=fatal (don't retry)."""
         try:
-            # Ensure ring buffers exist
-            self._ensure_ring_buffers(camera_id)
-            
             # Start video background thread if not already running
+            # (start_video_stream calls _ensure_ring_buffers internally)
             if camera_id not in self._video_background_threads:
-                self.start_video_stream(camera_id)
-            
+                result = self.start_video_stream(camera_id)
+                if result is not True:
+                    return result  # propagate None (fatal) or False (retryable)
+
             # Start audio background thread only if audio is enabled for this camera
             db_camera = self.db.get_camera(camera_id)
             audio_enabled = bool(db_camera.get('audio_enabled', False)) if db_camera else False
-            
+
             if audio_enabled and camera_id not in self._audio_background_threads:
                 self.start_audio_stream(camera_id)
-            
+
+            return True
         except Exception as error:
             logger.warning(f"{Colors.RED}Failed to start AV streams for {camera_id}: {error}{Colors.RESET}")
+            return False
 
 
 
@@ -558,7 +561,7 @@ class StreamingService:
 
                 logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
             except Exception:
-                logger.exception(f"{Colors.RED}💀 Audio thread crashed for {camera_id}{Colors.RESET}")
+                logger.exception(f"{Colors.RED} Audio thread crashed for {camera_id}{Colors.RESET}")
             finally:
                 # Cleanup audio resources regardless of how we exit
                 if cap is not None:
@@ -681,8 +684,9 @@ class StreamingService:
             logger.warning(f"Camera not found: {camera_id}")
             return False
 
-        # Stop existing thread if running
-        self.stop_video_stream(camera_id)
+        # Stop existing thread only if one is actually running
+        if camera_id in self._video_background_threads:
+            self.stop_video_stream(camera_id)
         
         # Ensure ring buffers and register consumers
         self._ensure_ring_buffers(camera_id)
@@ -692,9 +696,9 @@ class StreamingService:
         # Initialize camera capture if needed
         if camera_id not in self._camera_streams:
             success = self.start_video(camera_id)
-            if not success:
+            if success is not True:
                 logger.warning(f"{Colors.RED}Failed to start video for {camera_id}{Colors.RESET}")
-                return False
+                return success  # None (fatal/don't retry) or False (retryable)
         
         cap = self._camera_streams.get(camera_id)
         
@@ -736,8 +740,8 @@ class StreamingService:
                 
                 while not stop_event.is_set() and cap.is_video_stream_opened():
                     with stream_lock:
+                        frame_capture_time = time.time()  # Capture timestamp before read to avoid burst-skew on Pi
                         ret, frame = cap.read_video()
-                        frame_capture_time = time.time()  # Capture timestamp immediately after frame read
                         
                         if not ret:
                             consecutive_failures += 1
@@ -838,7 +842,7 @@ class StreamingService:
                     with video_lock:
                         self._latest_video_frame[camera_id] = frame_bytes
             except Exception:
-                logger.exception(f"{Colors.RED}💀 Video thread crashed for {camera_id}{Colors.RESET}")
+                logger.exception(f"{Colors.RED} Video thread crashed for {camera_id}{Colors.RESET}")
             finally:
                 logger.info(f"{Colors.YELLOW}Video thread exiting for {camera_id}{Colors.RESET}")
                     
@@ -850,11 +854,11 @@ class StreamingService:
         logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
         return True
 
-    def stop_video_stream(self, camera_id: str) -> bool:
+    def stop_video_stream(self, camera_id: str, stop_recording: bool = True) -> bool:
         """Stop background video stream thread for camera."""
 
         # Stop any active recording
-        if camera_id in self.active_recordings:
+        if stop_recording and camera_id in self.active_recordings:
             self.stop_recording(camera_id)
             
         # Signal stop
@@ -865,7 +869,7 @@ class StreamingService:
         # Wait for thread to finish
         thread = self._video_background_threads.get(camera_id)
         if thread and thread.is_alive():
-            thread.join(timeout=2)
+            thread.join(timeout=5)
         
         # Unregister consumers
         self.unregister_consumer(camera_id, f"video_stream_{camera_id}", ['overlay'])

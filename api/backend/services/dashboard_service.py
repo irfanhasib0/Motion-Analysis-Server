@@ -215,12 +215,11 @@ class StreamHealthMonitor:
         # Track recording state BEFORE stopping (stop_video_stream stops recording too)
         was_recording = camera_id in self.camera_service.active_recordings
         history['was_recording_before_failure'] = was_recording or history.get('was_recording_before_failure', False)
-        self.camera_service.stop_video_stream(camera_id)
+        self.camera_service.stop_video_stream(camera_id, stop_recording=False)
         time.sleep(2)  # Allow clean shutdown
         success = self.camera_service.start_video_stream(camera_id)
         if success:
             logger.info(f"✅ Successfully recovered video producer thread for camera {camera_id}")
-            self._recover_recording(camera_id)
         else:
             logger.error(f"❌ Failed to recover video producer thread for camera {camera_id}")
         
@@ -232,27 +231,26 @@ class StreamHealthMonitor:
         time.sleep(2)  # Allow clean shutdown
         success = self.camera_service.start_audio_stream(camera_id)
         if success:
-            logger.info(f"Successfully recovered audio producer thread for camera {camera_id}")
+            logger.info(f"✅ Successfully recovered audio producer thread for camera {camera_id}")
         else:
-            logger.error(f"Failed to recover audio producer thread for camera {camera_id}")
+            logger.error(f"❌ Failed to recover audio producer thread for camera {camera_id}")
         
     def _recover_recording(self, camera_id: str):
         """Recover recording subscriber by restarting recording if it was active."""
-        is_recording = camera_id in self.camera_service.active_recordings
-        history = self.lag_history.get(camera_id, {})
-        was_recording = is_recording or history.get('was_recording_before_failure', False)
+        #is_recording = camera_id in self.camera_service.active_recordings
+        #history = self.lag_history.get(camera_id, {})
+        #was_recording = is_recording or history.get('was_recording_before_failure', False)
         
-        if not was_recording:
-            return
+        #if not was_recording:
+        #    return
         
-        if is_recording:
-            logger.warning(f"Recovering recording for camera {camera_id}")
-            self.camera_service.stop_recording(camera_id)
-            time.sleep(1)  # Brief pause
+        logger.warning(f"Recovering recording for camera {camera_id}")
+        self.camera_service.stop_recording(camera_id)
+        time.sleep(1)  # Brief pause
         
         self.camera_service.start_recording(camera_id)
-        logger.info(f"Successfully recovered recording for camera {camera_id}")
-        history['was_recording_before_failure'] = False
+        logger.info(f"✅ Successfully recovered recording for camera {camera_id}")
+        #history['was_recording_before_failure'] = False
     
     def _save_error_log_snapshot(self, camera_id: str):
         """Save last 500 lines of nvr.log when lag exceeds threshold for the first time."""
