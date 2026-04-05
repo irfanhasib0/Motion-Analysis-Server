@@ -21,8 +21,8 @@ system:
       auto_archive_days: 7
       enable_person_detection: false
       enable_yolox: true
-      yolox_model_size: nano
-      yolox_score_thr: 0.5
+      yolox_model_size: tiny
+      yolox_score_thr: 0.3
       tracker_multiprocess: true
     low_power:
       live_stream_mode: ws
@@ -63,6 +63,6 @@ system:
       auto_archive_days: 5
       enable_person_detection: false
       enable_yolox: true
-      yolox_model_size: nano
-      yolox_score_thr: 0.5
+      yolox_model_size: tiny
+      yolox_score_thr: 0.3
       tracker_multiprocess: false

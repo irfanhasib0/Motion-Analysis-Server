@@ -4,6 +4,8 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
   ? window.location.origin 
   : 'http://localhost:9001';
 
+//const API_BASE_URL = 'http://100.68.2.123:9001';  // --- OVERRIDE FOR TESTING ---
+
 const TOKEN_STORAGE_KEY = 'nvr_access_token';
 const RECORDING_PLAYBACK_MODE_KEY = 'nvr_recording_playback_mode';
 

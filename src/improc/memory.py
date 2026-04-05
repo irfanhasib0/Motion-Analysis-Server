@@ -188,15 +188,17 @@ class FlowMemory:
         return 'motion'
 
     def get_person_count(self, current_pids=()):
-        """Count currently visible PIDs classified as a person type.
+        """Count currently visible PIDs that have at least one person-type detection.
 
-        A PID is a "person" if its dominant type (≥20%) is in PERSON_TYPES.
+        A PID is counted as a "person" if any observation of a PERSON_TYPES
+        detection type has been recorded (count > 0), regardless of the ratio.
         Only PIDs in *current_pids* (visible this frame) are counted.
         """
         count = 0
         for pid in current_pids:
-            pid = pid % self.maxpid
-            if self.classify_pid(pid) in self.PERSON_TYPES:
+            wpid = pid % self.maxpid
+            type_counts = self._type_counts.get(wpid, {})
+            if any(type_counts.get(t, 0) > 0 for t in self.PERSON_TYPES):
                 count += 1
         return count
 
@@ -263,6 +265,24 @@ class FlowMemory:
             traj = self._get_smoothed(buf)
         velocities = np.sqrt(np.sum(np.diff(traj, axis=0) ** 2, axis=1))
         return np.nan_to_num(velocities, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def get_pid_traj_span(self, pid):
+        """Return (traj_w, traj_h) — the spatial bounding-box extent of all trajectory
+        points recorded for *pid* across every keypoint slot.
+
+        Returns (0.0, 0.0) when no trajectory data is available.
+        """
+        arrays = []
+        for kpid in range(self.maxkpid):
+            buf = self._buffers.get(f'{pid}|{kpid}')
+            if buf is not None and buf.count > 0:
+                arrays.append(buf.get_ordered())
+        if not arrays:
+            return 0.0, 0.0
+        all_pts = np.concatenate(arrays, axis=0)
+        traj_w = float(all_pts[:, 0].max() - all_pts[:, 0].min())
+        traj_h = float(all_pts[:, 1].max() - all_pts[:, 1].min())
+        return traj_w, traj_h
 
     def save(self):
         pass

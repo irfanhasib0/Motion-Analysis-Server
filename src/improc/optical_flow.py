@@ -233,7 +233,7 @@ class OpticalFlowTracker:
         }
 
     def get_person_stats(self, frame_shape=None):
-        """Return person count and inter-person density for currently visible PIDs.
+        """Return person count, inter-person density, and per-PID bbox lists.
 
         Density is computed as::
 
@@ -247,10 +247,15 @@ class OpticalFlowTracker:
         When fewer than 2 persons are visible, density is 0.
 
         Args:
-            frame_shape: unused (kept for backward compat).
+            frame_shape: (H, W) tuple used for edge-cropping filter on person bboxes.
 
         Returns:
-            dict with 'person_count' and 'person_density'.
+            dict with keys:
+              'person_count', 'person_density', 'avg_person_conf'  — aggregates
+              'person_bboxes'     — list of {pid, bbox, score} for person-type PIDs
+                                    passing aspect-ratio, area, edge, and duration filters
+              'all_object_bboxes' — list of {pid, bbox, score, type} for all tracked
+                                    PIDs passing area and duration filters (for thumbnails)
         """
         current_pids = list(self.prev_pts.keys()) if self.prev_pts else []
         person_count = self.memory.get_person_count(current_pids)
@@ -285,20 +290,66 @@ class OpticalFlowTracker:
                 mean_norm_dist = (total_dist / n_pairs) / avg_h if n_pairs > 0 else 0.0
                 person_density = person_count / mean_norm_dist if mean_norm_dist > 0 else 0.0
 
-        # Average detection confidence for person-type PIDs
+        # Per-PID bbox lists and confidence aggregation
         avg_person_conf = 0.0
-        if person_count > 0 and self.prev_pts:
-            scores = []
+        # One unified list: all tracked objects that pass every filter.
+        # Persons additionally carry is_person=True for crop extraction.
+        thumbnail_bboxes = []
+        person_scores = []
+
+        if self.prev_pts:
             for pid in current_pids:
                 wpid = pid % self.memory.maxpid
-                if self.memory.classify_pid(wpid) not in self.memory.PERSON_TYPES:
-                    continue
-                scores.append(self.prev_pts[pid].get('score', 0.0))
-            if scores:
-                avg_person_conf = float(np.mean(scores))
+                obj_data = self.prev_pts[pid]
+                bbox = obj_data.get('bbox')
+                score = float(obj_data.get('score', 0.0))
 
-        return {'person_count': person_count, 'person_density': round(person_density, 4),
-                'avg_person_conf': round(avg_person_conf, 4)}
+                if bbox is None:
+                    continue
+
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                bw = max(x2 - x1, 1)
+                bh = max(y2 - y1, 1)
+                area = bw * bh
+
+                # Area filter
+                if area < 500 or area > 200000:
+                    continue
+
+                # Motion-duration filter
+                total_seen = self.memory.pid_hist.get(wpid, {}).get('total_seen', 0)
+                if total_seen < self.memory.min_traj_len:
+                    continue
+
+                # Movement filter: travel bounding box must exceed the object's own size.
+                traj_w, traj_h = self.memory.get_pid_traj_span(wpid)
+                if traj_h <= 0.2 * bh and traj_w <= 0.2 * bw:
+                    continue
+
+                obj_type = self.memory.classify_pid(wpid)
+                type_counts = self.memory._type_counts.get(wpid, {})
+                is_person = any(type_counts.get(t, 0) > 0 for t in self.memory.PERSON_TYPES)
+
+                # Person-specific: aspect ratio filter (must be taller than wide)
+                if is_person and bh / bw < 0.8:
+                    continue
+
+                thumbnail_bboxes.append({
+                    'pid': wpid, 'bbox': (x1, y1, x2, y2),
+                    'score': score, 'type': obj_type, 'is_person': is_person,
+                })
+                if is_person:
+                    person_scores.append(score)
+
+        if person_scores:
+            avg_person_conf = float(np.mean(person_scores))
+
+        return {
+            'person_count': person_count,
+            'person_density': round(person_density, 4),
+            'avg_person_conf': round(avg_person_conf, 4),
+            'thumbnail_bboxes': thumbnail_bboxes,
+        }
 
     def _compute_dense_flow(self, prev_gray, gray):
         """Compute dense optical flow (Farneback) and return an HSV visualization."""
@@ -410,6 +461,7 @@ class OpticalFlowTracker:
                                 'bbox_xywh': [int(x + w/2), int(y + h/2), int(w), int(h)],
                                 'centroid': [y + h / 2, x + w / 2],
                                 'mask': _mask,
+                                #'score': (h*w)  / (gray.shape[0] * gray.shape[1]),  # Relative area as confidence score
                                 'type': 'motion'})
 
         # --- 4. Assign persistent IDs + CamShift bbox refinement ---
@@ -669,7 +721,7 @@ class OpticalFlowTracker:
                 }
 
         # --- Person count & density ---
-        person_stats = self.get_person_stats()
+        person_stats = self.get_person_stats(frame_shape=gray.shape)
         points_dict['_stats'] = person_stats
 
         viz_frame = self._draw_pts_flow(frame, self.prev_pts)
@@ -679,6 +731,7 @@ class OpticalFlowTracker:
         if self.det_method == 'fast':
             results = self._detect_foreground_boxes(gray)
             self.prev_pts = self._detect_keypoints_in_boxes(gray, results, det_feat_pts=False)
+            
             if return_pts:
                 return viz_frame, points_dict, pts_out
             return viz_frame, points_dict

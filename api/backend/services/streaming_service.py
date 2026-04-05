@@ -807,6 +807,7 @@ class StreamingService:
                         res['person_count'] = self._latest_person_stats.get(camera_id, {}).get('person_count', 0)
                         res['person_density'] = self._latest_person_stats.get(camera_id, {}).get('person_density', 0.0)
                         res['avg_person_conf'] = self._latest_person_stats.get(camera_id, {}).get('avg_person_conf', 0.0)
+                        res['thumbnail_bboxes'] = self._latest_person_stats.get(camera_id, {}).get('thumbnail_bboxes', [])
                         
                         with stream_lock:
                             self._latest_viz[camera_id] = viz_frame

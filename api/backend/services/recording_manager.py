@@ -73,6 +73,7 @@ class RecordingManager:
         self.clip_motion_detected: Dict[str, bool] = {}
         self.clip_vel: Dict[str, float] = {}
         self.clip_max_vel: Dict[str, float] = {}
+        self.clip_max_bg_diff: Dict[str, int] = {}
         self.clip_bg_diff: Dict[str, int] = {}
         self.clip_loudness: Dict[str, float] = {}
         self.clip_loudness_frame_count: Dict[str, int] = {}
@@ -83,6 +84,8 @@ class RecordingManager:
         self.clip_max_person_density: Dict[str, float] = {}
         self.clip_max_person_conf: Dict[str, float] = {}
         self.clip_max_person_frame: Dict[str, Optional[np.ndarray]] = {}
+        self.clip_person_crops: Dict[str, Dict[int, dict]] = {}
+        self.clip_object_crops: Dict[str, Dict[int, dict]] = {}
         self.clean_up_extensions = ['.overlay.mp4']  # Extensions to clean up if no motion detected
         self._metrics_buffer: Dict[str, list] = {}  # camera_id -> buffered lines
 
@@ -91,8 +94,13 @@ class RecordingManager:
         lines = self._metrics_buffer.pop(camera_id, [])
         if not lines:
             return
-        _ext = file_path.rsplit('.', 1)[-1]
-        txt_path = file_path.replace(f'.{_ext}', '.txt')
+        if os.path.basename(file_path) == 'video.mp4':
+            txt_path = os.path.join(os.path.dirname(file_path), 'metrics.txt')
+        else:
+            # LEGACY: metrics sit alongside the video file as a sidecar.
+            # TODO: remove once all recordings use the per-clip directory format.
+            _ext = file_path.rsplit('.', 1)[-1]
+            txt_path = file_path.replace(f'.{_ext}', '.txt')
         try:
             with open(txt_path, 'a') as f:
                 f.writelines(lines)
@@ -143,29 +151,33 @@ class RecordingManager:
 
     def init_recording(self, camera_id: str) -> tuple[str, str, AVWriter]:
         self._ensure_min_free_storage()
-       
+
+        # Use a single timestamp for both the filename and the DB start_time
+        # so they always agree.
         timestamp = int(time.time())
-        filename = f"{camera_id}_{timestamp}.mp4"
         recording_id = f"{camera_id}_{timestamp}"
-        rel_path = os.path.join(str(camera_id), filename)
-        full_path = os.path.join(self.recordings_dir, rel_path)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        # New format: each clip lives in its own directory.
+        # Layout: recordings/<camera_id>/<recording_id>/video.mp4
+        clip_dir = os.path.join(self.recordings_dir, camera_id, recording_id)
+        os.makedirs(clip_dir, exist_ok=True)
+        full_path = os.path.join(clip_dir, 'video.mp4')
+        rel_path = os.path.join(camera_id, recording_id, 'video.mp4')
 
         recording_data = {
             'id': recording_id,
             'camera_id': camera_id,
             'file_path': rel_path,
-            'start_time': datetime.now().isoformat(),
+            'start_time': datetime.fromtimestamp(timestamp).isoformat(),
             'status': 'recording',
         }
         self.db.create_recording(recording_data)
+
         cap = self.camera_service._camera_streams.get(camera_id)
         db_camera = self.db.get_camera(camera_id)
         fps = db_camera['fps']
         width = cap.width
         height = cap.height
 
-        # Create flexible AV writer with separate files mode (mux_realtime=False)
         writer = AVWriter(
             path=full_path,
             fps=fps,
@@ -174,13 +186,15 @@ class RecordingManager:
             camera_service=self.camera_service,
             camera_id=camera_id,
             camera_config=db_camera,
-            mux_realtime=self.mux_realtime  # Start with separate files for testing
+            mux_realtime=self.mux_realtime,
         )
-        
+
+        # Reset all per-clip accumulators for this camera.
         self.clip_start_time[camera_id] = timestamp
         self.clip_motion_detected[camera_id] = False
         self.clip_vel[camera_id] = 0.0
         self.clip_max_vel[camera_id] = 0.0
+        self.clip_max_bg_diff[camera_id] = 0
         self.clip_bg_diff[camera_id] = 0
         self.clip_loudness[camera_id] = 0.0
         self.clip_loudness_frame_count[camera_id] = 0
@@ -191,9 +205,12 @@ class RecordingManager:
         self.clip_max_person_density[camera_id] = 0.0
         self.clip_max_person_conf[camera_id] = 0.0
         self.clip_max_person_frame[camera_id] = None
+        self.clip_person_crops[camera_id] = {}
+        self.clip_object_crops[camera_id] = {}
 
-        _ext = full_path.split('.')[-1]
-        with open(full_path.replace(f'.{_ext}', '.txt'), 'w') as f:
+        # Create metrics CSV for this clip (sits alongside video.mp4).
+        txt_path = os.path.join(clip_dir, 'metrics.txt')
+        with open(txt_path, 'w') as f:
             f.write('vel,bg_diff,loudness\n')
         self._metrics_buffer[camera_id] = []
         return recording_id, full_path, writer
@@ -323,18 +340,36 @@ class RecordingManager:
         pass
      
     def delete_no_motion_recording(self, camera_id: str, recording_id: str, final_file_path: str):
-        # Release writer - returns immediately in separate files mode
-        _ext = final_file_path.split('.')[-1]
-        for file in [final_file_path, final_file_path.replace(f'.{_ext}', '.wav'), final_file_path.replace(f'.{_ext}', '.txt'), final_file_path.replace(f'.{_ext}', '.jpg')]:
-            if os.path.exists(file):
-                os.system(f'rm -f {file}')
-                logger.info(f"{Colors.RED}🗑️ Deleted no-motion recording:{Colors.RESET} {file}")
-            
-        # Also clean up audio file if it exists - Note: 'writer' variable not available in this context
-        # This would need to be passed as parameter or handled by the caller
-        
+        """Delete all clip data and remove the DB record.
+
+        New format: deletes the entire per-clip directory in one call.
+        Legacy format: deletes individual sidecar files.
+        """
+        if os.path.basename(final_file_path) == 'video.mp4':
+            # New format: entire clip directory is self-contained — one rmtree removes everything.
+            clip_dir = os.path.dirname(final_file_path)
+            if os.path.isdir(clip_dir):
+                try:
+                    shutil.rmtree(clip_dir)
+                    logger.info(f"{Colors.RED}🗑️ Deleted no-motion clip dir:{Colors.RESET} {clip_dir}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete clip dir {clip_dir}: {e}")
+        else:
+            # LEGACY: files are scattered as sidecars in the camera directory.
+            # TODO: remove this branch once all recordings use the per-clip directory format.
+            file_dir = os.path.dirname(final_file_path)
+            for name in [os.path.basename(final_file_path)] + self._find_related_files(final_file_path):
+                full = os.path.join(file_dir, name)
+                try:
+                    if os.path.isdir(full):
+                        shutil.rmtree(full)
+                        logger.info(f"{Colors.RED}🗑️ Deleted no-motion dir:{Colors.RESET} {full}")
+                    elif os.path.exists(full):
+                        os.remove(full)
+                        logger.info(f"{Colors.RED}🗑️ Deleted no-motion recording:{Colors.RESET} {full}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete {full}: {e}")
         self.db.delete_recording(recording_id)
-        return
     
     def save_recording(
         self,
@@ -344,28 +379,69 @@ class RecordingManager:
         audio_enabled: bool,
         curr_time: float,
     ):
-        
         clip_duration = max(0, int(curr_time - self.clip_start_time.get(camera_id, curr_time)))
-        # Small delay to ensure file is fully written before getting size
+
+        # Brief pause so the writer flushes before we stat the file.
         if os.path.exists(final_file_path):
-            time.sleep(0.1)  # 100ms delay
+            time.sleep(0.1)
             file_size = os.path.getsize(final_file_path)
         else:
             file_size = 0
-        
-        # Log successful recording save
-        logger.info(f"{Colors.GREEN}💾 Saved recording:{Colors.RESET} {final_file_path} (duration: {clip_duration}s, size: {file_size} bytes, vel: {self.clip_vel.get(camera_id, 0.0):.2f}, bg_diff: {self.clip_bg_diff.get(camera_id, 0)})")
-        # Thumbnail: prefer frame with max person count, fallback to max-velocity motion frame
+
+        # Compute per-clip averages from accumulated totals.
+        motion_frames = self.clip_motion_frame_count.get(camera_id, 0)
+        no_motion_frames = self.clip_no_motion_frame_count.get(camera_id, 0)
+        total_frames = motion_frames + no_motion_frames
+
+        avg_vel = round(self.clip_vel[camera_id] / motion_frames if motion_frames > 0 else 0.0, 2)
+        avg_bg_diff = round(self.clip_bg_diff[camera_id] / motion_frames if motion_frames > 0 else 0, 2)
+        loudness_frames = self.clip_loudness_frame_count.get(camera_id, 0)
+        avg_loudness = round(self.clip_loudness[camera_id] / loudness_frames if loudness_frames > 0 else 0.0, 2)
+        # Activity: fraction of total frames that had detected motion.
+        activity_pct = round(motion_frames / total_frames if total_frames > 0 else 0.0, 2)
+
+        # Derive output paths based on storage format.
+        if os.path.basename(final_file_path) == 'video.mp4':
+            # New format: all clip data lives inside the per-clip directory.
+            _clip_dir = os.path.dirname(final_file_path)
+            thumbnail_path = os.path.join(_clip_dir, 'thumbnail.jpg')
+            persons_dir = os.path.join(_clip_dir, 'persons')
+            thumbs_dir = os.path.join(_clip_dir, 'thumbs')
+        else:
+            # LEGACY: sidecar files alongside the video file.
+            # TODO: remove once all recordings use the per-clip directory format.
+            thumbnail_path = final_file_path.replace('.mp4', '.jpg')
+            persons_dir = final_file_path.replace('.mp4', '_persons')
+            thumbs_dir = final_file_path.replace('.mp4', '_thumbs')
+
+        # --- Thumbnail (main clip image) ---
+        # Prefer the frame with the highest person count; fall back to highest bg_diff frame.
         thumbnail_frame = self.clip_max_person_frame.get(camera_id)
         if thumbnail_frame is None:
             thumbnail_frame = self.clip_motion_frame.get(camera_id)
         if thumbnail_frame is not None:
-            cv2.imwrite(final_file_path.replace('.mp4', '.jpg'), thumbnail_frame)
+            cv2.imwrite(thumbnail_path, thumbnail_frame)
 
-        self.clip_vel[camera_id] = round(self.clip_vel[camera_id] / self.clip_motion_frame_count[camera_id] if self.clip_motion_frame_count[camera_id] > 0 else 0.0, 2)
-        self.clip_bg_diff[camera_id] = round(self.clip_bg_diff[camera_id] / self.clip_motion_frame_count[camera_id] if self.clip_motion_frame_count[camera_id] > 0 else 0, 2)
-        self.clip_loudness[camera_id] = round(self.clip_loudness[camera_id] / self.clip_loudness_frame_count[camera_id] if self.clip_loudness_frame_count[camera_id] > 0 else 0.0, 2)
-        clip_activity_percentage = round(self.clip_motion_frame_count[camera_id] / self.clip_no_motion_frame_count[camera_id] if self.clip_no_motion_frame_count[camera_id] > 0 else 1.0, 2)
+        # --- Per-PID person crops → persons/pid_N.jpg ---
+        person_crops = self.clip_person_crops.get(camera_id, {})
+        if person_crops:
+            os.makedirs(persons_dir, exist_ok=True)
+            for pid, crop_data in person_crops.items():
+                cv2.imwrite(os.path.join(persons_dir, f'pid_{pid}.jpg'), crop_data['crop'])
+
+        # --- Per-PID object thumbnails → thumbs/pid_N.jpg ---
+        object_crops = self.clip_object_crops.get(camera_id, {})
+        if object_crops:
+            os.makedirs(thumbs_dir, exist_ok=True)
+            for pid, thumb_data in object_crops.items():
+                cv2.imwrite(os.path.join(thumbs_dir, f'pid_{pid}.jpg'), thumb_data['frame'])
+
+        logger.info(
+            f"{Colors.GREEN}💾 Saving recording:{Colors.RESET} {final_file_path} "
+            f"(duration={clip_duration}s, size={file_size}B, "
+            f"vel={avg_vel:.2f}, bg_diff={avg_bg_diff}, activity={activity_pct:.0%})"
+        )
+
         self.db.update_recording(
             recording_id,
             {
@@ -376,20 +452,21 @@ class RecordingManager:
                 'file_path': os.path.relpath(final_file_path, self.recordings_dir),
                 'metadata': {
                     'motion_detected': True,
-                    'vel': float(self.clip_vel.get(camera_id, 0.0)),
-                    'diff': int(self.clip_bg_diff.get(camera_id, 0)),
-                    'loudness': float(self.clip_loudness.get(camera_id, 0.0)),
-                    'activity_percentage': float(clip_activity_percentage),   
+                    'vel': float(avg_vel),
+                    'diff': int(avg_bg_diff),
+                    'loudness': float(avg_loudness),
+                    'activity_percentage': float(activity_pct),
                     'audio_recorded': audio_enabled,
                     'max_person_count': int(self.clip_max_person_count.get(camera_id, 0)),
                     'max_person_density': round(float(self.clip_max_person_density.get(camera_id, 0.0)), 4),
+                    'person_crop_count': len(person_crops),
+                    'object_thumb_count': len(object_crops),
                 },
             },
         )
-        logger.info(f"{Colors.MAGENTA}✨ Saving recording with motion:{Colors.RESET} {final_file_path}")
         self.send_notification_to_app()
 
-        # Auto-archive oldest dates if we exceed the configured day limit
+        # Auto-archive oldest dates if we exceed the configured day limit.
         try:
             self.auto_archive_oldest_dates()
         except Exception as e:
@@ -400,16 +477,17 @@ class RecordingManager:
         recording_id = None
         file_path = None
         audio_enabled = False
-        curr_time = time.time()
+        curr_time = time.time()  # safe fallback; overwritten immediately below
         try:
             start_time = time.time()
-            
-            # Get camera config first before initializing recording
+            curr_time = start_time
+
+            # Get camera config before initializing the recording.
             db_camera = self.db.get_camera(camera_id) or {}
             audio_enabled = db_camera.get('audio_enabled', False)
-            
+
             recording_id, file_path, writer = self.init_recording(camera_id)
-            curr_time = start_time
+
             recent_motion_detected = False
             prev_frame = None  # last real frame; written as still when no new frame arrives
             _last_written_frame_ts = -1.0  # timestamp of the last frame written to disk
@@ -432,9 +510,7 @@ class RecordingManager:
             time.sleep(0.1)
             
             logger.info(f"{Colors.BLUE}🎬 Recording worker started{Colors.RESET} for camera {camera_id}, audio enabled: {audio_enabled}")
-            # Track last motion check time
             last_motion_check = start_time
-            _ext = file_path.split('.')[1]
 
             while camera_id in self.active_recordings:
                 _loop_start = time.time()
@@ -482,9 +558,10 @@ class RecordingManager:
                 detection_bg_diff = bool(res.get('detection_bg_diff', False))
                 vel = float(res.get('vel', 0.0))
                 bg_diff = int(res.get('bg_diff', 0))
-                loudness = audio_res.get('int', 0.0)  # Default value
+                # loudness is only meaningful when audio is enabled; default 0.
+                loudness = 0.0
 
-                # Track person count & density — pick frame with most persons for thumbnail;
+                # Save best thumbnail candidate for person frame
                 # use average confidence as tie-breaker when person count is equal.
                 person_count = int(res.get('person_count', 0))
                 person_density = float(res.get('person_density', 0.0))
@@ -498,11 +575,13 @@ class RecordingManager:
                     self.clip_max_person_density[camera_id] = person_density
                     self.clip_max_person_conf[camera_id] = avg_conf
                     self.clip_max_person_frame[camera_id] = frame
-
+                
+                # Save best thumbnail candidate for motion frame
                 if detected_vel or detection_bg_diff:
-                    if self.clip_motion_frame[camera_id] is None or vel > self.clip_max_vel[camera_id]:
+                    if self.clip_motion_frame[camera_id] is None or bg_diff > self.clip_max_bg_diff[camera_id]:
                         self.clip_motion_frame[camera_id] = frame
                     self.clip_max_vel[camera_id] = max(self.clip_max_vel.get(camera_id, 0.0), vel)
+                    self.clip_max_bg_diff[camera_id] = max(self.clip_max_bg_diff.get(camera_id, 0), bg_diff)
                     recent_motion_detected = True
                     self.clip_motion_detected[camera_id] = True
                     self.clip_vel[camera_id] = self.clip_vel.get(camera_id, 0.0) + vel
@@ -510,6 +589,31 @@ class RecordingManager:
                     self.clip_motion_frame_count[camera_id] += 1
                 else:
                     self.clip_no_motion_frame_count[camera_id] += 1
+
+                # Update per-PID crops/thumbs from the unified thumbnail list.
+                # All objects: save the best full-frame snapshot.
+                # Persons: additionally save a tight bbox crop.
+                for det in res.get('thumbnail_bboxes', []):
+                    pid = det['pid']
+                    score = det['score']
+
+                    if det.get('is_person'):
+                        existing_crop = self.clip_person_crops[camera_id].get(pid)
+                        if existing_crop is None or score > existing_crop['score']:
+                            x1, y1, x2, y2 = det['bbox']
+                            crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+                            if crop.size > 0:
+                                self.clip_person_crops[camera_id][pid] = {
+                                    'score': score, 'crop': crop.copy(), 'frame': frame.copy(),
+                                }
+                    else:
+                        existing_thumb = self.clip_object_crops[camera_id].get(pid)
+                        if existing_thumb is None or score > existing_thumb['score']:
+                            x1, y1, x2, y2 = det['bbox']
+                            crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+                            self.clip_object_crops[camera_id][pid] = {
+                                'score': score, 'crop': crop.copy(), 'frame': frame.copy(),
+                            }
 
                 if audio_enabled and audio_res:
                     detected_loudness = bool(audio_res.get('detected_loudness', False))
@@ -618,8 +722,9 @@ class RecordingManager:
     def start_recording(self, camera_id: str) -> Optional[str]:
         db_camera = self.db.get_camera(camera_id)
         if camera_id in self.active_recordings:
-            #self.stop_recording(camera_id)
-            return camera_id
+            logger.warning(f"{Colors.YELLOW}⚠️ Camera is already recording, restarting recording:{Colors.RESET} {camera_id}")
+            self.stop_recording(camera_id)
+            #return camera_id
         
         if camera_id not in self.camera_service._camera_streams:
             success = self.camera_service.start_video(camera_id)
@@ -1079,33 +1184,54 @@ class RecordingManager:
                 rel_path = os.path.basename(src)
             dst = os.path.join(archive_path, rel_path)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            
-            # Copy main file
-            shutil.copy2(src, dst)
-            
-            # Copy all related files with the same stem but different extensions
-            related_files = self._find_related_files(src)
-            dst_dir = os.path.dirname(dst)
-            src_dir = os.path.dirname(src)
-            
-            # Copy each related file (skip extensions marked for cleanup)
             _cleanup = clean_up_extensions or []
-            for related_file in related_files:
-                if any(related_file.endswith(ext) for ext in _cleanup):
-                    # Delete from source instead of archiving
-                    related_src = os.path.join(src_dir, related_file)
+
+            if os.path.basename(src) == 'video.mp4':
+                # New format: copy the whole per-clip directory, skipping cleanup-only files.
+                clip_dir = os.path.dirname(src)
+                dst_clip_dir = os.path.dirname(dst)
+                for item in os.listdir(clip_dir):
+                    if any(item.endswith(ext) for ext in _cleanup):
+                        # Delete cleanup file from source rather than archiving it.
+                        try:
+                            item_path = os.path.join(clip_dir, item)
+                            if os.path.isfile(item_path):
+                                os.remove(item_path)
+                                logger.info(f"Cleaned up {item} (matched clean_up_extensions)")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up {item}: {e}")
+                        continue
+                    item_src = os.path.join(clip_dir, item)
+                    item_dst = os.path.join(dst_clip_dir, item)
                     try:
-                        os.remove(related_src)
-                        logger.info(f"Cleaned up {related_file} (matched clean_up_extensions)")
+                        if os.path.isdir(item_src):
+                            shutil.copytree(item_src, item_dst, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(item_src, item_dst)
                     except Exception as e:
-                        logger.warning(f"Failed to clean up {related_file}: {e}")
-                    continue
-                related_src = os.path.join(src_dir, related_file)
-                related_dst = os.path.join(dst_dir, related_file)
-                try:
-                    shutil.copy2(related_src, related_dst)
-                except Exception as e:
-                    logger.warning(f"Failed to copy related file {related_file}: {e}")
+                        logger.warning(f"Failed to copy clip item {item}: {e}")
+            else:
+                # LEGACY: copy main file + sidecar files via _find_related_files.
+                # TODO: remove once all recordings use the per-clip directory format.
+                shutil.copy2(src, dst)
+                related_files = self._find_related_files(src)
+                dst_dir = os.path.dirname(dst)
+                src_dir = os.path.dirname(src)
+                for related_file in related_files:
+                    if any(related_file.endswith(ext) for ext in _cleanup):
+                        try:
+                            os.remove(os.path.join(src_dir, related_file))
+                            logger.info(f"Cleaned up {related_file} (matched clean_up_extensions)")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up {related_file}: {e}")
+                        continue
+                    try:
+                        shutil.copy2(
+                            os.path.join(src_dir, related_file),
+                            os.path.join(dst_dir, related_file),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to copy related file {related_file}: {e}")
             camera_archived[rec.camera_id] = camera_archived.get(rec.camera_id, 0) + 1
             exported.append({
                 'id': rec.id,
@@ -1219,36 +1345,54 @@ class RecordingManager:
                 logger.warning(f"Archive recording file missing, skipping: {abs_path}")
                 continue
                 
-            # Copy main file back to recordings directory
+            # Copy clip data back to the recordings directory.
             src = abs_path
             dst_rel_path = rel_path if rel_path else os.path.basename(abs_path)
             dst = os.path.join(self.recordings_dir, dst_rel_path)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            
+
             if not os.path.exists(dst):
-                shutil.copy2(src, dst)
-                
-                # Copy all related files with the same stem but different extensions
-                related_files = self._find_related_files(src)
-                dst_dir = os.path.dirname(dst)
-                src_dir = os.path.dirname(src)
-                
-                # Copy each related file
-                for related_file in related_files:
-                    related_src = os.path.join(src_dir, related_file)
-                    related_dst = os.path.join(dst_dir, related_file)
-                    try:
-                        cleaned = False
-                        if not os.path.exists(related_dst):
-                            for extension in self.clean_up_extensions:
-                                if related_src.endswith(extension):
-                                    os.remove(related_src)
-                                    cleaned = True
-                            if not cleaned:
-                                shutil.copy2(related_src, related_dst)
-                                logger.debug(f"Imported related file: {related_file}")
-                    except Exception as e:
-                        logger.warning(f"Failed to import related file {related_file}: {e}")
+                if os.path.basename(src) == 'video.mp4':
+                    # New format: restore the entire per-clip directory.
+                    src_clip_dir = os.path.dirname(src)
+                    dst_clip_dir = os.path.dirname(dst)
+                    if not os.path.exists(dst_clip_dir):
+                        shutil.copytree(src_clip_dir, dst_clip_dir)
+                    else:
+                        # Partial destination — copy only the missing items.
+                        for item in os.listdir(src_clip_dir):
+                            item_src = os.path.join(src_clip_dir, item)
+                            item_dst = os.path.join(dst_clip_dir, item)
+                            if not os.path.exists(item_dst):
+                                try:
+                                    if os.path.isdir(item_src):
+                                        shutil.copytree(item_src, item_dst)
+                                    else:
+                                        shutil.copy2(item_src, item_dst)
+                                except Exception as e:
+                                    logger.warning(f"Failed to import {item}: {e}")
+                else:
+                    # LEGACY: copy main file + sidecar files individually.
+                    # TODO: remove once all recordings use the per-clip directory format.
+                    shutil.copy2(src, dst)
+                    related_files = self._find_related_files(src)
+                    dst_dir = os.path.dirname(dst)
+                    src_dir = os.path.dirname(src)
+                    for related_file in related_files:
+                        related_src = os.path.join(src_dir, related_file)
+                        related_dst = os.path.join(dst_dir, related_file)
+                        try:
+                            cleaned = False
+                            if not os.path.exists(related_dst):
+                                for extension in self.clean_up_extensions:
+                                    if related_src.endswith(extension):
+                                        os.remove(related_src)
+                                        cleaned = True
+                                if not cleaned:
+                                    shutil.copy2(related_src, related_dst)
+                                    logger.debug(f"Imported related file: {related_file}")
+                        except Exception as e:
+                            logger.warning(f"Failed to import related file {related_file}: {e}")
             # Tag with source='archive' so auto-archive excludes these recordings
             rec_metadata = rec.get('metadata') or {}
             if isinstance(rec_metadata, str):
@@ -1304,25 +1448,38 @@ class RecordingManager:
         return count
 
     def _find_related_files(self, file_path: str) -> List[str]:
-        """Find all files with the same file stem but different extensions.
-        
+        """Find all files *and directories* that share the same recording stem.
+
+        NOTE: This method exists only for LEGACY support (flat sidecar layout).
+        New-format recordings (video.mp4 inside a per-clip directory) do not need
+        it — their clip directory is deleted as a unit.
+        TODO: remove once all recordings have been migrated to the per-clip format.
+
+        Matches two patterns:
+          - ``stem.*``  — sidecar files  (.wav, .txt, .jpg, .browser.mp4, .overlay.mp4, …)
+          - ``stem_*``  — sidecar dirs   (_persons/, _thumbs/, …)
+
         Args:
-            file_path: Path to the main file
-            
+            file_path: Absolute path to the main recording file.
+
         Returns:
-            List of filenames (not full paths) that share the same stem
+            List of basenames (files or directory names) that share the same stem,
+            excluding the main file itself.
         """
         file_dir = os.path.dirname(file_path)
         file_stem = os.path.splitext(os.path.basename(file_path))[0]
         main_basename = os.path.basename(file_path)
-        
-        # Match "stem.*" and "stem.something.*" (e.g. recording.browser.mp4)
-        pattern = os.path.join(glob.escape(file_dir), glob.escape(file_stem) + '.*')
-        return [
-            os.path.basename(match)
-            for match in glob.glob(pattern)
-            if os.path.basename(match) != main_basename
-        ]
+
+        results = []
+        for pattern in (
+            os.path.join(glob.escape(file_dir), glob.escape(file_stem) + '.*'),  # sidecar files
+            os.path.join(glob.escape(file_dir), glob.escape(file_stem) + '_*'),  # sidecar dirs
+        ):
+            for match in glob.glob(pattern):
+                basename = os.path.basename(match)
+                if basename != main_basename:
+                    results.append(basename)
+        return results
 
     def delete_recording(self, recording_id: str):
         db_recording = self.db.get_recording(recording_id)
@@ -1330,25 +1487,33 @@ class RecordingManager:
             raise ValueError(f"Recording not found: {recording_id}")
 
         file_path = self._resolve_file_path(db_recording['file_path'])
-        
-        # Delete main file
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
-        # Delete all related files with the same stem but different extensions
-        related_files = self._find_related_files(file_path)
-        file_dir = os.path.dirname(file_path)
-        deleted_files = [os.path.basename(file_path)]
-        
-        for related_file in related_files:
-            related_file_path = os.path.join(file_dir, related_file)
-            try:
-                if os.path.exists(related_file_path):
-                    os.remove(related_file_path)
-                    deleted_files.append(related_file)
-                    logger.debug(f"Deleted related file: {related_file}")
-            except Exception as e:
-                logger.warning(f"Failed to delete related file {related_file}: {e}")
+        if os.path.basename(file_path) == 'video.mp4':
+            # New format: delete the entire per-clip directory.
+            clip_dir = os.path.dirname(file_path)
+            if os.path.isdir(clip_dir):
+                shutil.rmtree(clip_dir)
+                logger.info(f"Deleted recording {recording_id} (clip dir: {clip_dir})")
+            else:
+                logger.warning(f"Clip dir not found for {recording_id}: {clip_dir}")
+        else:
+            # LEGACY: delete individual sidecar files and directories.
+            # TODO: remove this branch once all recordings use the per-clip directory format.
+            file_dir = os.path.dirname(file_path)
+            deleted = []
+            for name in [os.path.basename(file_path)] + self._find_related_files(file_path):
+                full = os.path.join(file_dir, name)
+                try:
+                    if os.path.isdir(full):
+                        shutil.rmtree(full)
+                        deleted.append(name)
+                        logger.debug(f"Deleted related dir: {name}")
+                    elif os.path.exists(full):
+                        os.remove(full)
+                        deleted.append(name)
+                        logger.debug(f"Deleted related file: {name}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete {name}: {e}")
+            logger.info(f"Deleted recording {recording_id} and {len(deleted)} legacy items: {deleted}")
 
         self.db.delete_recording(recording_id)
-        logger.info(f"Deleted recording {recording_id} and {len(deleted_files)} related files: {deleted_files}")
