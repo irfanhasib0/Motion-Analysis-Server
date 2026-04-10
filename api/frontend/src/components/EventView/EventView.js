@@ -16,6 +16,10 @@ import {
   buildRowMetricsData,
 } from './EventViewUtils';
 import { SimpleMotionPlot, ChartCard, ReelCard } from './EventViewCards';
+// ── Zone Control plugin ──────────────────────────────────────────────────────
+import ZoneFilter from '../Zones/ZoneFilter';
+import zonesApi from '../../zonesApi';
+// ─────────────────────────────────────────────────────────────────────────────
 import './EventView.css';
 
 /**
@@ -51,7 +55,30 @@ const EventView = ({ recordings = [], cameras = [] }) => {
   const [removedRecordingIds, setRemovedRecordingIds] = useState({});
   const [labelMap, setLabelMap] = useState({});
   const [showLabeledOnly, setShowLabeledOnly] = useState(false);
-  
+
+  // ── Zone Control plugin state ────────────────────────────────────────────
+  const [allZones, setAllZones] = useState([]);       // flat list of zones across cameras
+  const [selectedZones, setSelectedZones] = useState(new Set());
+
+  useEffect(() => {
+    zonesApi.getZonesSummary()
+      .then(({ data }) => {
+        const flat = [];
+        const cameras_by_id = {};
+        validCameras.forEach((c) => { cameras_by_id[c.id] = c; });
+        Object.entries(data).forEach(([cam_id, cfg]) => {
+          const cam = cameras_by_id[cam_id];
+          (cfg.zones || [])
+            .filter((z) => z.zone_type === 'active_zone' && z.enabled)
+            .forEach((z) => flat.push({ ...z, camera_id: cam_id, camera_name: cam?.name || cam_id }));
+        });
+        setAllZones(flat);
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameras]);
+  // ─────────────────────────────────────────────────────────────────────────
+
   // Filter recordings based on completion status and user preferences
   const completedRecordings = validRecordings.filter(
     (recording) => {
@@ -61,6 +88,12 @@ const EventView = ({ recordings = [], cameras = [] }) => {
         const lbl = labelMap[recording.id]?.label || (recording.metadata?.label);
         if (!lbl) return false;
       }
+      // ── Zone filter ──────────────────────────────────────────────────────
+      if (selectedZones.size > 0) {
+        const activeZones = recording.metadata?.zone_summary?.zones_active || [];
+        if (!activeZones.some((zid) => selectedZones.has(zid))) return false;
+      }
+      // ─────────────────────────────────────────────────────────────────────
       return true;
     }
   );
@@ -788,6 +821,14 @@ const EventView = ({ recordings = [], cameras = [] }) => {
             <input type="checkbox" checked={showLabeledOnly} onChange={(e) => setShowLabeledOnly(e.target.checked)} style={{ accentColor: '#c62828', cursor: 'pointer' }} />
             Labeled only
           </label>
+          {/* ── Zone filter ── */}
+          <ZoneFilter
+            zones={allZones}
+            selectedZones={selectedZones}
+            onChange={setSelectedZones}
+            label="Zones"
+            compact
+          />
         </div>
       </div>
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
-import { Camera, Video, Settings, BarChart3, Monitor } from 'lucide-react';
+import { Camera, Video, Settings, BarChart3, Monitor, MapPin, Users } from 'lucide-react';
 
 import Dashboard from './components/Dashboard/Dashboard';
 import CameraList from './components/CameraList/CameraList';
@@ -9,6 +9,8 @@ import RecordingList from './components/RecordingList/RecordingList';
 import EventView from './components/EventView/EventView';
 import SystemSettings from './components/SystemSettings/SystemSettings';
 import LoginScreen from './components/LoginScreen/LoginScreen';
+import ZoneStudio from './components/ZoneStudio/ZoneStudio';
+import PersonGallery from './components/PersonGallery/PersonGallery';
 import { api } from './api';
 
 import './App.css';
@@ -197,9 +199,17 @@ function App() {
               <Camera size={20} />
               Cameras
             </NavLink>
+            <NavLink to="/zones" className="nav-link">
+              <MapPin size={20} />
+              Zones
+            </NavLink>
             <NavLink to="/live" className="nav-link">
               <Monitor size={20} />
-              Event View
+              Events
+            </NavLink>
+            <NavLink to="/gallery" className="nav-link">
+              <Users size={20} />
+              Search
             </NavLink>
             <NavLink to="/recordings" className="nav-link">
               <Video size={20} />
@@ -236,6 +246,14 @@ function App() {
             <Route 
               path="/live" 
               element={<EventView cameras={cameras} recordings={recordings} />} 
+            />
+            <Route
+              path="/zones"
+              element={<ZoneStudio cameras={cameras} />}
+            />
+            <Route
+              path="/gallery"
+              element={<PersonGallery cameras={cameras} />}
             />
             <Route 
               path="/recordings" 

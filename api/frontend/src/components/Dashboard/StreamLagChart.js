@@ -16,6 +16,8 @@ const LAG_TYPES = [
   { key: 'recorder', label: 'Recorder Lag', style: '3 3' },
 ];
 
+const LAG_CLIP_MAX = 5; // seconds — values above this are clipped for display
+
 const formatTime = (ts) => {
   if (!ts) return '';
   const d = new Date(ts * 1000);
@@ -73,14 +75,14 @@ const StreamLagChart = ({ cameras }) => {
   // Merge all samples by timestamp for unified x-axis
   const chartData = [];
   if (activeCameras.length === 1) {
-    // Single camera: show raw samples
+    // Single camera: show raw samples (clipped)
     const samples = lagData[activeCameras[0]] || [];
     for (const s of samples) {
       chartData.push({
         ts: s.ts,
-        video: s.video || 0,
-        audio: s.audio || 0,
-        recorder: s.recorder || 0,
+        video: Math.min(s.video || 0, LAG_CLIP_MAX),
+        audio: Math.min(s.audio || 0, LAG_CLIP_MAX),
+        recorder: Math.min(s.recorder || 0, LAG_CLIP_MAX),
       });
     }
   } else {
@@ -101,10 +103,21 @@ const StreamLagChart = ({ cameras }) => {
         chartData.push(currentBucket);
       }
       for (const type of LAG_TYPES) {
-        currentBucket[`${s._cid}_${type.key}`] = s[type.key] || 0;
+        currentBucket[`${s._cid}_${type.key}`] = Math.min(s[type.key] || 0, LAG_CLIP_MAX);
       }
     }
   }
+
+  // Compute true max lag (unclipped) across active cameras + visible types
+  let maxLagRaw = 0;
+  for (const cid of activeCameras) {
+    for (const s of (lagData[cid] || [])) {
+      for (const t of LAG_TYPES) {
+        if (visibleTypes[t.key]) maxLagRaw = Math.max(maxLagRaw, s[t.key] || 0);
+      }
+    }
+  }
+  const wasClipped = maxLagRaw > LAG_CLIP_MAX;
 
   const hasData = chartData.length > 0;
 
@@ -140,11 +153,16 @@ const StreamLagChart = ({ cameras }) => {
             {t.label}
           </label>
         ))}
+        {wasClipped && (
+          <span style={{ marginLeft: 'auto', fontSize: 11, color: '#e65100', background: 'rgba(255,152,0,0.1)', border: '1px solid rgba(230,81,0,0.3)', borderRadius: 5, padding: '3px 8px', whiteSpace: 'nowrap' }}>
+            max {maxLagRaw.toFixed(1)}s — clipping &gt; {LAG_CLIP_MAX}s
+          </span>
+        )}
       </div>
 
       {/* Chart */}
       {hasData ? (
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={196}>
           <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
             <XAxis
@@ -153,11 +171,11 @@ const StreamLagChart = ({ cameras }) => {
             />
             <YAxis
               stroke="#999" tick={{ fontSize: 11, fill: '#666' }}
+              domain={[0, LAG_CLIP_MAX]}
               label={{ value: 'Lag (s)', angle: -90, position: 'insideLeft', style: { fill: '#666', fontSize: 12 } }}
             />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ fontSize: 12 }} formatter={(value) => <span style={{ color: '#546e7a' }}>{value}</span>} />
-            <ReferenceLine y={120} stroke="#ff4444" strokeDasharray="8 4" label={{ value: 'Threshold', fill: '#ff4444', fontSize: 11 }} />
 
             {activeCameras.length === 1 ? (
               // Single camera: one line per lag type

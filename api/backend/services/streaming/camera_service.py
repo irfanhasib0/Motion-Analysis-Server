@@ -11,14 +11,14 @@ import logging
 from models.camera import Camera, CameraCreate, CameraUpdate, CameraType, CameraStatus
 from models.recording import Recording
 #from services.database_service import DatabaseService
-from services.config_manager import ConfigManager
-from services.streaming_service import StreamingService
-from services.recording_manager import RecordingManager
-from services.audio_recording_utils import AudioRecordingUtils
-from services.colors import Colors
+from services.system.config_manager import ConfigManager
+from services.streaming.streaming_service import StreamingService
+from services.recording.recording_manager import RecordingManager
+from services.recording.audio_recording_utils import AudioRecordingUtils
+from services.streaming.colors import Colors
 
 import sys
-sys.path.append('../../src')
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src')))
 from audioproc import FrequencyIntensityAnalyzer
 
 logger = logging.getLogger(__name__)

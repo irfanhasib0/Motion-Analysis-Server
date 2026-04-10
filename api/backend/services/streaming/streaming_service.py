@@ -11,18 +11,18 @@ import threading
 import time
 from typing import Generator, Dict, Optional, Any, Union, List
 import logging
-from services.hls_manager import HLSManager  
-from services.ws_streaming_manager import WSStreamingManager
-from services.drawing_utils import StreamDrawingHelper
-from services.frame_buffer import FrameRingBuffer, AudioRingBuffer, ResultsRingBuffer, FrameBufferManager
-from services.ai_service import AIService
+from services.streaming.hls_streaming import HLSManager
+from services.streaming.ws_streaming import WSStreamingManager
+from services.streaming.drawing_utils import StreamDrawingHelper
+from services.streaming.frame_buffer import FrameRingBuffer, AudioRingBuffer, ResultsRingBuffer, FrameBufferManager
+from services.ai.ai_service import AIService
 
-PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
+PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 if PROJECT_SRC_PATH not in sys.path:
     sys.path.append(PROJECT_SRC_PATH)
 
 from audioproc import FrequencyIntensityAnalyzer
-from services.colors import Colors
+from services.streaming.colors import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,14 @@ class StreamingService:
         self._latest_pts_payload: Dict[str, Dict[Any, Dict[str, Any]]] = {}
         self._overlay_masks: Dict[str, np.ndarray] = {}
         self._latest_person_stats: Dict[str, Dict[str, float]] = {}
+
+        # ── Zone Control plugin cache ───────────────────────────────────────
+        # Caches are keyed by camera_id and rebuilt lazily when invalidated.
+        # _zone_cache_valid tracks which cameras have a fresh cache.
+        self._active_mask_cache: Dict[str, Any] = {}    # camera_id -> np.ndarray | None
+        self._active_zones_cache: Dict[str, List] = {}  # camera_id -> List[ZoneDefinition]
+        self._zone_cache_valid: Dict[str, bool] = {}    # camera_id -> bool
+        self._zone_store = None  # injected by start_server.py after init
         
         # Simple audio streaming with background threads
         self._audio_background_threads: Dict[str, threading.Thread] = {}
@@ -195,7 +203,6 @@ class StreamingService:
         if 'overlay' in data_types:
             success &= self._overlay_frame_ring_buffers[camera_id].register_consumer(f"{consumer_id}_overlay")
         
-        logger.info(f"Registered consumer {consumer_id} for camera {camera_id} ({data_types})")
         return success
     
     def unregister_consumer(self, camera_id: str, consumer_id: str, 
@@ -221,7 +228,6 @@ class StreamingService:
         if 'overlay' in data_types:
             success &= self._overlay_frame_ring_buffers[camera_id].unregister_consumer(f"{consumer_id}_overlay")
         
-        logger.info(f"Unregistered consumer {consumer_id} from {camera_id}")
         return success
     
     # =====================================================================
@@ -392,6 +398,83 @@ class StreamingService:
         frame_with_overlay, updated_mask = self._drawing.draw_optical_flow_overlay(frame, pts_payload, current_mask)
         self._overlay_masks[camera_id] = updated_mask
         return frame_with_overlay
+
+    # =========================================================================
+    # ZONE CONTROL — cache management + per-frame helpers
+    # Isolated here for minimal coupling with the rest of the service.
+    # =========================================================================
+
+    def invalidate_zone_cache(self, camera_id: str) -> None:
+        """Signal the video thread to rebuild the zone cache on the next frame."""
+        self._zone_cache_valid[camera_id] = False
+
+    def _refresh_zone_cache(self, camera_id: str, frame_h: int, frame_w: int) -> None:
+        """Rebuild the per-camera zone caches from the ZoneStore."""
+        store = self._zone_store
+        if store is None:
+            # Zone plugin not initialised — treat as no zones configured.
+            self._active_mask_cache[camera_id] = None
+            self._active_zones_cache[camera_id] = []
+            self._zone_cache_valid[camera_id] = True
+            return
+        try:
+            from services.zone_manager.zone_processor import build_active_mask
+            mask_zones = store.get_active_mask_zones(camera_id)
+            active_zones = store.get_active_zones(camera_id)
+            self._active_mask_cache[camera_id] = build_active_mask(mask_zones, frame_h, frame_w)
+            self._active_zones_cache[camera_id] = active_zones
+            self._zone_cache_valid[camera_id] = True
+        except Exception:
+            logger.exception(f"[Zone] Failed to refresh zone cache for {camera_id}")
+            self._active_mask_cache[camera_id] = None
+            self._active_zones_cache[camera_id] = []
+            self._zone_cache_valid[camera_id] = True
+
+    def _get_active_mask(self, camera_id: str, frame_h: int, frame_w: int):
+        """Return the cached active mask (np.ndarray or None), refreshing if stale."""
+        if not self._zone_cache_valid.get(camera_id, False):
+            self._refresh_zone_cache(camera_id, frame_h, frame_w)
+        return self._active_mask_cache.get(camera_id)
+
+    def _get_active_zones(self, camera_id: str, frame_h: int, frame_w: int) -> List:
+        """Return the cached list of active zones, refreshing if stale."""
+        if not self._zone_cache_valid.get(camera_id, False):
+            self._refresh_zone_cache(camera_id, frame_h, frame_w)
+        return self._active_zones_cache.get(camera_id, [])
+
+    def _classify_zone_hits(
+        self,
+        camera_id: str,
+        flow_pts: Dict[Any, Dict[str, Any]],
+        frame_w: int,
+        frame_h: int,
+    ) -> List[str]:
+        """Return list of zone_ids hit by any tracked object in this frame."""
+        try:
+            from services.zone_manager.zone_processor import aggregate_zone_hits, classify_detections
+            active_zones = self._get_active_zones(camera_id, frame_h, frame_w)
+            if not active_zones:
+                return []
+            per_obj = classify_detections(flow_pts, active_zones, frame_w, frame_h)
+            return aggregate_zone_hits(per_obj)
+        except Exception:
+            return []
+
+    def _draw_zones_overlay(self, frame: np.ndarray, camera_id: str) -> np.ndarray:
+        """Draw zone boundaries on frame if any zones are configured."""
+        try:
+            from services.zone_manager.zone_processor import draw_zones_overlay
+            h, w = frame.shape[:2]
+            all_zones = (
+                self._get_active_zones(camera_id, h, w)
+                + (self._active_mask_cache.get(camera_id) and
+                   self._zone_store.get_active_mask_zones(camera_id) or [])
+            )
+            if not all_zones:
+                return frame
+            return draw_zones_overlay(frame, all_zones)
+        except Exception:
+            return frame
 
             
     # =====================================================================
@@ -619,64 +702,6 @@ class StreamingService:
         
         return True
 
-    def generate_audio_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
-        """Generate audio stream by reading from background thread data."""
-        db_camera = self.db.get_camera(camera_id)
-        if not db_camera:
-            logger.warning(f"Camera not found: {camera_id}")
-            return
-
-        if not bool(db_camera.get('audio_enabled', False)):
-            logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
-            return
-        
-        audio_sample_rate = int(db_camera.get('audio_sample_rate') or os.getenv('AUDIO_SAMPLE_RATE', '16000'))
-        audio_channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
-        
-        # Create stream token and use pre-registered consumer
-        stream_token = f"{time.time_ns()}:{threading.get_ident()}"
-        consumer_id = f"audio_stream_{camera_id}"  # Use camera-specific consumer ID
-        previous_token = self.active_audio_streams.get(camera_id)
-        if previous_token:
-            logger.info(f"{Colors.GREEN}Audio stream connected for {camera_id}{Colors.RESET}")
-        else:
-            logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
-        self.active_audio_streams[camera_id] = stream_token
-        
-        # Consumer already registered in start_av_stream - just use it
-        
-        # Yield WAV header first
-        yield self._make_wav_header(audio_sample_rate, audio_channels)
-        
-        # Background thread should already be running from /start endpoint
-        if camera_id not in self._audio_background_threads:
-            logger.warning(f"{Colors.RED}No audio thread for {camera_id} - start audio ...{Colors.RESET}")
-            self.start_audio_stream(camera_id)
-            return
-        
-        consecutive_empty = 0
-        # Stream loop
-        while (self.active_audio_streams.get(camera_id) == stream_token and 
-               camera_id in self._audio_background_threads):
-            
-            # Use SPMC ring buffer access
-            current_chunk = self._get_spmc_data(camera_id, consumer_id, 'audio')
-            
-            if current_chunk and len(current_chunk) > 0:
-                yield current_chunk
-                consecutive_empty = 0
-            else:
-                consecutive_empty += 1
-                time.sleep(0.1)  # 100ms wait between checks
-                # Keep audio stream alive indefinitely - don't terminate on silence
-                # Audio streams naturally have gaps during silence
-        
-        # Cleanup token (consumer stays registered for other streams)
-        if self.active_audio_streams.get(camera_id) == stream_token:
-            self.active_audio_streams.pop(camera_id, None)
-        
-        logger.info(f"{Colors.YELLOW}Audio stream finished for {camera_id}{Colors.RESET}")
-
     def start_video_stream(self, camera_id: str) -> bool:
         """Start background video stream thread for camera."""
         db_camera = self.db.get_camera(camera_id)
@@ -713,7 +738,7 @@ class StreamingService:
             'yolox_model_size': getattr(self, 'yolox_model_size', 'nano'),
             'yolox_score_thr': getattr(self, 'yolox_score_thr', 0.5),
         }
-        if not self.ai_service.ensure_tracker(camera_id, tracker_kwargs):
+        if not self.ai_service.start_ai_tracker(camera_id, tracker_kwargs):
             logger.warning(f"{Colors.RED}Failed to start tracker for {camera_id}{Colors.RESET}")
             return False
         
@@ -734,7 +759,7 @@ class StreamingService:
                 logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
                 
                 consecutive_failures = 0
-                max_failures = 10
+                max_failures = 100
                 frame_index = 0
                 _last_tracker_result_ts = None  # Track last seen tracker result to avoid double-counting in FPS
                 
@@ -775,7 +800,13 @@ class StreamingService:
                     result_ts = frame_capture_time
                     
                     if should_run_tracker:
-                        self.ai_service.submit_frame(camera_id, stream_frame, frame_capture_time, frame_index)
+                        h_sf, w_sf = stream_frame.shape[:2]
+                        active_mask = self._get_active_mask(camera_id, h_sf, w_sf)
+                        if active_mask is not None:
+                            masked_frame = cv2.bitwise_and(stream_frame, stream_frame, mask=active_mask)
+                        else:
+                            masked_frame = stream_frame
+                        self.ai_service.submit_frame(camera_id, masked_frame, frame_capture_time, frame_index)
                     tracker_result = self.ai_service.poll_result(camera_id)
                     if tracker_result is not None:
                         detect_output = (tracker_result.points_dict, tracker_result.flow_pts)
@@ -808,6 +839,10 @@ class StreamingService:
                         res['person_density'] = self._latest_person_stats.get(camera_id, {}).get('person_density', 0.0)
                         res['avg_person_conf'] = self._latest_person_stats.get(camera_id, {}).get('avg_person_conf', 0.0)
                         res['thumbnail_bboxes'] = self._latest_person_stats.get(camera_id, {}).get('thumbnail_bboxes', [])
+
+                        # ── Zone hit classification ────────────────────────────────────
+                        _h, _w = stream_frame.shape[:2]
+                        res['zone_hits'] = self._classify_zone_hits(camera_id, flow_pts, _w, _h)
                         
                         with stream_lock:
                             self._latest_viz[camera_id] = viz_frame
@@ -836,6 +871,7 @@ class StreamingService:
                     _person_stats = self._latest_person_stats.get(camera_id, {})
                     primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps, person_stats=_person_stats)
                     primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
+                    primary_frame = self._draw_zones_overlay(primary_frame, camera_id)
                     # Encode once — all clients receive pre-encoded JPEG bytes (Q3)
                     frame_bytes = self.frame_to_bytes(primary_frame)
                     self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(frame_bytes, frame_capture_time)
@@ -906,33 +942,73 @@ class StreamingService:
     # STREAM ENDPOINT GENERATORS
     # =====================================================================
     
+    def generate_audio_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
+        """Generate audio stream by reading from background thread data."""
+        db_camera = self.db.get_camera(camera_id)
+        if not db_camera:
+            return
+
+        if not bool(db_camera.get('audio_enabled', False)):
+            return
+        
+        audio_sample_rate = int(db_camera.get('audio_sample_rate') or os.getenv('AUDIO_SAMPLE_RATE', '16000'))
+        audio_channels = int(db_camera.get('audio_channels') or os.getenv('AUDIO_CHANNELS', '1'))
+        
+        # Create stream token and use pre-registered consumer
+        stream_token = f"{time.time_ns()}:{threading.get_ident()}"
+        consumer_id = f"audio_stream_{camera_id}"  # Use camera-specific consumer ID
+        self.active_audio_streams[camera_id] = stream_token
+        
+        # Consumer already registered in start_av_stream - just use it
+        
+        # Yield WAV header first
+        yield self._make_wav_header(audio_sample_rate, audio_channels)
+        
+        # Background thread should already be running from /start endpoint
+        if camera_id not in self._audio_background_threads:
+            logger.warning(f"{Colors.RED}No audio thread for {camera_id} - start audio first{Colors.RESET}")
+            return
+        
+        consecutive_empty = 0
+        # Stream loop
+        while (self.active_audio_streams.get(camera_id) == stream_token and 
+               camera_id in self._audio_background_threads):
+            
+            # Use SPMC ring buffer access
+            current_chunk = self._get_spmc_data(camera_id, consumer_id, 'audio')
+            
+            if current_chunk and len(current_chunk) > 0:
+                yield current_chunk
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+                time.sleep(0.1)  # 100ms wait between checks
+                # Keep audio stream alive indefinitely - don't terminate on silence
+                # Audio streams naturally have gaps during silence
+        
+        # Cleanup token (consumer stays registered for other streams)
+        if self.active_audio_streams.get(camera_id) == stream_token:
+            self.active_audio_streams.pop(camera_id, None)
+
+
     def generate_video_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
         """Generate video stream by reading from background thread data."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            logger.warning(f"{Colors.RED}Camera not found: {camera_id}{Colors.RESET}")
             return self.generate_failure_frame(f"Camera {camera_id} Not Found")
         
         # Create stream token and use pre-registered consumer
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
         consumer_id = f"video_stream_{camera_id}"  # Use camera-specific consumer ID
-        previous_token = self.active_streams.get(camera_id)
-        if previous_token:
-            logger.info(f"{Colors.GREEN}Video stream connected for {camera_id}{Colors.RESET}")
-        else:
-            logger.info(f"{Colors.GREEN}Video stream started for {camera_id}{Colors.RESET}")
         self.active_streams[camera_id] = stream_token
         
         # Consumer already registered in start_av_stream - just use it
         
         # Background thread should already be running from /start endpoint
         if camera_id not in self._video_background_threads:
-            logger.warning(f"{Colors.RED}No video thread for {camera_id} - starting one...{Colors.RESET}")
-            success = self.start_video_stream(camera_id)
-            if not success:
-                logger.error(f"{Colors.RED}Failed to start video thread for {camera_id}{Colors.RESET}")
-                yield self.generate_failure_frame("Failed to start video processing")
-                return
+            logger.warning(f"{Colors.RED}No video thread for {camera_id} - start camera first{Colors.RESET}")
+            yield self.generate_failure_frame("Camera not started yet")
+            return
             # Give the thread a moment to start producing frames
             time.sleep(0.5)
         
@@ -959,7 +1035,6 @@ class StreamingService:
             else:
                 consecutive_empty += 1
                 if consecutive_empty >= max_empty:
-                    logger.warning(f"{Colors.RED}No video data for {camera_id}, ending stream{Colors.RESET}")
                     break
                 # Yield placeholder to keep connection alive
                 time.sleep(0.1)  # Short wait before checking for next frame
@@ -968,31 +1043,23 @@ class StreamingService:
         # Cleanup token (consumer stays registered for other streams)
         if self.active_streams.get(camera_id) == stream_token:
             self.active_streams.pop(camera_id, None)
-        
-        logger.info(f"{Colors.YELLOW}Video stream finished for {camera_id}{Colors.RESET}")
     
     def generate_processing_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
         """Generate processed video stream from camera (visualization overlay)."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            logger.warning(f"{Colors.RED}Camera not found: {camera_id}{Colors.RESET}")
             yield self.generate_failure_frame(f"Camera {camera_id} Not Found")
             return
 
         # Create stream token and use pre-registered consumer
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
         consumer_id = f"proc_stream_{camera_id}"  # Use camera-specific consumer ID
-        previous_token = self.active_processing_streams.get(camera_id)
-        if previous_token:
-            logger.info(f"{Colors.GREEN}Processing stream connected for {camera_id}{Colors.RESET}")
-        else:
-            logger.info(f"{Colors.GREEN}Processing stream started for {camera_id}{Colors.RESET}")
         self.active_processing_streams[camera_id] = stream_token
         
         # Ensure video background thread is running
         if camera_id not in self._video_background_threads:
             logger.warning(f"{Colors.RED}No processing thread for {camera_id} - start camera first{Colors.RESET}")
-            yield self.generate_failure_frame("Camera not started - click start button first")
+            yield self.generate_failure_frame("Camera not started yet")
             return
 
         consecutive_empty = 0
@@ -1030,8 +1097,6 @@ class StreamingService:
         # Cleanup token (consumer stays registered for other streams)
         if self.active_processing_streams.get(camera_id) == stream_token:
             self.active_processing_streams.pop(camera_id, None)
-        
-        logger.info(f"{Colors.YELLOW}Processing stream finished for {camera_id}{Colors.RESET}")
             
             
     def generate_recorded_video_stream(self, recording_id: str) -> Generator[bytes, None, None]:

@@ -1,5 +1,18 @@
 /* Camera List Component Styles */
 
+.camera-grid.compact-grid {
+  grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+  gap: 14px;
+}
+
+.camera-grid.compact-grid .camera-card {
+  border-radius: 16px;
+}
+
+.camera-grid.compact-grid .camera-video {
+  padding: 12px;
+}
+
 /* Camera Grid */
 .camera-grid {
   display: grid;
@@ -29,17 +42,18 @@
 }
 
 .camera-header {
-  padding: 20px;
+  padding: 7px 14px;
   border-bottom: 1px solid rgba(0, 150, 136, 0.12);
   background: linear-gradient(135deg, rgba(0, 150, 136, 0.06) 0%, rgba(255, 255, 255, 0.4) 100%);
 }
 
 .camera-title {
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 800;
   color: #004d40;
-  margin: 0 0 10px 0;
+  margin: 0;
   letter-spacing: 0.2px;
+  white-space: nowrap;
 }
 
 .camera-info {
@@ -53,7 +67,7 @@
 
 .camera-video {
   position: relative;
-  padding: 20px;
+  padding: 8px 12px;
 }
 
 .camera-placeholder {
@@ -88,10 +102,10 @@
 /* Camera Controls Card (Left - Under Primary Camera) */
 .camera-controls-card {
   display: flex;
-  gap: 10px;
+  gap: 6px;
   flex-wrap: wrap;
   align-items: center;
-  padding: 18px 20px;
+  padding: 10px 12px;
   background: rgba(255, 255, 255, 0.7);
   backdrop-filter: blur(30px) saturate(200%);
   -webkit-backdrop-filter: blur(30px) saturate(200%);
@@ -100,25 +114,8 @@
   box-shadow: 0 4px 20px rgba(0, 150, 136, 0.12), 
               inset 0 1px 0 rgba(255, 255, 255, 0.8);
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
 }
 
-.camera-controls-card::before {
-  content: 'CAMERA CONTROLS';
-  position: absolute;
-  top: -10px;
-  left: 16px;
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #00695c;
-  background: rgba(255, 255, 255, 0.95);
-  padding: 4px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 150, 136, 0.3);
-  box-shadow: 0 2px 8px rgba(0, 150, 136, 0.15);
-}
 
 .camera-controls-card:hover {
   background: rgba(255, 255, 255, 0.8);
@@ -136,7 +133,7 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 20px;
+  padding: 10px 12px;
   background: rgba(255, 255, 255, 0.7);
   backdrop-filter: blur(30px) saturate(200%);
   -webkit-backdrop-filter: blur(30px) saturate(200%);
@@ -145,25 +142,8 @@
   box-shadow: 0 4px 20px rgba(38, 166, 154, 0.12),
               inset 0 1px 0 rgba(255, 255, 255, 0.8);
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
 }
 
-.view-controls-card::before {
-  content: 'VIEW CONTROLS';
-  position: absolute;
-  top: -10px;
-  left: 16px;
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #00695c;
-  background: rgba(255, 255, 255, 0.95);
-  padding: 4px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(38, 166, 154, 0.3);
-  box-shadow: 0 2px 8px rgba(38, 166, 154, 0.15);
-}
 
 .view-controls-card:hover {
   background: rgba(255, 255, 255, 0.8);
@@ -380,11 +360,14 @@
     border-radius: 16px;
   }
 
-  .camera-header,
+  .camera-header {
+    padding: 6px 12px;
+  }
+
   .camera-video,
   .camera-controls-card,
   .view-controls-card {
-    padding: 12px;
+    padding: 8px 12px;
   }
 
   .camera-title {

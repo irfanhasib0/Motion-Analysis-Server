@@ -19,11 +19,12 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
+PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 if PROJECT_SRC_PATH not in sys.path:
     sys.path.append(PROJECT_SRC_PATH)
 
-from services.colors import Colors
+from services.streaming.colors import Colors
+from improc.optical_flow import OpticalFlowTracker
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +102,6 @@ def _tracker_worker(
       output_queue  – TrackerResult (detection results)
       config_queue  – TrackerConfigUpdate (runtime config changes)
     """
-    # Import here so the heavy OpenCV / model loading happens in the child
-    src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-    from improc.optical_flow import OpticalFlowTracker
 
     tracker = OpticalFlowTracker(**tracker_kwargs)
     logger.info(f"[TrackerProcess] Started with config: {list(tracker_kwargs.keys())}")
@@ -228,7 +224,7 @@ class AIService:
 
     # ── unified lifecycle ────────────────────────────────────────────────
 
-    def ensure_tracker(self, camera_id: str, tracker_kwargs: dict) -> bool:
+    def start_ai_tracker(self, camera_id: str, tracker_kwargs: dict) -> bool:
         """Ensure a tracker is running for *camera_id* (multiprocess or sequential)."""
         if self.is_tracker_alive(camera_id):
             return True

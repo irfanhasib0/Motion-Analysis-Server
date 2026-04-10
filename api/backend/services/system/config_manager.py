@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 
-from services.colors import Colors
+from services.streaming.colors import Colors
 
 logger = logging.getLogger(__name__)
 

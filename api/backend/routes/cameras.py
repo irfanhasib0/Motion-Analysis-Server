@@ -22,7 +22,7 @@ async def create_camera(camera: CameraCreate):
     """Add a new camera"""
     try:
         new_camera = deps.camera_service.add_camera(camera)
-        await deps.broadcast_message({"type": "camera_added", "camera": new_camera.dict()})
+        await deps.broadcast_message({"type": "camera_added", "camera": new_camera.model_dump()})
         return new_camera
     except Exception as e:
         deps.logger.error(f"Failed to add camera: {e}")
@@ -34,7 +34,7 @@ async def update_camera(camera_id: str, camera_update: CameraUpdate):
     """Update camera settings"""
     try:
         updated_camera = deps.camera_service.update_camera(camera_id, camera_update)
-        await deps.broadcast_message({"type": "camera_updated", "camera": updated_camera.dict()})
+        await deps.broadcast_message({"type": "camera_updated", "camera": updated_camera.model_dump()})
         return updated_camera
     except Exception as e:
         deps.logger.error(f"Failed to update camera: {e}")

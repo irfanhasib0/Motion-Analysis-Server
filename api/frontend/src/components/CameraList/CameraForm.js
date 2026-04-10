@@ -56,7 +56,7 @@ export const AUDIO_LATENCY_PROFILES = {
 
 
 
-export const CameraForm = ({ initialCamera, onSubmit, onClose, onBrowse, title, submitText }) => {
+export const CameraForm = ({ initialCamera, onSubmit, onClose, title, submitText }) => {
   const [form, setForm] = useState(initialCamera);
 
   const handleSubmit = async (e) => {
@@ -92,7 +92,6 @@ export const CameraForm = ({ initialCamera, onSubmit, onClose, onBrowse, title, 
                 value={form.camera_type}
                 onChange={(e) => setForm(p => ({...p, camera_type: e.target.value}))}
               >
-                <option value="recorded">Recorded Data</option>
                 <option value="rtsp">RTSP Stream</option>
                 <option value="webcam">Webcam</option>
                 <option value="ip_camera">IP Camera</option>
@@ -109,23 +108,12 @@ export const CameraForm = ({ initialCamera, onSubmit, onClose, onBrowse, title, 
                   value={form.source}
                   onChange={(e) => setForm(p => ({...p, source: e.target.value}))}
                   placeholder={
-                    form.camera_type === 'recorded' ? '/path/to/video/file.mp4' :
                     form.camera_type === 'rtsp' ? 'rtsp://username:password@ip:port/path' :
                     form.camera_type === 'webcam' ? '0' :
                     'http://ip:port/video'
                   }
                   required
                 />
-                {form.camera_type === 'recorded' && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    style={{ whiteSpace: 'nowrap', ...COMPACT_BUTTON_STYLE }}
-                    onClick={() => onBrowse((path) => setForm(p => ({...p, source: path})))}
-                  >
-                    Browse
-                  </button>
-                )}
               </div>
             </div>
 

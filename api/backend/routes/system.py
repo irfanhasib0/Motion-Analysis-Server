@@ -210,8 +210,8 @@ async def get_all_cameras_stream_health():
         'cameras': health_statuses,
         'monitoring_config': {
             'lag_threshold': deps.dashboard_service.stream_monitor.lag_threshold,
-            'recovery_cooldown': deps.dashboard_service.stream_monitor.recovery_cooldown,
-            'max_recovery_attempts': deps.dashboard_service.stream_monitor.max_recovery_attempts
+            'slow_recovery_interval': deps.dashboard_service.stream_monitor.slow_recovery_interval,
+            'enable_slow_recovery_threshold': deps.dashboard_service.stream_monitor.enable_slow_recovery_threshold,
         }
     }
 
@@ -223,6 +223,15 @@ async def get_all_lag_history():
         return deps.dashboard_service.stream_monitor.get_lag_history()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get lag history: {str(e)}")
+
+
+@router.get("/system/resource-history")
+async def get_resource_history():
+    """Get 24h CPU and memory usage history for dashboard plotting."""
+    try:
+        return deps.dashboard_service.get_resource_history()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get resource history: {str(e)}")
 
 
 @router.get("/cameras/{camera_id}/lag-history")

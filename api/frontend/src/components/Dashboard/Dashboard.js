@@ -1,12 +1,27 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Camera, Video, HardDrive, Clock } from 'lucide-react';
 import MotionActivityChart from './MotionActivityChart';
 import StreamLagChart from './StreamLagChart';
+import ResourceUsageChart from './ResourceUsageChart';
+import zonesApi from '../../zonesApi';
 import './Dashboard.css';
 
 const Dashboard = ({ cameras, recordings, systemInfo }) => {
   const navigate = useNavigate();
+  const [allZones, setAllZones] = useState([]);
+
+  useEffect(() => {
+    zonesApi.getZonesSummary()
+      .then((res) => {
+        const flat = [];
+        Object.entries(res.data || {}).forEach(([cameraId, data]) => {
+          (data.zones || []).forEach((z) => flat.push({ ...z, camera_id: cameraId, camera_name: data.camera_name }));
+        });
+        setAllZones(flat);
+      })
+      .catch(() => {});
+  }, []);
   const onlineCameras = cameras.filter(c => c.status === 'online').length;
   const recordingCameras = cameras.filter(c => c.status === 'recording').length;
   const totalRecordings = recordings.length;
@@ -143,7 +158,7 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
         <div className="section-header">
           <h2 className="section-title">24h Motion Activity Pattern</h2>
         </div>
-        <MotionActivityChart recordings={recordings} cameras={cameras} onDayClick={(date, recordingId, cameraId) => navigate('/live', { state: { date, recordingId, cameraId } })} />
+        <MotionActivityChart recordings={recordings} cameras={cameras} allZones={allZones} onDayClick={(date, recordingId, cameraId) => navigate('/live', { state: { date, recordingId, cameraId } })} />
       </div>
 
       {/* Stream Lag History Chart */}
@@ -152,6 +167,14 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
           <h2 className="section-title">24h Stream Lag History</h2>
         </div>
         <StreamLagChart cameras={cameras} />
+      </div>
+
+      {/* CPU & Memory Usage Chart */}
+      <div className="content-section" style={{ marginBottom: 16 }}>
+        <div className="section-header">
+          <h2 className="section-title">24h CPU &amp; Memory Usage</h2>
+        </div>
+        <ResourceUsageChart />
       </div>
 
       <div className="content-section">

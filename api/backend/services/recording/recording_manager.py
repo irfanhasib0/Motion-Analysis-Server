@@ -17,16 +17,16 @@ import yaml
 
 from models.camera import CameraStatus
 from models.recording import Recording, RecordingStatus
-from services.av_writer import AVWriterV2 as AVWriter  # Flexible writer - can switch between V2Flexible and V3
-from services.audio_recording_utils import AudioRecordingUtils
-from services.drawing_utils import StreamDrawingHelper
+from services.recording.av_writer import AVWriterV2 as AVWriter  # Flexible writer - can switch between V2Flexible and V3
+from services.recording.audio_recording_utils import AudioRecordingUtils
+from services.streaming.drawing_utils import StreamDrawingHelper
 
-PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
+PROJECT_SRC_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'src'))
 if PROJECT_SRC_PATH not in sys.path:
     sys.path.append(PROJECT_SRC_PATH)
 
 from improc.optical_flow import OpticalFlowTracker
-from services.colors import Colors
+from services.streaming.colors import Colors
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,15 @@ class RecordingManager:
         self.clip_object_crops: Dict[str, Dict[int, dict]] = {}
         self.clean_up_extensions = ['.overlay.mp4']  # Extensions to clean up if no motion detected
         self._metrics_buffer: Dict[str, list] = {}  # camera_id -> buffered lines
+
+        # ── Zone Control plugin state ──────────────────────────────────────────────
+        # Per-clip zone accumulation.  Keyed by camera_id (same pattern as clip_vel).
+        # zone_motion_counts: {zone_id: hit-frame-count}
+        # zone_vel_max:       {zone_id: highest observed vel during a zone hit frame}
+        self.clip_zone_motion_counts: Dict[str, Dict[str, int]] = {}
+        self.clip_zone_vel_max: Dict[str, Dict[str, float]] = {}
+        # Injected by start_server.py after init (same pattern as _zone_store on streaming service)
+        self._zone_store = None
 
     def _flush_metrics(self, camera_id: str, file_path: str) -> None:
         """Flush buffered metrics lines to the .txt file on disk."""
@@ -207,6 +216,10 @@ class RecordingManager:
         self.clip_max_person_frame[camera_id] = None
         self.clip_person_crops[camera_id] = {}
         self.clip_object_crops[camera_id] = {}
+
+        # Reset zone accumulators for this clip.
+        self.clip_zone_motion_counts[camera_id] = {}
+        self.clip_zone_vel_max[camera_id] = {}
 
         # Create metrics CSV for this clip (sits alongside video.mp4).
         txt_path = os.path.join(clip_dir, 'metrics.txt')
@@ -461,6 +474,13 @@ class RecordingManager:
                     'max_person_density': round(float(self.clip_max_person_density.get(camera_id, 0.0)), 4),
                     'person_crop_count': len(person_crops),
                     'object_thumb_count': len(object_crops),
+                    # ── Zone Control metadata ────────────────────────────────────────────
+                    'zone_summary': {
+                        'zones_active': sorted(self.clip_zone_motion_counts.get(camera_id, {}).keys()),
+                        'zone_motion_counts': dict(self.clip_zone_motion_counts.get(camera_id, {})),
+                        'zone_vel_max': {k: round(v, 3) for k, v in
+                                         self.clip_zone_vel_max.get(camera_id, {}).items()},
+                    },
                 },
             },
         )
@@ -589,6 +609,14 @@ class RecordingManager:
                     self.clip_motion_frame_count[camera_id] += 1
                 else:
                     self.clip_no_motion_frame_count[camera_id] += 1
+
+                # ── Zone hit accumulation ─────────────────────────────────────────────
+                for zone_id in res.get('zone_hits', []):
+                    counts = self.clip_zone_motion_counts.setdefault(camera_id, {})
+                    counts[zone_id] = counts.get(zone_id, 0) + 1
+                    vel_max = self.clip_zone_vel_max.setdefault(camera_id, {})
+                    vel_max[zone_id] = max(vel_max.get(zone_id, 0.0), vel)
+                # ─────────────────────────────────────────────────────────────────────
 
                 # Update per-PID crops/thumbs from the unified thumbnail list.
                 # All objects: save the best full-frame snapshot.
@@ -728,8 +756,11 @@ class RecordingManager:
         
         if camera_id not in self.camera_service._camera_streams:
             success = self.camera_service.start_video(camera_id)
-            if not success:
-                logger.error(f"{Colors.RED} Failed to start camera stream for recording:{Colors.RESET} {camera_id}")
+            if success is None:
+                logger.error(f"{Colors.RED} Fatal error starting camera stream for recording (bad credentials/URL):{Colors.RESET} {camera_id}")
+                return 'fatal'
+            if success is False:
+                logger.error(f"{Colors.RED} Failed to start camera stream for recording (transient):{Colors.RESET} {camera_id}")
                 return None
 
         # Register as consumer for this camera
@@ -738,7 +769,7 @@ class RecordingManager:
         if db_camera and db_camera.get('audio_enabled', False):
             data_types.append('audio')
         self.streaming_service.register_consumer(camera_id, consumer_id, data_types)
-
+        
         recording_thread = threading.Thread(
             target=self.record_worker,
             args=(camera_id,),
@@ -749,6 +780,7 @@ class RecordingManager:
             'thread': recording_thread,
             'start_time': datetime.now(),
         }
+        logger.info(f"{Colors.YELLOW}Starting recording thread for camera:{Colors.RESET} {camera_id}")
         recording_thread.start()
         self.db.update_camera(camera_id, {'status': CameraStatus.RECORDING.value})
 

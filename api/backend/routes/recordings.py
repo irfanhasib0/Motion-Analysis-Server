@@ -23,13 +23,11 @@ async def start_recording(camera_id: str, background_tasks: BackgroundTasks):
     deps.logger.info(f"Camera status: {camera.status}, name: {camera.name}")
 
     recording_id = await asyncio.to_thread(deps.camera_service.start_recording, camera_id)
+    if recording_id == 'fatal':
+        raise HTTPException(status_code=503, detail="Camera stream failed to open (bad URL or credentials). Check camera settings.")
+    if recording_id is None:
+        raise HTTPException(status_code=503, detail="Camera stream unavailable. The camera may be offline or unreachable.")
     deps.logger.info(f"Recording started successfully: {recording_id}")
-
-    #await deps.broadcast_message({
-    #    "type": "recording_started",
-    #    "camera_id": camera_id,
-    #    "recording_id": recording_id
-    #})
     return {"message": "Recording started", "recording_id": recording_id}
 
 
@@ -140,7 +138,7 @@ async def load_archive(request: ArchivePathRequest):
         loaded_recordings = [r for r in recordings if r.id in loaded_ids]
         return {
             "loaded_count": len(loaded_ids),
-            "recordings": [r.dict() for r in loaded_recordings],
+            "recordings": [r.model_dump() for r in loaded_recordings],
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

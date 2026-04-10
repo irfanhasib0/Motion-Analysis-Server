@@ -21,19 +21,26 @@ class StreamHealthMonitor:
         
         # Recovery policies
         self.lag_threshold = 120.0  # 2 minutes max lag before considering frozen
-        self.recovery_cooldown = 300  # 5 minutes between attempts
-        self.max_recovery_attempts = 3
-        self.video_exhausted_cooldown = 900  # 15 minutes before retrying after max attempts
         
         self._last_check = 0
         self._check_interval = 30  # Check every 30 seconds
-        
+        self.enable_slow_recovery_threshold = 3  # After 3 recoveries, enable slow recovery mode
+        self.slow_recovery_interval = 5  # In slow recovery mode, recover every 5th failure
+
         # Lag history queue for 24-hour plotting
         self._lag_queue_maxlen = (24 * 3600) // self._check_interval  # 2880 samples at 30s interval
         self._lag_queues: Dict[str, deque] = {}  # camera_id -> deque of lag samples
         
         # Error log snapshot directory (project root)
         self._error_log_dir = os.path.join('.', 'error_logs')
+
+        # Recovery callbacks — defined once, keyed by stream name
+        self._recover_fn = {
+            'video':     self._recover_producer_video,
+            'audio':     self._recover_producer_audio,
+            'recording': self._recover_recording,
+            'ai':        self._recover_ai_tracker,
+        }
         
     def monitor_streams(self):
         """Check stream health and trigger recovery if needed."""
@@ -54,38 +61,8 @@ class StreamHealthMonitor:
         """Check health of a specific camera and trigger recovery if needed."""
         logger.info(f"🔍 Running health check for camera {camera_id}")
         current_lag = self._get_current_lag_stats(camera_id)
-        
-        if camera_id not in self.lag_history:
-            self.lag_history[camera_id] = {
-                'producer_video_frozen': None,
-                'producer_audio_frozen': None,
-                'recorder_frozen': None,
-                'last_video_recovery': 0,
-                'last_audio_recovery': 0,
-                'last_recorder_recovery': 0,
-                'video_recovery_count': 0,
-                'audio_recovery_count': 0,
-                'recorder_recovery_count': 0,
-                'video_exhausted_recording_stopped': False,
-                'video_exhausted_time': None,
-                'was_recording_before_failure': False,
-                'notified_streaming_consumers': set(),  # Track which consumers we've already notified about
-                'error_logged': False,
-            }
-        
-        history = self.lag_history[camera_id]
-        now = time.time()
-        
-        # Append lag sample for 24h history plot
-        if camera_id not in self._lag_queues:
-            self._lag_queues[camera_id] = deque(maxlen=self._lag_queue_maxlen)
-        self._lag_queues[camera_id].append({
-            'ts': now,
-            'video': current_lag.get('producer_video_lag', {}).get(camera_id, 0),
-            'audio': current_lag.get('producer_audio_lag', {}).get(camera_id, 0),
-            'recorder': current_lag.get('recorder_lag', {}).get(camera_id, 0),
-        })
-        
+        history = self._ensure_camera_history(camera_id, current_lag)
+
         # Check streaming consumer lags and notify if threshold exceeded
         for lag_key, stream_type in [('video_stream_lag', 'video_stream'), ('audio_stream_lag', 'audio_stream')]:
             lag_val = current_lag.get(lag_key, {}).get(camera_id, 0)
@@ -95,69 +72,64 @@ class StreamHealthMonitor:
                     history['notified_streaming_consumers'].add(lag_key)
             else:
                 history['notified_streaming_consumers'].discard(lag_key)
-        
-        # Check producer video thread lag
-        producer_video_lag = current_lag.get('producer_video_lag', {}).get(camera_id, 0)
-        if producer_video_lag > self.lag_threshold:
-            # Save error log snapshot on first detection
-            if not history.get('error_logged'):
-                self._save_error_log_snapshot(camera_id)
-                history['error_logged'] = True
-            if history['video_recovery_count'] >= self.max_recovery_attempts:
-                # Max attempts exhausted — stop recording and wait for cooldown
-                if not history.get('video_exhausted_recording_stopped'):
-                    was_recording = camera_id in self.camera_service.active_recordings
-                    history['was_recording_before_failure'] = was_recording
-                    logger.error(f"🛑 Video recovery exhausted ({self.max_recovery_attempts} attempts) for {camera_id} — stopping recording, will retry in 15 min")
-                    if was_recording:
-                        self.camera_service.stop_recording(camera_id)
-                    history['video_exhausted_recording_stopped'] = True
-                    history['video_exhausted_time'] = now
-                
-                # After 15 min cooldown, reset and try again
-                if now - history.get('video_exhausted_time', now) >= self.video_exhausted_cooldown:
-                    logger.info(f"🔄 15-min cooldown elapsed for {camera_id} — resetting video recovery attempts")
-                    history['video_recovery_count'] = 0
-                    history['video_exhausted_recording_stopped'] = False
-                    history['video_exhausted_time'] = None
+
+        lag_values = self._get_lag_values(camera_id, current_lag)
+        streams = history['streams']
+        first_recovery_triggered = False
+        for name, lag in lag_values.items():
+            s = streams[name]
+            if lag > self.lag_threshold:
+                if not s['slow_recovery'] or s['count'] % self.slow_recovery_interval == 0:
+                    self._recover_fn[name](camera_id)
+                s['count'] += 1
+                s['frozen'] = lag if lag != float('inf') else True
+                if s['count'] >= self.enable_slow_recovery_threshold and not s['slow_recovery']:
+                    logger.warning(f"Enabling slow recovery for {name} of camera {camera_id} after {s['count']} recoveries")
+                    s['slow_recovery'] = True
+                if s['count'] == 1:
+                    first_recovery_triggered = True
             else:
-                self._recover_producer_video(camera_id)
-                history['last_video_recovery'] = now
-                history['video_recovery_count'] += 1
-            history['producer_video_frozen'] = producer_video_lag
-        else:
-            history['producer_video_frozen'] = None
-            # If we were in exhausted state and stream recovered, restart recording if it was active before
-            if history.get('video_exhausted_recording_stopped'):
-                logger.info(f"✅ Video stream recovered for {camera_id} after exhaustion")
-                self._recover_recording(camera_id)
-                history['video_exhausted_recording_stopped'] = False
-                history['video_exhausted_time'] = None
-            history['video_recovery_count'] = 0
-            history['error_logged'] = False
-            
-        # Check producer audio thread lag    
-        producer_audio_lag = current_lag.get('producer_audio_lag', {}).get(camera_id, 0)
-        if producer_audio_lag > self.lag_threshold:
-            self._recover_producer_audio(camera_id)
-            history['last_audio_recovery'] = now
-            history['audio_recovery_count'] += 1
-            history['producer_audio_frozen'] = producer_audio_lag
-        else:
-            history['producer_audio_frozen'] = None
-            history['audio_recovery_count'] = 0
-            
-        # Check recording subscriber lag
-        recorder_lag = current_lag.get('recorder_lag', {}).get(camera_id, 0)
-        if recorder_lag > self.lag_threshold:
-            self._recover_recording(camera_id)
-            history['last_recorder_recovery'] = now
-            history['recorder_recovery_count'] += 1
-            history['recorder_frozen'] = recorder_lag
-        else:
-            history['recorder_frozen'] = None
-            history['recorder_recovery_count'] = 0
+                s['frozen'] = None if name != 'ai' else False
+                s['count'] = 0
+                s['slow_recovery'] = False
+
+        if first_recovery_triggered:
+            self._save_error_log_snapshot(camera_id)
     
+    def _ensure_camera_history(self, camera_id: str, current_lag: dict) -> dict:
+        """Initialise lag_history and lag_queue for camera_id if not already present,
+        then append the current lag sample to the 24h queue."""
+        if camera_id not in self.lag_history:
+            self.lag_history[camera_id] = {
+                'streams': {
+                    'video':     {'frozen': None,  'count': 0, 'slow_recovery': False},
+                    'audio':     {'frozen': None,  'count': 0, 'slow_recovery': False},
+                    'recording': {'frozen': None,  'count': 0, 'slow_recovery': False},
+                    'ai':        {'frozen': False, 'count': 0, 'slow_recovery': False},
+                },
+                'notified_streaming_consumers': set(),
+            }
+        if camera_id not in self._lag_queues:
+            self._lag_queues[camera_id] = deque(maxlen=self._lag_queue_maxlen)
+        now = time.time()
+        self._lag_queues[camera_id].append({
+            'ts':       now,
+            'video':    current_lag.get('producer_video_lag', {}).get(camera_id, 0),
+            'audio':    current_lag.get('producer_audio_lag', {}).get(camera_id, 0),
+            'recorder': current_lag.get('recorder_lag', {}).get(camera_id, 0),
+        })
+        return self.lag_history[camera_id]
+
+    def _get_lag_values(self, camera_id: str, current_lag: dict) -> dict:
+        """Return per-stream lag values for the recovery loop.
+        AI liveness is encoded as 0 (alive) or inf (dead)."""
+        return {
+            'video':     current_lag.get('producer_video_lag', {}).get(camera_id, 0),
+            'audio':     current_lag.get('producer_audio_lag', {}).get(camera_id, 0),
+            'recording': current_lag.get('recorder_lag', {}).get(camera_id, 0),
+            'ai':        0.0 if self.camera_service.ai_service.is_tracker_alive(camera_id) else float('inf'),
+        }
+
     def _extract_buffer_lags(self, buffer, camera_id: str, now: float,
                               producer_key: str, stream_consumer_prefix: str,
                               stream_lag_key: str, lag_stats: dict):
@@ -170,7 +142,7 @@ class StreamHealthMonitor:
         if not hasattr(buffer, '_consumer_read_times'):
             return
         for consumer_id, read_times in buffer._consumer_read_times.items():
-            if not read_times or len(read_times) == 0:
+            if not read_times:
                 continue
             last_read = read_times[-1]
             if not last_read:
@@ -210,11 +182,7 @@ class StreamHealthMonitor:
     
     def _recover_producer_video(self, camera_id: str):
         """Recover video producer thread by restarting it."""
-        history = self.lag_history.get(camera_id, {})
-        logger.warning(f"Recovering video producer thread for camera {camera_id} (attempt {history.get('video_recovery_count', 0) + 1}/{self.max_recovery_attempts})")
-        # Track recording state BEFORE stopping (stop_video_stream stops recording too)
-        was_recording = camera_id in self.camera_service.active_recordings
-        history['was_recording_before_failure'] = was_recording or history.get('was_recording_before_failure', False)
+        logger.warning(f"Recovering video producer thread for camera {camera_id}")
         self.camera_service.stop_video_stream(camera_id, stop_recording=False)
         time.sleep(2)  # Allow clean shutdown
         success = self.camera_service.start_video_stream(camera_id)
@@ -222,7 +190,8 @@ class StreamHealthMonitor:
             logger.info(f"✅ Successfully recovered video producer thread for camera {camera_id}")
         else:
             logger.error(f"❌ Failed to recover video producer thread for camera {camera_id}")
-        
+            time.sleep(15)  # Wait before retrying
+
 
     def _recover_producer_audio(self, camera_id: str):
         """Recover audio producer thread by restarting it."""
@@ -234,24 +203,38 @@ class StreamHealthMonitor:
             logger.info(f"✅ Successfully recovered audio producer thread for camera {camera_id}")
         else:
             logger.error(f"❌ Failed to recover audio producer thread for camera {camera_id}")
-        
+            time.sleep(15)  # Wait before retrying
+
     def _recover_recording(self, camera_id: str):
         """Recover recording subscriber by restarting recording if it was active."""
-        #is_recording = camera_id in self.camera_service.active_recordings
-        #history = self.lag_history.get(camera_id, {})
-        #was_recording = is_recording or history.get('was_recording_before_failure', False)
-        
-        #if not was_recording:
-        #    return
-        
         logger.warning(f"Recovering recording for camera {camera_id}")
-        self.camera_service.stop_recording(camera_id)
-        time.sleep(1)  # Brief pause
-        
-        self.camera_service.start_recording(camera_id)
-        logger.info(f"✅ Successfully recovered recording for camera {camera_id}")
-        #history['was_recording_before_failure'] = False
-    
+        #self.stop_recording(camera_id)
+        #Start recording already stops it first if necessary.
+        recording_id = self.camera_service.start_recording(camera_id)
+        if recording_id:
+            logger.info(f"✅ Successfully recovered recording for camera {camera_id}")
+        else:
+            logger.error(f"❌ Failed to recover recording for camera {camera_id}")
+            time.sleep(15)  # Wait before retrying
+
+    def _recover_ai_tracker(self, camera_id: str):
+        """Recover AI tracker by stopping and restarting it."""
+        logger.warning(f"Recovering AI tracker for camera {camera_id}")
+        cs = self.camera_service
+        tracker_kwargs = {
+            'enable_person_detection': getattr(cs, 'enable_person_detection', False),
+            'enable_yolox': getattr(cs, 'enable_yolox', False),
+            'yolox_model_size': getattr(cs, 'yolox_model_size', 'nano'),
+            'yolox_score_thr': getattr(cs, 'yolox_score_thr', 0.5),
+        }
+        cs.ai_service.stop_tracker(camera_id)
+        success = cs.ai_service.start_ai_tracker(camera_id, tracker_kwargs)
+        if success:
+            logger.info(f"✅ Successfully recovered AI tracker for camera {camera_id}")
+        else:
+            logger.error(f"❌ Failed to recover AI tracker for camera {camera_id}")
+            time.sleep(15)  # Wait before retrying
+
     def _save_error_log_snapshot(self, camera_id: str):
         """Save last 500 lines of nvr.log when lag exceeds threshold for the first time."""
         try:
@@ -298,6 +281,10 @@ class StreamHealthMonitor:
             dead = [name for name, t in threads.items() if t and not alive[name]]
             if dead:
                 logger.error(f"⚠️ Dead threads detected for {camera_id}: {', '.join(dead)} — recovery needed")
+
+            # Check AI tracker (process in multiprocess mode, inline object in sequential mode)
+            ai_alive = self.camera_service.ai_service.is_tracker_alive(camera_id)
+            logger.info(f"🤖 AI tracker for {camera_id}: {'✅' if ai_alive else '❌ dead'}")
         
         return thread_status
 
@@ -306,24 +293,13 @@ class StreamHealthMonitor:
         current_lag = self._get_current_lag_stats(camera_id)
         history = self.lag_history.get(camera_id, {})
         
-        now = time.time()
+        streams = history.get('streams', {})
         return {
             'camera_id': camera_id,
             'lag_stats': current_lag,
-            'health_issues': {
-                'video_producer_frozen': history.get('producer_video_frozen') is not None,
-                'audio_producer_frozen': history.get('producer_audio_frozen') is not None,
-                'recorder_frozen': history.get('recorder_frozen') is not None,
-            },
-            'recovery_counts': {
-                'video_recovery_count': history.get('video_recovery_count', 0),
-                'audio_recovery_count': history.get('audio_recovery_count', 0), 
-                'recorder_recovery_count': history.get('recorder_recovery_count', 0),
-            },
-            'needs_manual_refresh': (
-                history.get('video_recovery_count', 0) >= self.max_recovery_attempts or
-                history.get('audio_recovery_count', 0) >= self.max_recovery_attempts
-            )
+            'health_issues': {name: bool(s['frozen']) for name, s in streams.items()},
+            'recovery_counts': {name: s['count'] for name, s in streams.items()},
+            'ai_tracker_alive': self.camera_service.ai_service.is_tracker_alive(camera_id),
         }
 
     def get_lag_history(self, camera_id: str = None) -> Dict:
@@ -347,6 +323,13 @@ class DashboardService:
         self._last_sample_time = None
         self._last_ram_check = 0
         self._ram_check_interval = 60  # Check RAM every 60 seconds
+
+        # 24h resource usage history (cpu/memory sampled every 30s)
+        _resource_interval = 30
+        _resource_maxlen = (24 * 3600) // _resource_interval  # 2880 samples
+        self._resource_queue: deque = deque(maxlen=_resource_maxlen)
+        self._resource_interval = _resource_interval
+        self._last_resource_sample = 0.0
 
         # Initialize stream health monitor
         self.stream_monitor = StreamHealthMonitor(camera_service)
@@ -397,7 +380,7 @@ class DashboardService:
             process_read_mb_total = process_io.read_bytes / (1024 ** 2)
             process_write_mb_total = process_io.write_bytes / (1024 ** 2)
         except Exception:
-            process_io = None
+            pass
 
         disk_read_mb_total = (disk_counters.read_bytes / (1024 ** 2)) if disk_counters else 0.0
         disk_write_mb_total = (disk_counters.write_bytes / (1024 ** 2)) if disk_counters else 0.0
@@ -446,6 +429,17 @@ class DashboardService:
             cutoff = now - self.window_seconds
             while self._samples and self._samples[0]['timestamp'] < cutoff:
                 self._samples.popleft()
+
+        # Append to 24h resource history at 30s granularity
+        if now - self._last_resource_sample >= self._resource_interval:
+            self._resource_queue.append({
+                'ts': now,
+                'cpu': sample.get('cpu_usage', 0.0),
+                'mem': sample.get('memory_usage', 0.0),
+                'proc_cpu': sample.get('process_cpu_percent', 0.0),
+                'proc_mem': sample.get('process_memory_percent', 0.0),
+            })
+            self._last_resource_sample = now
 
         self._last_sample_time = now
         self._last_disk_counters = disk_counters
@@ -545,6 +539,11 @@ class DashboardService:
             'total_cameras': len(self.camera_service.get_cameras()),
             'total_recordings': len(self.camera_service.get_recordings()),
         }
+
+    def get_resource_history(self) -> list:
+        """Get 24h CPU and memory usage history for dashboard plotting."""
+        return list(self._resource_queue)
+
     def _check_ram_threshold(self):
         """Check RAM usage and auto-switch to low power mode if below threshold."""
         now = time.time()

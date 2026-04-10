@@ -3,6 +3,9 @@ import metricConfig from '../metric_config.json';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid, ReferenceLine
 } from 'recharts';
+// ── Zone Control plugin ──────────────────────────────────────────────────────
+import ZoneFilter from '../Zones/ZoneFilter';
+// ─────────────────────────────────────────────────────────────────────────────
 
 const METRICS = [
   { key: 'vel', label: metricConfig.labels.vel, defaultOn: false },
@@ -35,7 +38,7 @@ const AVG_WINDOWS = [
   { value: 60, label: '60 min' },
 ];
 
-const MotionActivityChart = ({ recordings, cameras = [], onDayClick }) => {
+const MotionActivityChart = ({ recordings, cameras = [], onDayClick, allZones = [] }) => {
   const [filterCamera, setFilterCamera] = useState('');
   const [avgWindow, setAvgWindow] = useState(10);
   const [activeMetrics, setActiveMetrics] = useState(() => {
@@ -47,11 +50,22 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick }) => {
   const DEFAULT_YMAX = metricConfig.max;
   const [yMaxOverrides, setYMaxOverrides] = useState({});
 
-  // Filter recordings by selected camera
+  // ── Zone filter state ─────────────────────────────────────────────────────
+  const [selectedZones, setSelectedZones] = useState(new Set());
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Filter recordings by selected camera and zones
   const filteredRecs = useMemo(() => {
-    if (!filterCamera) return recordings;
-    return recordings.filter(r => r.camera_id === filterCamera);
-  }, [recordings, filterCamera]);
+    let recs = recordings;
+    if (filterCamera) recs = recs.filter(r => r.camera_id === filterCamera);
+    if (selectedZones.size > 0) {
+      recs = recs.filter((r) => {
+        const activeZones = r.metadata?.zone_summary?.zones_active || [];
+        return activeZones.some((zid) => selectedZones.has(zid));
+      });
+    }
+    return recs;
+  }, [recordings, filterCamera, selectedZones]);
 
   // Build merged data array for LineChart with optional averaging and value clipping
   const { chartDataByMetric, dayList } = useMemo(() => {
@@ -175,6 +189,13 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick }) => {
             <option key={c.id} value={c.id}>{c.name}</option>
           ))}
         </select>
+        <ZoneFilter
+          zones={allZones}
+          selectedZones={selectedZones}
+          onChange={setSelectedZones}
+          label="Zones"
+          compact
+        />
         <select
           value={avgWindow}
           onChange={(e) => setAvgWindow(Number(e.target.value))}

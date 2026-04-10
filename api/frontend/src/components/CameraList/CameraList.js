@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff, RotateCw, FolderOpen } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Plus, Edit, Trash2, Play, Square, Settings, Power, PowerOff, Mic, MicOff, RotateCw, MapPin, LayoutGrid } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../../api';
 import { DEFAULT_CAMERA_FORM, COMPACT_BUTTON_STYLE, CameraForm } from './CameraForm';
@@ -9,7 +10,11 @@ import {
 } from './CameraViewPanels';
 import './CameraList.css';
 
+// Compact icon-only style for camera card control buttons
+const ICON_BTN = { padding: '5px 6px', fontSize: '12px', lineHeight: 1 };
+
 const CameraList = ({ cameras, setCameras }) => {
+  const navigate = useNavigate();
   // -----------------------------
   // Page-level state
   // -----------------------------
@@ -19,18 +24,8 @@ const CameraList = ({ cameras, setCameras }) => {
 
   // Per-camera UI settings for supporting screen
   const [cameraSettings, setCameraSettings] = useState({}); // { [id]: { sensitivity: number(0..5), supportEnabled: boolean } }
-  const [hlsFailedByCamera, setHlsFailedByCamera] = useState({});
-  const [liveStreamMode, setLiveStreamMode] = useState('mjpeg');
-  const [isTogglingLiveMode, setIsTogglingLiveMode] = useState(false);
-  const [rtspUnifiedCaptureEnabled, setRtspUnifiedCaptureEnabled] = useState(false);
-  const [isTogglingRtspUnifiedCapture, setIsTogglingRtspUnifiedCapture] = useState(false);
 
-  // File browser state for recorded camera type
-  const [showFileBrowser, setShowFileBrowser] = useState(false);
-  const [fileBrowserItems, setFileBrowserItems] = useState([]);
-  const [fileBrowserPath, setFileBrowserPath] = useState(null);
-  const [fileBrowserParent, setFileBrowserParent] = useState(null);
-  const [fileBrowserFormSetter, setFileBrowserFormSetter] = useState(null);
+
 
   // Stream health monitoring state
   const [streamHealth, setStreamHealth] = useState({}); // { [camera_id]: health_data }
@@ -39,87 +34,10 @@ const CameraList = ({ cameras, setCameras }) => {
   const [startingCameras, setStartingCameras] = useState({}); // { [camera_id]: boolean }
   const [stoppingCameras, setStoppingCameras] = useState({}); // { [camera_id]: boolean }
   const [recordingLoading, setRecordingLoading] = useState({}); // { [camera_id]: 'starting' | 'stopping' | null }
+  const [globalCompactMode, setGlobalCompactMode] = useState(false);
 
-  const isLiveHlsMode = liveStreamMode === 'hls';
-  const isWsMode = liveStreamMode === 'ws';
 
-  const handleToggleLiveStreamMode = async () => {
-    const modeOrder = ['mjpeg', 'ws', 'hls'];
-    const currentIdx = modeOrder.indexOf(liveStreamMode);
-    const targetMode = modeOrder[(currentIdx + 1) % modeOrder.length];
-    setIsTogglingLiveMode(true);
-    try {
-      const mode = await api.setLiveStreamMode(targetMode);
-      setLiveStreamMode(mode);
-      if (mode === 'hls') {
-        setHlsFailedByCamera({});
-      }
-      toast.success(`Live mode switched to ${mode.toUpperCase()}`);
-    } catch (error) {
-      toast.error('Failed to switch live mode: ' + (error.response?.data?.detail || error.message));
-    } finally {
-      setIsTogglingLiveMode(false);
-    }
-  };
 
-  const handleToggleRtspUnifiedCapture = async () => {
-    const target = !rtspUnifiedCaptureEnabled;
-    setIsTogglingRtspUnifiedCapture(true);
-    try {
-      const response = await api.updateSystemSettings({ rtsp_unified_demux_enabled: target });
-      const enabled = Boolean(response?.data?.rtsp_unified_demux_enabled);
-      setRtspUnifiedCaptureEnabled(enabled);
-      toast.success(`RTSP unified capture ${enabled ? 'enabled' : 'disabled'}`);
-    } catch (error) {
-      toast.error('Failed to update RTSP unified capture: ' + (error.response?.data?.detail || error.message));
-    } finally {
-      setIsTogglingRtspUnifiedCapture(false);
-    }
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadLiveMode = async () => {
-      try {
-        const mode = await api.getLiveStreamMode();
-        if (!cancelled) {
-          setLiveStreamMode(mode);
-        }
-      } catch (error) {
-        console.error('Failed to load live stream mode from backend, defaulting to mjpeg:', error);
-        if (!cancelled) {
-          setLiveStreamMode('mjpeg');
-        }
-      }
-    };
-
-    loadLiveMode();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadUnifiedCaptureSetting = async () => {
-      try {
-        const response = await api.getSystemSettings();
-        if (cancelled) {
-          return;
-        }
-        setRtspUnifiedCaptureEnabled(Boolean(response?.data?.rtsp_unified_demux_enabled));
-      } catch {
-        if (!cancelled) {
-          setRtspUnifiedCaptureEnabled(false);
-        }
-      }
-    };
-
-    loadUnifiedCaptureSetting();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -327,16 +245,14 @@ const CameraList = ({ cameras, setCameras }) => {
   const CameraCard = ({ camera }) => {
     return (
       <div className="camera-card">
-        <div className="camera-header" style={{ position: 'relative' }}>
-          <div className="camera-title">{camera.name}</div>
-          <div className="camera-info" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        <div className="camera-header" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div className="camera-title" style={{ flexShrink: 0 }}>{camera.name}</div>
+          <div className="camera-info" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
             <span className={`status status-${camera.status}`}>{camera.status}</span>
             <span>{camera.resolution}</span>
             <span>{camera.fps ? `${camera.fps} FPS` : 'FPS N/A'}</span>
             <span>{camera.audio_sample_rate ? `${camera.audio_sample_rate} Hz` : 'Audio N/A'}</span>
             <span>{camera.camera_type}</span>
-            
-            {/* Health Status - Inline with camera info */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -351,73 +267,13 @@ const CameraList = ({ cameras, setCameras }) => {
             }}>
               <StreamHealthIndicator cameraId={camera.id} health={streamHealth[camera.id]} />
             </div>
-            
-            {/* Action Buttons - Reload and Restart */}
-            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-              {/* Reload Button */}
-              <button
-                onClick={() => handleRefreshStream(camera.id)}
-                disabled={refreshingStreams[camera.id] || camera.status !== 'online'}
-                title="Refresh streams if having connection issues"
-                style={{
-                  background: 'rgba(10,14,20,0.7)',
-                  border: '1px solid rgba(148,163,184,0.3)',
-                  borderRadius: '6px',
-                  width: '20px',
-                  height: '20px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: camera.status !== 'online' ? 'not-allowed' : 'pointer',
-                  opacity: camera.status !== 'online' ? 0.5 : (refreshingStreams[camera.id] ? 0.7 : 1),
-                  color: '#d6deea',
-                  transition: 'opacity 0.2s ease',
-                  flexShrink: 0
-                }}
-              >
-                <RotateCw 
-                  size={10} 
-                  style={{
-                    transform: refreshingStreams[camera.id] ? 'rotate(360deg)' : 'none',
-                    transition: refreshingStreams[camera.id] ? 'transform 1s linear infinite' : 'transform 0.2s ease'
-                  }} 
-                />
-              </button>
-              
-              {/* Restart Button */}
-              <button
-                onClick={() => handleRestartCamera(camera.id)}
-                disabled={restartingCameras[camera.id] || camera.status !== 'online'}
-                title="Restart camera (stop recording, stop camera, start camera)"
-                style={{
-                  background: 'rgba(10,14,20,0.7)',
-                  border: '1px solid rgba(255,99,99,0.4)', // Light red border
-                  borderRadius: '6px',
-                  width: 'auto',
-                  height: '20px',
-                  padding: '0 6px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: camera.status !== 'online' ? 'not-allowed' : 'pointer',
-                  opacity: camera.status !== 'online' ? 0.5 : (restartingCameras[camera.id] ? 0.7 : 1),
-                  color: restartingCameras[camera.id] ? '#ff6b6b' : '#ff9999', // Light red colors
-                  transition: 'all 0.2s ease',
-                  flexShrink: 0,
-                  fontSize: '9px',
-                  fontWeight: 500
-                }}
-              >
-                <span style={{ fontSize: '9px', lineHeight: 1 }}>restart</span>
-              </button>
-            </div>
           </div>
         </div>
 
         <div className="camera-video" style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
           <div className="camera-column primary-column">
             <div className="camera-frame">
-              <CameraVideoPanel camera={camera} variant="primary" liveStreamMode={liveStreamMode} hlsFailedByCamera={hlsFailedByCamera} setHlsFailedByCamera={setHlsFailedByCamera} />
+              <CameraVideoPanel camera={camera} variant="primary" />
             </div>
 
             <div className="camera-controls-card">
@@ -426,22 +282,23 @@ const CameraList = ({ cameras, setCameras }) => {
                   className={`btn btn-success${startingCameras[camera.id] ? ' btn-starting' : ''}`}
                   onClick={() => handleStartCamera(camera.id)}
                   disabled={startingCameras[camera.id]}
-                  style={COMPACT_BUTTON_STYLE}
+                  title="Start camera"
+                  style={ICON_BTN}
                 >
-                  <Power 
-                    size={14} 
+                  <Power
+                    size={14}
                     style={{
                       animation: startingCameras[camera.id] ? 'btn-spin 1s linear infinite' : 'none',
-                    }} 
+                    }}
                   />
-                  {startingCameras[camera.id] ? 'Starting...' : 'Start'}
                 </button>
               ) : (
                 <button
                   className={`btn btn-secondary${stoppingCameras[camera.id] ? ' btn-stopping' : ''}`}
                   onClick={() => handleStopCamera(camera.id)}
                   disabled={camera.status === 'recording' || stoppingCameras[camera.id]}
-                  style={COMPACT_BUTTON_STYLE}
+                  title="Stop camera"
+                  style={ICON_BTN}
                 >
                   <PowerOff
                     size={14}
@@ -449,7 +306,6 @@ const CameraList = ({ cameras, setCameras }) => {
                       animation: stoppingCameras[camera.id] ? 'btn-spin 1s linear infinite' : 'none',
                     }}
                   />
-                  {stoppingCameras[camera.id] ? 'Stopping...' : 'Stop'}
                 </button>
               )}
 
@@ -458,12 +314,12 @@ const CameraList = ({ cameras, setCameras }) => {
                   className={`btn btn-danger${recordingLoading[camera.id] === 'stopping' ? ' btn-rec-stopping' : ' btn-recording-active'}`}
                   onClick={() => handleStopRecording(camera.id)}
                   disabled={recordingLoading[camera.id] === 'stopping'}
-                  style={COMPACT_BUTTON_STYLE}
+                  title="Stop recording"
+                  style={ICON_BTN}
                 >
                   {recordingLoading[camera.id] === 'stopping'
                     ? <Square size={14} style={{ animation: 'btn-spin 1s linear infinite' }} />
                     : <span className="rec-dot" />}
-                  {recordingLoading[camera.id] === 'stopping' ? 'Stopping...' : 'Stop Rec'}
                 </button>
               ) : (
                 <button
@@ -472,7 +328,7 @@ const CameraList = ({ cameras, setCameras }) => {
                   disabled={camera.status !== 'online' || recordingLoading[camera.id] === 'starting'}
                   title={camera.status !== 'online' ? `Camera must be online to record (current: ${camera.status})` : 'Start recording'}
                   style={{
-                    ...COMPACT_BUTTON_STYLE,
+                    ...ICON_BTN,
                     opacity: camera.status !== 'online' ? 0.92 : 1,
                     filter: 'none',
                     background: camera.status !== 'online' ? '#2f5f37' : undefined,
@@ -486,45 +342,34 @@ const CameraList = ({ cameras, setCameras }) => {
                       animation: recordingLoading[camera.id] === 'starting' ? 'btn-spin 1s linear infinite' : 'none',
                     }}
                   />
-                  {recordingLoading[camera.id] === 'starting' ? 'Starting...' : 'Record'}
                 </button>
               )}
 
               <button
                 className="btn btn-primary"
                 onClick={() => setEditingCamera(camera)}
-                style={COMPACT_BUTTON_STYLE}
+                title="Edit camera settings"
+                style={ICON_BTN}
               >
                 <Edit size={14} />
-                Edit
               </button>
 
-              {camera.camera_type === 'recorded' && (
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => openFileBrowser((path) => {
-                    api.updateCamera(camera.id, { source: path })
-                      .then((res) => {
-                        patchCameraInState(camera.id, { source: path });
-                        toast.success('Source updated to: ' + path);
-                      })
-                      .catch((err) => toast.error('Failed to update source: ' + (err.response?.data?.detail || err.message)));
-                  })}
-                  style={COMPACT_BUTTON_STYLE}
-                  title="Browse for a video file"
-                >
-                  <FolderOpen size={14} />
-                  Browse
-                </button>
-              )}
+              <button
+                className="btn btn-secondary"
+                onClick={() => navigate(`/zones?camera=${camera.id}`)}
+                title="Configure motion zones"
+                style={ICON_BTN}
+              >
+                <MapPin size={14} />
+              </button>
 
               <button
                 className="btn btn-danger"
                 onClick={() => handleDeleteCamera(camera.id)}
-                style={COMPACT_BUTTON_STYLE}
+                title="Delete camera"
+                style={ICON_BTN}
               >
                 <Trash2 size={14} />
-                Delete
               </button>
 
               <label
@@ -545,13 +390,14 @@ const CameraList = ({ cameras, setCameras }) => {
                 {camera.audio_enabled ? <Mic size={14} /> : <MicOff size={14} />}
               </label>
 
-              <CameraAudioPanel camera={camera} disabled={isLiveHlsMode} />
+              <CameraAudioPanel camera={camera} />
             </div>
           </div>
 
+          {!globalCompactMode && (
           <div className="camera-column support-column">
             <div className="camera-frame">
-              <CameraVideoPanel camera={camera} variant="support" liveStreamMode={liveStreamMode} hlsFailedByCamera={hlsFailedByCamera} setHlsFailedByCamera={setHlsFailedByCamera} />
+              <CameraVideoPanel camera={camera} variant="support" />
             </div>
 
             <div className="view-controls-card">
@@ -579,6 +425,7 @@ const CameraList = ({ cameras, setCameras }) => {
               </button>
             </div>
           </div>
+          )}
         </div>
       </div>
     );
@@ -611,34 +458,6 @@ const CameraList = ({ cameras, setCameras }) => {
     });
   };
 
-  const openFileBrowser = async (formSetter) => {
-    setFileBrowserFormSetter(() => formSetter);
-    try {
-      const res = await api.browseFiles(null);
-      setFileBrowserPath(res.data.current);
-      setFileBrowserParent(res.data.parent);
-      setFileBrowserItems(res.data.items);
-      setShowFileBrowser(true);
-    } catch (err) {
-      toast.error('Failed to browse files: ' + (err.response?.data?.detail || err.message));
-    }
-  };
-
-  const navigateFileBrowser = async (dirPath) => {
-    try {
-      const res = await api.browseFiles(dirPath);
-      setFileBrowserPath(res.data.current);
-      setFileBrowserParent(res.data.parent);
-      setFileBrowserItems(res.data.items);
-    } catch (err) {
-      toast.error('Cannot access: ' + (err.response?.data?.detail || err.message));
-    }
-  };
-
-  const selectFile = (filePath) => {
-    if (fileBrowserFormSetter) fileBrowserFormSetter(filePath);
-    setShowFileBrowser(false);
-  };
 
   const handleAddCamera = async (formData) => {
     try {
@@ -770,26 +589,13 @@ const CameraList = ({ cameras, setCameras }) => {
           <h2 className="section-title">Camera List ({cameras.length})</h2>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
             <button
-              className="btn btn-secondary"
-              onClick={handleToggleLiveStreamMode}
-              disabled={isTogglingLiveMode}
-              title="Toggle live stream mode"
+              className={`btn ${globalCompactMode ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setGlobalCompactMode(prev => !prev)}
+              title={globalCompactMode ? 'Show full view with support cameras' : 'Compact grid — hide support views'}
               style={COMPACT_BUTTON_STYLE}
             >
-              {isTogglingLiveMode
-                ? 'Switching...'
-                : `Mode: ${liveStreamMode.toUpperCase()}`}
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={handleToggleRtspUnifiedCapture}
-              disabled={isTogglingRtspUnifiedCapture}
-              title="Enable/disable unified RTSP capture+demux"
-              style={COMPACT_BUTTON_STYLE}
-            >
-              {isTogglingRtspUnifiedCapture
-                ? 'Updating...'
-                : `RTSP Unified: ${rtspUnifiedCaptureEnabled ? 'ON' : 'OFF'}`}
+              <LayoutGrid size={14} />
+              {globalCompactMode ? 'Full View' : 'Compact'}
             </button>
             <button
               className="btn btn-primary"
@@ -802,7 +608,7 @@ const CameraList = ({ cameras, setCameras }) => {
           </div>
         </div>
 
-        <div className="camera-grid">
+        <div className={`camera-grid${globalCompactMode ? ' compact-grid' : ''}`}>
           {cameras.map((camera) => (
             <CameraCard key={camera.id} camera={camera} />
           ))}
@@ -833,7 +639,6 @@ const CameraList = ({ cameras, setCameras }) => {
           initialCamera={newCamera}
           onSubmit={handleAddCamera}
           onClose={() => setShowAddModal(false)}
-          onBrowse={openFileBrowser}
           title="Add New Camera ..."
           submitText="Add Camera"
         />
@@ -845,43 +650,11 @@ const CameraList = ({ cameras, setCameras }) => {
           initialCamera={editingCamera}
           onSubmit={handleUpdateCamera}
           onClose={() => setEditingCamera(null)}
-          onBrowse={openFileBrowser}
           title="Edit Camera"
           submitText="Update Camera"
         />
       )}
 
-      {showFileBrowser && (
-        <div className="modal-overlay" onClick={() => setShowFileBrowser(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '550px', maxHeight: '70vh', display: 'flex', flexDirection: 'column' }}>
-            <h3 style={{ margin: '0 0 8px', fontSize: '14px' }}>Browse Video Files</h3>
-            <div style={{ fontSize: '12px', color: '#888', marginBottom: '8px', wordBreak: 'break-all' }}>{fileBrowserPath}</div>
-            <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #333', borderRadius: '4px' }}>
-              {fileBrowserParent && (
-                <div
-                  style={{ padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid #333', fontSize: '13px' }}
-                  onClick={() => navigateFileBrowser(fileBrowserParent)}
-                >📁 ..</div>
-              )}
-              {fileBrowserItems.map((item) => (
-                <div
-                  key={item.path}
-                  style={{ padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid #222', fontSize: '13px' }}
-                  onClick={() => item.type === 'directory' ? navigateFileBrowser(item.path) : selectFile(item.path)}
-                >
-                  {item.type === 'directory' ? '📁' : '🎬'} {item.name}
-                </div>
-              ))}
-              {fileBrowserItems.length === 0 && (
-                <div style={{ padding: '12px', color: '#666', fontSize: '13px', textAlign: 'center' }}>No video files or folders</div>
-              )}
-            </div>
-            <div style={{ marginTop: '8px', textAlign: 'right' }}>
-              <button className="btn btn-secondary" style={COMPACT_BUTTON_STYLE} onClick={() => setShowFileBrowser(false)}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

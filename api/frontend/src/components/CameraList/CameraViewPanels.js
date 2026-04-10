@@ -16,9 +16,9 @@ const AUDIO_PANEL_STYLE = {
   display: 'inline-flex',
   flexDirection: 'column',
   alignItems: 'stretch',
-  width: '280px',
+  width: '140px',
   flex: '0 0 auto',
-  padding: '4px 8px',
+  padding: '4px 6px',
   border: '1px solid rgba(148,163,184,0.25)',
   borderRadius: '10px',
   background: 'rgba(10,14,20,0.35)',
@@ -42,45 +42,10 @@ const getCameraAspectRatio = (resolution) => {
   return `${width} / ${height}`;
 };
 
-const WsStreamCanvas = ({ cameraId, style }) => {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    const wsUrl = api.getWsStreamUrl(cameraId);
-    if (!wsUrl) return undefined;
-
-    let closed = false;
-    const ws = new WebSocket(wsUrl);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onmessage = (event) => {
-      if (closed || !canvasRef.current) return;
-      const blob = new Blob([event.data], { type: 'image/jpeg' });
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => {
-        if (closed || !canvasRef.current) { URL.revokeObjectURL(url); return; }
-        const canvas = canvasRef.current;
-        canvas.width = img.width;
-        canvas.height = img.height;
-        canvas.getContext('2d').drawImage(img, 0, 0);
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
-    };
-
-    ws.onerror = () => { if (!closed) ws.close(); };
-
-    return () => { closed = true; ws.close(); };
-  }, [cameraId]);
-
-  return <canvas ref={canvasRef} className="camera-stream" style={style} />;
-};
-
-export const CameraAudioPanel = ({ camera, disabled = false }) => {
+export const CameraAudioPanel = ({ camera }) => {
   const audioRef = useRef(null);
   const isOnline = camera.status === 'online' || camera.status === 'recording';
-  const shouldRenderAudio = isOnline && Boolean(camera.audio_enabled) && !disabled;
+  const shouldRenderAudio = isOnline && Boolean(camera.audio_enabled);
   const [audioPlaybackFormat] = useState(AUDIO_STREAM_FORMAT);
   const [activeAudioUrl, setActiveAudioUrl] = useState('');
 
@@ -136,82 +101,8 @@ export const CameraAudioPanel = ({ camera, disabled = false }) => {
   );
 };
 
-export const CameraVideoPanel = ({ camera, variant = 'primary', liveStreamMode, hlsFailedByCamera, setHlsFailedByCamera }) => {
-  const videoRef = useRef(null);
+export const CameraVideoPanel = ({ camera, variant = 'primary' }) => {
   const isOnline = camera.status === 'online' || camera.status === 'recording';
-  const isWsStream = liveStreamMode === 'ws' && variant === 'primary';
-  const isHlsStream = liveStreamMode === 'hls' && variant === 'primary' && !hlsFailedByCamera[camera.id];
-
-  useEffect(() => {
-    if (!isOnline || !isHlsStream || !videoRef.current) {
-      return undefined;
-    }
-
-    let destroyed = false;
-    let hlsInstance = null;
-    const videoEl = videoRef.current;
-    const sourceUrl = api.getCameraVideoStreamUrl(camera.id, 'hls');
-
-    const attachStream = async () => {
-      if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-        videoEl.src = sourceUrl;
-        try { await videoEl.play(); } catch {}
-        return;
-      }
-
-      try {
-        const hlsModule = await import('hls.js');
-        const Hls = hlsModule.default;
-        if (destroyed || !videoRef.current) {
-          return;
-        }
-
-        if (Hls.isSupported()) {
-          hlsInstance = new Hls({
-            lowLatencyMode: true,
-            liveSyncDurationCount: 3,
-          });
-          hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
-            if (data?.fatal) {
-              setHlsFailedByCamera((prev) => ({ ...prev, [camera.id]: true }));
-            }
-          });
-          hlsInstance.loadSource(sourceUrl);
-          hlsInstance.attachMedia(videoRef.current);
-          hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-            if (!destroyed && videoRef.current) {
-              videoRef.current.play().catch(() => {});
-            }
-          });
-        } else {
-          videoRef.current.src = sourceUrl;
-          videoRef.current.play().catch(() => {});
-        }
-      } catch (error) {
-        console.error('Failed to initialize HLS stream:', error);
-        setHlsFailedByCamera((prev) => ({ ...prev, [camera.id]: true }));
-        if (!destroyed && videoRef.current) {
-          videoRef.current.src = sourceUrl;
-        }
-      }
-    };
-
-    attachStream();
-
-    return () => {
-      destroyed = true;
-      if (hlsInstance) {
-        hlsInstance.destroy();
-      }
-      if (videoEl) {
-        try {
-          videoEl.pause();
-          videoEl.removeAttribute('src');
-          videoEl.load();
-        } catch {}
-      }
-    };
-  }, [camera.id, isHlsStream, isOnline]);
 
   const mediaStyle = {
     width: '100%',
@@ -228,25 +119,6 @@ export const CameraVideoPanel = ({ camera, variant = 'primary', liveStreamMode, 
         alt={`Camera ${camera.name}`}
         className="camera-stream"
         style={mediaStyle}
-      />
-    );
-  }
-
-  if (isWsStream) {
-    return <WsStreamCanvas cameraId={camera.id} style={mediaStyle} />;
-  }
-
-  if (isHlsStream) {
-    return (
-      <video
-        ref={videoRef}
-        key={`${camera.id}:${variant}:hls`}
-        className="camera-stream"
-        style={mediaStyle}
-        autoPlay
-        playsInline
-        controls
-        onError={() => setHlsFailedByCamera((prev) => ({ ...prev, [camera.id]: true }))}
       />
     );
   }

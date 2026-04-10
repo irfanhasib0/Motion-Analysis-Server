@@ -7,6 +7,7 @@ before any request is served.
 # Service instances — set by start_server.py at startup
 camera_service = None
 dashboard_service = None
+reid_service = None
 logger = None
 
 # Mutable shared state

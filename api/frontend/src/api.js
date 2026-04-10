@@ -187,12 +187,51 @@ export const api = {
   getAllCamerasStreamHealth: () => apiClient.get('/system/stream-health'),
   getLagHistory: () => apiClient.get('/system/lag-history'),
   getCameraLagHistory: (cameraId) => apiClient.get(`/cameras/${cameraId}/lag-history`),
+  getResourceHistory: () => apiClient.get('/system/resource-history'),
 
   // Archive endpoints
   exportArchive: (filters = {}) => apiClient.post('/recordings/archive/export', filters),
   listArchives: () => apiClient.get('/recordings/archive/list'),
   loadArchive: (archivePath) => apiClient.post('/recordings/archive/load', { archive_path: archivePath }),
   unloadArchive: (archivePath) => apiClient.post('/recordings/archive/unload', { archive_path: archivePath }),
+
+  // ── Person Gallery / ReID ────────────────────────────────────────────────
+  // List all person crops detected on a date or date range (YYYY-MM-DD).
+  getPersonsByDate: (dateFrom, dateTo = null, cameraId = null) => {
+    const params = {};
+    if (dateTo && dateTo !== dateFrom) {
+      params.date_from = dateFrom;
+      params.date_to = dateTo;
+    } else {
+      params.date = dateFrom;
+    }
+    if (cameraId) params.camera_id = cameraId;
+    return apiClient.get('/persons', { params });
+  },
+
+  // Serve a person crop image URL (with auth token baked in).
+  getPersonImageUrl: (recordingId, pid) =>
+    buildUrlWithToken(`/api/persons/${encodeURIComponent(recordingId)}/${pid}/image`),
+
+  // Similarity search: find clips matching a gallery-selected person.
+  searchPersons: (body) => apiClient.post('/persons/search', body, { timeout: 60000 }),
+
+  // Similarity search: upload an external probe photo.
+  searchPersonsByUpload: (file, { date_from, date_to, camera_id, top_k = 20, threshold = 0.55 }) => {
+    const form = new FormData();
+    form.append('file', file);
+    const params = { date_from, date_to, top_k, threshold };
+    if (camera_id) params.camera_id = camera_id;
+    return apiClient.post('/persons/search/upload', form, {
+      params,
+      timeout: 60000,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  // ReID model status (reid_enabled, model_variant).
+  getReidStatus: () => apiClient.get('/persons/status'),
+  // ────────────────────────────────────────────────────────────────────────
 };
 
 export default api;

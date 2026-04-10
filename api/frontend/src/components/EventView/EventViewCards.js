@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import metricConfig from '../metric_config.json';
-import { Camera, Play, ChevronLeft, ChevronRight, Pause, Maximize2, Download, Trash2, Loader } from 'lucide-react';
+import { Cpu, Play, ChevronLeft, ChevronRight, Pause, Maximize2, Download, Trash2, Loader } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { api } from '../../api';
 import {
@@ -360,7 +360,7 @@ const OverlayButton = ({ recording, overlayIds, setOverlayIds, videoRefs }) => {
     <button
       type="button"
       className={`reel-action-btn${isActive ? ' active' : ''}`}
-      title={isGenerating ? `Generating overlay… ${progress}%` : isActive ? 'Disable overlay' : 'Show optical flow overlay'}
+      title={isGenerating ? `Generating overlay… ${progress}%` : isActive ? 'Disable overlay' : 'Predict object/motion with AI'}
       onClick={handleClick}
       disabled={isGenerating}
       style={{
@@ -376,7 +376,7 @@ const OverlayButton = ({ recording, overlayIds, setOverlayIds, videoRefs }) => {
           transition: 'width 0.3s ease',
         }} />
       )}
-      {isGenerating ? <Loader size={12} className="spin-icon" /> : <Camera size={12} />}
+      {isGenerating ? <Loader size={12} className="spin-icon" /> : <Cpu size={12} />}
     </button>
   );
 };
@@ -425,6 +425,20 @@ const ReelCard = ({
   const isPlaying = playingId === recording.id;
   const isHovered = hoveredId === recording.id;
   const shouldLoadVideo = !expandedContext && (isPlaying || isHovered);
+  const [videoLoading, setVideoLoading] = useState(false);
+  const prevShouldLoad = useRef(false);
+
+  // Track when video src is set (loading starts) vs when it becomes playable
+  useEffect(() => {
+    if (shouldLoadVideo && !prevShouldLoad.current && playbackMode === 'play') {
+      setVideoLoading(true);
+    }
+    if (!shouldLoadVideo) {
+      setVideoLoading(false);
+    }
+    prevShouldLoad.current = shouldLoadVideo;
+  }, [shouldLoadVideo, playbackMode]);
+
   const {
     timestampParts,
     durationValue,
@@ -496,20 +510,21 @@ const ReelCard = ({
             onLoadedMetadata={(event) => handleVideoLoadedMetadata(recording.id, event)}
             onTimeUpdate={(event) => handleVideoTimeUpdate(recording.id, event)}
             onLoadedData={() => console.log('Video loaded:', recording.id)}
-            onError={(e) => console.error('Video error:', recording.id, e)}
+            onCanPlay={() => setVideoLoading(false)}
+            onError={(e) => { console.error('Video error:', recording.id, e); setVideoLoading(false); }}
           />
-        )}
-
-        {/* Play/Pause overlay indicators */}
-        {!isPlaying && (
-          <div className="play-overlay">
-            <Play size={48} />
-          </div>
         )}
 
         {isPlaying && (
           <div className="pause-indicator">
             <Pause size={24} />
+          </div>
+        )}
+
+        {videoLoading && playbackMode === 'play' && (
+          <div className="transcode-overlay">
+            <Loader size={22} className="spin-icon" />
+            <span>Converting…</span>
           </div>
         )}
       </div>
@@ -533,9 +548,6 @@ const ReelCard = ({
                 stepFrame(recording, 1);
               }}
             />
-            <div className="reel-progress-right">
-              <TimeFrameBadge timeText={formatPlaybackTime(playbackDuration)} frame={totalFrames} />
-            </div>
           </div>
           <input
             type="range"

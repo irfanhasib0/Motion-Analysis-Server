@@ -17,8 +17,8 @@ import secrets
 import threading
 import time
 
-from services.camera_service import CameraService
-from services.dashboard_service import DashboardService
+from services.streaming.camera_service import CameraService
+from services.system.dashboard_service import DashboardService
 
 
 # =====================================================================
@@ -236,7 +236,7 @@ async def check_camera_status_changes():
                         "type": "camera_status_updated",
                         "camera_id": camera.id,
                         "status": current_status,
-                        "camera": camera.dict()
+                        "camera": camera.model_dump()
                     })
                     logger.info(f"Camera {camera.id} status changed to {current_status}")
                     
@@ -352,10 +352,37 @@ from routes.recordings import router as recordings_router
 from routes.system import router as system_router
 from routes.streaming import router as streaming_router
 
+# ── Zone Control Plugin ───────────────────────────────────────────────────────
+from services.zone_manager.zone_store import init_zone_store
+from services.zone_manager.zone_routes import router as zones_router
+
+_zones_dir = os.path.join(camera_service.root_dir, "configs", "zones")
+init_zone_store(_zones_dir)
+# Make ZoneStore available on the streaming service so the video thread
+# can retrieve and cache zone configs without importing from routes.
+camera_service._zone_store = camera_service.recording_manager._zone_store = \
+    __import__('services.zone_manager.zone_store', fromlist=['get_zone_store']).get_zone_store()
+# ─────────────────────────────────────────────────────────────────────────────
+
 app.include_router(cameras_router)
 app.include_router(recordings_router)
 app.include_router(system_router)
 app.include_router(streaming_router)
+app.include_router(zones_router)
+
+# ── Person Gallery / ReID ─────────────────────────────────────────────────────
+from routes.reid import router as persons_router
+from services.reid.reid_service import ReIDService
+
+_recordings_dir = camera_service.recording_manager.recordings_dir
+_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data')
+deps.reid_service = ReIDService(
+    recordings_dir=_recordings_dir,
+    data_dir=_data_dir,
+    model_variant='osnet_x0_25',
+)
+app.include_router(persons_router)
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Make broadcast_message available to route modules
 deps.broadcast_message = broadcast_message

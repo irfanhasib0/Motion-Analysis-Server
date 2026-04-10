@@ -48,10 +48,6 @@ export const RecordingMetaInfo = ({ durationText, velValue, diffValue, loudnessV
       <span style={{ color: MOTION_COLORS.person || '#8e24aa' }}>{personValue != null ? personValue : 'N/A'}</span>
     </div>
     <div className="meta-item">
-      <Clock size={12} />
-      <span>{durationText}</span>
-    </div>
-    <div className="meta-item">
       <BarChart3 size={12} style={{ color: MOTION_COLORS.bgDiff || '#5c6bc0' }} />
       <span style={{ color: MOTION_COLORS.bgDiff || '#5c6bc0' }}>{diffValue ?? 'N/A'}</span>
     </div>

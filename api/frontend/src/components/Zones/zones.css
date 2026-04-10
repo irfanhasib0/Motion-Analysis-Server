@@ -1,0 +1,391 @@
+/* ============================================================
+ * Zone Control Plugin — shared styles
+ * Scoped under .zone-* classes to avoid polluting global CSS.
+ * ============================================================ */
+
+/* ── Zone Manager panel ──────────────────────────────────── */
+.zone-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+/* ── Zone chip row ───────────────────────────────────────── */
+.zone-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0, 150, 136, 0.12);
+}
+
+.zone-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(0, 100, 80, 0.2);
+  border-radius: 20px;
+  padding: 3px 8px 3px 6px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  color: #374151;
+  transition: background 0.12s, border-color 0.12s;
+  user-select: none;
+}
+.zone-chip:hover { background: rgba(0, 150, 136, 0.08); border-color: rgba(0, 150, 136, 0.4); }
+.zone-chip--active { background: rgba(0, 150, 136, 0.12); border-color: #009688; color: #004d40; font-weight: 600; }
+.zone-chip--new { border-style: dashed; color: #00695c; }
+
+.zone-chip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.zone-chip__name {
+  padding: 0 2px;
+}
+.zone-chip__btn {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: 10px;
+  color: #78909c;
+  line-height: 1;
+  transition: color 0.12s;
+}
+.zone-chip__btn:hover { color: #374151; }
+.zone-chip__btn--del:hover { color: #b91c1c; }
+
+/* ── Camera start/stop button ────────────────────────────── */
+.zone-btn--cam-start {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.45);
+  color: #15803d;
+}
+.zone-btn--cam-start:hover { background: rgba(34, 197, 94, 0.2); }
+.zone-btn--cam-stop {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #b91c1c;
+}
+.zone-btn--cam-stop:hover { background: rgba(239, 68, 68, 0.16); }
+
+.zone-form__field--cam {
+  margin-left: auto;
+}
+
+/* ── (old) Zone Manager panel header ──────────────────────── */
+.zone-manager__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: #004d40;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.zone-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.zone-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(0, 100, 80, 0.15);
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.zone-item:hover { border-color: rgba(0, 100, 80, 0.4); }
+.zone-item.zone-item--selected { border-color: #009688; }
+
+.zone-item__swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.zone-item__name {
+  flex: 1;
+  font-size: 12px;
+  color: #1e293b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zone-item__badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.zone-item__badge--mask {
+  background: rgba(245, 158, 11, 0.15);
+  color: #92400e;
+}
+
+.zone-item__actions {
+  display: flex;
+  gap: 4px;
+}
+
+.zone-btn {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(0, 80, 60, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: #1e3a30;
+  align-self: flex-start;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+}
+.zone-btn:disabled { opacity: 0.35; cursor: default; box-shadow: none; }
+.zone-btn:hover:not(:disabled) {
+  background: rgba(0, 100, 80, 0.12);
+  border-color: rgba(0, 100, 80, 0.5);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+}
+.zone-btn--danger {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(180, 40, 40, 0.3);
+  color: #7f1d1d;
+}
+.zone-btn--danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.55);
+  color: #b91c1c;
+  box-shadow: 0 1px 4px rgba(239,68,68,0.15);
+}
+.zone-btn--primary {
+  background: rgba(0, 150, 136, 0.18);
+  border-color: rgba(0, 150, 136, 0.55);
+  color: #004d40;
+  font-weight: 600;
+}
+.zone-btn--primary:hover:not(:disabled) {
+  background: rgba(0, 150, 136, 0.3);
+  border-color: #009688;
+  box-shadow: 0 1px 5px rgba(0,150,136,0.25);
+}
+
+/* ── Zone Editor overlay container ─────────────────────────── */
+.zone-editor-wrap {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 70%;
+  line-height: 0;
+}
+
+.zone-editor-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.zone-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0 4px;
+}
+
+.zone-editor-hint {
+  font-size: 11px;
+  color: #475569;
+  padding: 4px 0 2px;
+}
+
+/* ── Zone Editor right-side sidebar ────────────────────────── */
+.zone-editor-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 118px;
+  max-width: 128px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.zone-editor-sidebar__section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(0, 100, 80, 0.12);
+}
+.zone-editor-sidebar__section:last-of-type,
+.zone-editor-sidebar__section--actions {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.zone-editor-sidebar__section--actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.zone-editor-sidebar__section--actions .zone-btn {
+  align-self: stretch;
+  text-align: center;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.zone-editor-sidebar__label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-bottom: 2px;
+}
+
+.zone-editor-sidebar__hint {
+  font-size: 10px;
+  color: #64748b;
+  line-height: 1.5;
+  padding-top: 6px;
+}
+
+/* ── Zone form ──────────────────────────────────────────────── */
+.zone-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/* Horizontal bar variant — used in the editor view */
+.zone-form--bar {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 6px 0;
+}
+
+.zone-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.zone-form label {
+  font-size: 11px;
+  color: #546e7a;
+  margin-bottom: 1px;
+}
+
+.zone-form input[type="text"],
+.zone-form select {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(0, 100, 80, 0.2);
+  border-radius: 5px;
+  color: #1e293b;
+  font-size: 12px;
+  padding: 4px 8px;
+  width: auto;
+  box-sizing: border-box;
+}
+
+.zone-form input[type="color"] {
+  width: 32px;
+  height: 26px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 5px;
+  cursor: pointer;
+  background: none;
+  padding: 0;
+}
+
+.zone-form__row {
+  display: flex;
+  gap: 7px;
+  align-items: flex-end;
+}
+
+/* ── Zone filter dropdown ──────────────────────────────────── */
+.zone-filter {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+}
+
+.zone-filter__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 137, 123, 0.3);
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #00695c;
+  user-select: none;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 137, 123, 0.1);
+  transition: all 0.2s ease;
+}
+.zone-filter__trigger:hover { background: #e0f2f1; border-color: #009688; }
+
+.zone-filter__dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 200;
+  background: #ffffff;
+  border: 1px solid rgba(0, 137, 123, 0.25);
+  border-radius: 8px;
+  min-width: 200px;
+  max-height: 280px;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.zone-filter__option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #37474f;
+  transition: background 0.12s;
+}
+.zone-filter__option:hover { background: #e0f2f1; }
+.zone-filter__option--checked .zone-filter__check { opacity: 1; }
+.zone-filter__check { font-size: 10px; opacity: 0.2; color: #009688; width: 14px; }
+
+.zone-filter__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
