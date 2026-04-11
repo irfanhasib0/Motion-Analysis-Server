@@ -76,7 +76,7 @@ const SimpleMotionPlot = ({ recording, MOTION_COLORS }) => {
     };
   }, [motionData]);
 
-  if (loading || motionData.length === 0) {
+  if (loading) {
     return null;
   }
 
@@ -426,15 +426,34 @@ const ReelCard = ({
   const isHovered = hoveredId === recording.id;
   const shouldLoadVideo = !expandedContext && (isPlaying || isHovered);
   const [videoLoading, setVideoLoading] = useState(false);
+  const [thumbError, setThumbError] = useState(false);
+  // videoVisible: true once the first frame is physically painted (onPlaying).
+  // Using state (not ref) so hiding the thumbnail triggers a re-render at the
+  // exact moment the video frame is on screen — removes the black-flash gap.
+  const [videoVisible, setVideoVisible] = useState(false);
   const prevShouldLoad = useRef(false);
+  const hasLoadedRef = useRef(false);
 
-  // Track when video src is set (loading starts) vs when it becomes playable
+  // Cache URLs — these are pure functions of recording.id / overlay flag and don't
+  // change between renders, so memoising avoids function-call overhead on every render.
+  const thumbUrl = useMemo(() => api.getRecordingThumbnailUrl(recording.id), [recording.id]);
+  const streamUrl = useMemo(
+    () => api.getRecordingStreamUrl(recording.id, 'play', !!overlayIds[recording.id]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [recording.id, overlayIds[recording.id]]
+  );
+
+  // Track when video src is set (loading starts) vs when it becomes playable.
+  // Only raise the loading flag on the FIRST load; re-hovers skip spinner.
   useEffect(() => {
-    if (shouldLoadVideo && !prevShouldLoad.current && playbackMode === 'play') {
+    if (shouldLoadVideo && !prevShouldLoad.current && playbackMode === 'play' && !hasLoadedRef.current) {
       setVideoLoading(true);
     }
+    // If cursor leaves: reset both loading and visible so thumbnail shows again
+    // on the next hover (src becomes undefined, browser resets the video element).
     if (!shouldLoadVideo) {
       setVideoLoading(false);
+      setVideoVisible(false);
     }
     prevShouldLoad.current = shouldLoadVideo;
   }, [shouldLoadVideo, playbackMode]);
@@ -497,11 +516,28 @@ const ReelCard = ({
             onError={(e) => console.error('Stream error:', recording.id, e)}
           />
         ) : (
-          <video
+          <>
+            {/* Thumbnail: always in DOM so the switch from thumbnail→video happens
+                in one atomic render (display:none toggle vs unmount/remount).
+                Hiding via display:none is synchronous — no frame where neither is shown. */}
+            {!thumbError && (
+              <img
+                src={thumbUrl}
+                alt=""
+                style={{
+                  position: 'absolute', top: 0, left: 0,
+                  width: '100%', height: '100%',
+                  objectFit: 'contain', zIndex: 4,
+                  pointerEvents: 'none',
+                  display: videoVisible ? 'none' : 'block',
+                }}
+                onError={() => setThumbError(true)}
+              />
+            )}
+            <video
             ref={(el) => (videoRefs.current[recording.id] = el)}
             className="reel-video"
-            src={shouldLoadVideo ? api.getRecordingStreamUrl(recording.id, 'play', !!overlayIds[recording.id]) : undefined}
-            poster={api.getRecordingThumbnailUrl(recording.id)}
+            src={shouldLoadVideo ? streamUrl : undefined}
             muted
             loop
             playsInline
@@ -509,10 +545,12 @@ const ReelCard = ({
             autoPlay={shouldLoadVideo}
             onLoadedMetadata={(event) => handleVideoLoadedMetadata(recording.id, event)}
             onTimeUpdate={(event) => handleVideoTimeUpdate(recording.id, event)}
-            onLoadedData={() => console.log('Video loaded:', recording.id)}
+            onLoadedData={() => setVideoLoading(false)}
             onCanPlay={() => setVideoLoading(false)}
+            onPlaying={() => { hasLoadedRef.current = true; setVideoVisible(true); setVideoLoading(false); }}
             onError={(e) => { console.error('Video error:', recording.id, e); setVideoLoading(false); }}
           />
+          </>
         )}
 
         {isPlaying && (

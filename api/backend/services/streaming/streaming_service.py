@@ -58,7 +58,7 @@ class StreamingService:
         self._latest_audio_chunk_analysis: Dict[str, Dict[str, Any]] = {}
         self._audio_streams: Dict[str, Any] = {}  # camera_id -> audio-only Capture
         self._drawing = StreamDrawingHelper()
-        self.ai_service = AIService()
+        self.ai_service = AIService(shm_ring_size=frame_rbf_len)
     # =====================================================================
     # INITIALIZATION AND CONFIGURATION
     # =====================================================================
@@ -585,6 +585,19 @@ class StreamingService:
                 consecutive_failures = 0
                 max_failures = 10
                 audio_chunk_seq = 0
+
+                # Cache effective_stride — re-read every 30 chunks to pick up config changes.
+                _audio_stride_cache = self.get_camera_effective_stride(camera_id)
+                _audio_stride_counter = 0
+                _AUDIO_STRIDE_REFRESH = 30
+
+                # Pre-allocate the float32 analysis buffer once to avoid a
+                # numpy allocation on every analysis chunk (~50 Hz on audio thread).
+                _db_cam = self.db.get_camera(camera_id) or {}
+                _pcm_n = int(_db_cam.get('audio_chunk_size', 512)) * int(_db_cam.get('audio_channels', 1))
+                _pcm_float = np.empty(_pcm_n, dtype=np.float32)
+                _AUDIO_SCALE = np.float32(25.0 / 32768.0)  # normalise int16 → ±25.0
+                del _db_cam
                 
                 logger.info(f"{Colors.GREEN}Audio stream started for {camera_id}{Colors.RESET}")
                 while not stop_event.is_set() and cap.is_audio_stream_opened():
@@ -602,18 +615,27 @@ class StreamingService:
                     consecutive_failures = 0
                     audio_chunk_seq += 1
                     
-                    # Process audio analysis
-                    samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
-                    samples /= (32768.0/25.0)  # Normalize to -10.0 to +10.0 range for 16-bit audio
-                    
                     self._audio_chunk_index[camera_id] = (self._audio_chunk_index.get(camera_id, 0) + 1) % self.max_sequence_number
                     audio_chunk_index = self._audio_chunk_index[camera_id]
-                    effective_stride = self.get_camera_effective_stride(camera_id)
+
+                    # Refresh stride cache every N chunks
+                    _audio_stride_counter += 1
+                    if _audio_stride_counter >= _AUDIO_STRIDE_REFRESH:
+                        _audio_stride_cache = self.get_camera_effective_stride(camera_id)
+                        _audio_stride_counter = 0
+                    effective_stride = _audio_stride_cache
                     
                     should_run_analysis = (effective_stride == 1 or audio_chunk_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
                     
                     if should_run_analysis and analyzer is not None:
-                        analysis = analyzer.process_chunk(samples)
+                        # np.frombuffer is a zero-copy view of the bytes object (no alloc).
+                        # np.multiply with out= writes directly into the pre-allocated buffer.
+                        raw = np.frombuffer(chunk, dtype='<i2')
+                        n = len(raw)
+                        if n > len(_pcm_float):
+                            _pcm_float = np.empty(n, dtype=np.float32)  # rare resize
+                        np.multiply(raw, _AUDIO_SCALE, out=_pcm_float[:n])
+                        analysis = analyzer.process_chunk(_pcm_float[:n])
                         self._latest_audio_chunk_analysis[camera_id] = analysis
                         self._latest_res_audio[camera_id] = {
                             'int': float(analysis.get('overall_intensity', 0.0) or 0.0),
@@ -627,15 +649,12 @@ class StreamingService:
                     
                     _ = self._update_loop_fps(f"{camera_id}:audio")
 
-                    # Store latest chunk with sequence number (thread-safe)
-                    with audio_lock:
-                        self._latest_audio_chunk[camera_id] = chunk
-                        self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
-                        
-                        # Publish to ring buffer for SPMC consumers with capture timestamp
-                        if camera_id in self._audio_ring_buffers:
-                            self._audio_ring_buffers[camera_id].put_with_timestamp(chunk, audio_capture_time)
-                            
+                    # Dict writes are GIL-protected; ring buffer has its own lock.
+                    # The outer audio_lock is redundant here — removed.
+                    self._latest_audio_chunk[camera_id] = chunk
+                    self._latest_audio_chunk_seq[camera_id] = audio_chunk_seq
+                    if camera_id in self._audio_ring_buffers:
+                        self._audio_ring_buffers[camera_id].put_with_timestamp(chunk, audio_capture_time)
 
                     camera_res = self._latest_res_video.get(camera_id, {})
                     det_ts = camera_res.get('det_ts')
@@ -762,8 +781,16 @@ class StreamingService:
                 max_failures = 100
                 frame_index = 0
                 _last_tracker_result_ts = None  # Track last seen tracker result to avoid double-counting in FPS
+
+                # Cache effective_stride — re-read every 30 frames to pick up config changes
+                # without paying a dict lookup on every iteration.
+                _stride_cache = self.get_camera_effective_stride(camera_id)
+                _stride_counter = 0
+                _STRIDE_REFRESH = 30
                 
                 while not stop_event.is_set() and cap.is_video_stream_opened():
+                    # Narrow lock scope: only protect the capture object and shared state
+                    # dicts. The ring-buffer write is moved outside — it has its own lock.
                     with stream_lock:
                         frame_capture_time = time.time()  # Capture timestamp before read to avoid burst-skew on Pi
                         ret, frame = cap.read_video()
@@ -783,14 +810,20 @@ class StreamingService:
                         self._latest_frames[camera_id] = frame
                         self._latest_frame_seq[camera_id] = (self._latest_frame_seq.get(camera_id, 0) + 1) % self.max_sequence_number
                         frame_index += 1
-                        
-                        # Publish to ring buffer for SPMC consumers with capture timestamp
-                        if camera_id in self._frame_ring_buffers:
-                            self._frame_ring_buffers[camera_id].put_with_timestamp(frame, frame_capture_time)
                     
+                    # Ring buffer has its own internal lock — no need to hold stream_lock
+                    if camera_id in self._frame_ring_buffers:
+                        self._frame_ring_buffers[camera_id].put_with_timestamp(frame, frame_capture_time)
+                    
+                    # Refresh stride cache every N frames
+                    _stride_counter += 1
+                    if _stride_counter >= _STRIDE_REFRESH:
+                        _stride_cache = self.get_camera_effective_stride(camera_id)
+                        _stride_counter = 0
+                    effective_stride = _stride_cache
+
                     # Resize frame for streaming performance
                     stream_frame = self._resize_frame_for_streaming(frame)
-                    effective_stride = self.get_camera_effective_stride(camera_id)
                     
                     # Determine if we should run motion tracking on this frame
                     should_run_tracker = (effective_stride == 1 or frame_index % effective_stride == 0) if effective_stride != int(self.sensitivity_level) else False
@@ -872,12 +905,15 @@ class StreamingService:
                     primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps, person_stats=_person_stats)
                     primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
                     primary_frame = self._draw_zones_overlay(primary_frame, camera_id)
-                    # Encode once — all clients receive pre-encoded JPEG bytes (Q3)
-                    frame_bytes = self.frame_to_bytes(primary_frame)
-                    self._overlay_frame_ring_buffers[camera_id].put_with_timestamp(frame_bytes, frame_capture_time)
-                    # Store for fallback path (thread-safe)
-                    with video_lock:
-                        self._latest_video_frame[camera_id] = frame_bytes
+                    # Encode only when at least one client is connected to the overlay
+                    # stream. Skips ~2-4ms JPEG compression per frame when no viewer.
+                    _overlay_rbf = self._overlay_frame_ring_buffers[camera_id]
+                    if _overlay_rbf.has_consumers():
+                        frame_bytes = self.frame_to_bytes(primary_frame)
+                        _overlay_rbf.put_with_timestamp(frame_bytes, frame_capture_time)
+                        # Store for fallback path (thread-safe)
+                        with video_lock:
+                            self._latest_video_frame[camera_id] = frame_bytes
             except Exception:
                 logger.exception(f"{Colors.RED} Video thread crashed for {camera_id}{Colors.RESET}")
             finally:

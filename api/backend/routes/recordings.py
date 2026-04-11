@@ -195,7 +195,12 @@ async def get_recording_thumbnail(recording_id: str):
         file_path = deps.camera_service.recording_manager.get_recording_path(recording_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    thumb_path = os.path.splitext(file_path)[0] + '.jpg'
+    # New per-clip format: …/rec_id/video.mp4 → …/rec_id/thumbnail.jpg
+    # Legacy flat format: …/cam_id/recording.mp4 → …/cam_id/recording.jpg
+    if os.path.basename(file_path) == 'video.mp4':
+        thumb_path = os.path.join(os.path.dirname(file_path), 'thumbnail.jpg')
+    else:
+        thumb_path = os.path.splitext(file_path)[0] + '.jpg'
     if not os.path.exists(thumb_path):
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     return FileResponse(thumb_path, media_type="image/jpeg")
@@ -247,9 +252,14 @@ async def download_recording(recording_id: str):
 async def get_motion_data(recording_id: str):
     """Get motion analysis data (velocity, bg_diff, loudness) for a recording"""
     try:
-        # Get the recording file path and derive the .txt path
+        # Get the recording file path and derive the metrics .txt path
         file_path = deps.camera_service.get_recording_path(recording_id)
-        motion_file_path = file_path.rsplit('.', 1)[0] + '.txt'
+        # New per-clip directory format: …/rec_id/video.mp4 → …/rec_id/metrics.txt
+        # Legacy flat format: …/cam_id/recording.mp4 → …/cam_id/recording.txt
+        if os.path.basename(file_path) == 'video.mp4':
+            motion_file_path = os.path.join(os.path.dirname(file_path), 'metrics.txt')
+        else:
+            motion_file_path = file_path.rsplit('.', 1)[0] + '.txt'
         
         if not os.path.exists(motion_file_path):
             return {"data": []}

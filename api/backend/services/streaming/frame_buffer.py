@@ -29,7 +29,7 @@ class SPMCRingBuffer:
         self._write_idx = 0
         self._consumer_cursors: Dict[str, int] = {}
         self._consumer_last_timestamps: Dict[str, float] = {}  # Track last read timestamp
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()
         
         # Sequence number for detecting missed data (optional enhancement)
         self._sequence = 0
@@ -198,6 +198,10 @@ class SPMCRingBuffer:
             # to avoid re-scanning the same stale range on the next call.
             self._consumer_cursors[consumer_id] = self._write_idx
             return None
+
+    def has_consumers(self) -> bool:
+        """Return True if at least one consumer is registered."""
+        return bool(self._consumer_cursors)
 
     def get_last_read_time(self, consumer_id: str) -> Optional[float]:
         """Get last read time for consumer (stats-based)"""

@@ -15,6 +15,7 @@ import queue
 import sys
 import time
 from dataclasses import dataclass, field
+from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -31,10 +32,41 @@ logger = logging.getLogger(__name__)
 
 # ─── Data containers (pickle-safe) ──────────────────────────────────────────
 
+# Number of pre-allocated SHM slots per camera.
+# = INPUT_QUEUE_SIZE(2) + 1 being processed + 1 being written = 4 total.
+SHM_RING_SIZE = 4
+
+
+@dataclass
+class TrackerSetup:
+    """Sent once (before the first TrackerInput) when the SHM ring is
+    (re-)allocated.  The worker opens all N slots at startup so no
+    shm_open/mmap syscalls happen on the hot path."""
+    shm_names: list     # length == SHM_RING_SIZE
+    slot_shape: tuple
+    slot_dtype_str: str
+
+
 @dataclass
 class TrackerInput:
-    """Sent from the video thread to the tracker process."""
-    frame: np.ndarray
+    """Metadata envelope sent from the video thread to the tracker subprocess.
+
+    The raw frame lives in a *pre-allocated* fixed SHM ring slot instead of a
+    freshly-created segment.  The worker already has every slot mapped; no
+    shm_open/ftruncate/mmap/unlink occurs on the hot path — only a memcpy and
+    an integer index crossing the queue socket.
+
+    Lifecycle:
+      • On first submit (or frame-size change): produce a TrackerSetup message
+        first, then start sending TrackerInput with slot_index.
+      • Producer writes frame into slots[slot_index % SHM_RING_SIZE] before
+        enqueuing; advances counter only on successful put_nowait.
+      • Worker reads directly from its pre-mapped slot handle; never unlinks.
+      • Slots are unlinked in bulk when the tracker process is stopped.
+    """
+    slot_index: int         # index into the pre-allocated SHM ring
+    shape: tuple            # frame shape e.g. (480, 640, 3)
+    dtype_str: str          # numpy dtype string e.g. '|u1'
     frame_capture_time: float
     frame_index: int
     return_pts: bool = True
@@ -106,6 +138,12 @@ def _tracker_worker(
     tracker = OpticalFlowTracker(**tracker_kwargs)
     logger.info(f"[TrackerProcess] Started with config: {list(tracker_kwargs.keys())}")
 
+    # Pre-mapped SHM ring slots — populated on first TrackerSetup message.
+    # We keep them open for the full process lifetime; no per-frame mmap.
+    shm_slots: list = []          # List[SharedMemory]
+    slot_shape = None
+    slot_dtype = None
+
     while not stop_event.is_set():
         # 1) Apply pending config changes (non-blocking drain)
         try:
@@ -115,7 +153,7 @@ def _tracker_worker(
         except queue.Empty:
             pass
 
-        # 2) Get next frame to process
+        # 2) Get next message
         try:
             msg = input_queue.get(timeout=1.0)
         except queue.Empty:
@@ -124,11 +162,33 @@ def _tracker_worker(
         if msg is None:  # Poison pill
             break
 
+        # ── One-time setup: open all ring slots ──
+        if isinstance(msg, TrackerSetup):
+            for s in shm_slots:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            shm_slots = []
+            try:
+                shm_slots = [SharedMemory(name=n) for n in msg.shm_names]
+                slot_shape = msg.slot_shape
+                slot_dtype = np.dtype(msg.slot_dtype_str)
+                logger.info(f"[TrackerProcess] SHM ring ready: {len(shm_slots)} slots {slot_shape} {slot_dtype}")
+            except Exception:
+                logger.exception("[TrackerProcess] Failed to open SHM ring slots")
+            continue
+
+        # ── Normal frame: read from pre-mapped slot (zero syscalls) ──
         inp: TrackerInput = msg
+        if not shm_slots:
+            logger.warning("[TrackerProcess] Received TrackerInput before TrackerSetup — dropping")
+            continue
         try:
-            detect_output = tracker.detect(inp.frame, return_pts=inp.return_pts)
-            # Strip the visualization frame to avoid pickling ~920KB per frame.
-            # detect_output is (viz_frame, points_dict, flow_pts) — we only need dicts.
+            shm = shm_slots[inp.slot_index]
+            frame = np.ndarray(inp.shape, dtype=np.dtype(inp.dtype_str), buffer=shm.buf)
+            detect_output = tracker.detect(frame, return_pts=inp.return_pts)
+            # Strip the visualization frame — we only need the two dict payloads.
             points_dict, flow_pts = _extract_dicts(detect_output)
             result = TrackerResult(
                 points_dict=points_dict,
@@ -150,7 +210,14 @@ def _tracker_worker(
                     pass  # drop this result if still full
         except Exception:
             logger.exception("[TrackerProcess] detect() failed")
+        # Note: no close/unlink — slots are reused until the process stops.
 
+    # Clean up pre-mapped slots on exit
+    for s in shm_slots:
+        try:
+            s.close()
+        except Exception:
+            pass
     logger.info("[TrackerProcess] Exiting")
 
 
@@ -196,7 +263,11 @@ class AIService:
     OUTPUT_QUEUE_SIZE = 2
     CONFIG_QUEUE_SIZE = 8
 
-    def __init__(self):
+    def __init__(self, shm_ring_size: int = SHM_RING_SIZE):
+        # Number of pre-allocated SHM slots per camera.  Defaults to the
+        # module constant but callers should pass frame_rbf_len from system.yaml
+        # so the ring matches the video ring buffer depth exactly.
+        self._shm_ring_size: int = max(2, shm_ring_size)
         self._use_multiprocess: bool = False
 
         # Per-camera multiprocessing resources
@@ -205,6 +276,11 @@ class AIService:
         self._tracker_output_queues: Dict[str, Any] = {}
         self._tracker_config_queues: Dict[str, Any] = {}
         self._tracker_stop_events: Dict[str, Any] = {}
+
+        # Pre-allocated SHM ring slots (fixed, reused across frames)
+        self._shm_slots: Dict[str, list] = {}           # camera_id -> List[SharedMemory]
+        self._shm_slot_nbytes: Dict[str, int] = {}      # camera_id -> slot size in bytes
+        self._shm_slot_counter: Dict[str, int] = {}     # camera_id -> next write slot
 
         # Per-camera sequential-mode trackers
         self._inline_trackers: Dict[str, Any] = {}
@@ -307,8 +383,33 @@ class AIService:
                 proc.terminate()
                 proc.join(timeout=2)
 
-        # Drain and close queues
-        for q in (input_q, self._tracker_output_queues.pop(camera_id, None),
+        # Drain and close queues.  The input queue may hold TrackerInput items
+        # whose SHM segments must be unlinked — otherwise they leak in /dev/shm.
+        if input_q:
+            try:
+                # Drain queued messages — no per-item SHM cleanup needed since
+                # slots are managed in bulk below.
+                while not input_q.empty():
+                    try:
+                        input_q.get_nowait()
+                    except Exception:
+                        break
+                input_q.close()
+                input_q.join_thread()
+            except Exception:
+                pass
+
+        # Unlink all pre-allocated SHM ring slots for this camera.
+        for _s in self._shm_slots.pop(camera_id, []):
+            try:
+                _s.close()
+                _s.unlink()
+            except Exception:
+                pass
+        self._shm_slot_nbytes.pop(camera_id, None)
+        self._shm_slot_counter.pop(camera_id, None)
+
+        for q in (self._tracker_output_queues.pop(camera_id, None),
                   self._tracker_config_queues.pop(camera_id, None)):
             if q:
                 try:
@@ -353,16 +454,63 @@ class AIService:
         if not input_q:
             return False
 
-        inp = TrackerInput(
-            frame=frame,
-            frame_capture_time=frame_capture_time,
-            frame_index=frame_index,
-        )
+        # (Re-)allocate the fixed SHM ring when first called or if the frame
+        # size changes (e.g. resolution switch).  Only SHM_RING_SIZE segments
+        # are ever created per camera; they are reused across all frames so
+        # shm_open/ftruncate/mmap/unlink are never called on the hot path.
+        nbytes = max(frame.nbytes, 1)
+        if self._shm_slot_nbytes.get(camera_id) != nbytes:
+            # Close and unlink any previous slots.
+            for _s in self._shm_slots.pop(camera_id, []):
+                try:
+                    _s.close()
+                    _s.unlink()
+                except Exception:
+                    pass
+            try:
+                new_slots = [SharedMemory(create=True, size=nbytes) for _ in range(self._shm_ring_size)]
+            except Exception:
+                logger.exception(f"submit_frame: failed to allocate SHM ring for {camera_id}")
+                return False
+            self._shm_slots[camera_id] = new_slots
+            self._shm_slot_nbytes[camera_id] = nbytes
+            self._shm_slot_counter[camera_id] = 0
+            # Inform the worker of the new slot names so it can pre-map them.
+            setup = TrackerSetup(
+                shm_names=[s.name for s in new_slots],
+                slot_shape=frame.shape,
+                slot_dtype_str=frame.dtype.str,
+            )
+            try:
+                input_q.put(setup, timeout=1.0)
+            except Exception:
+                logger.error(f"submit_frame: could not send TrackerSetup for {camera_id}")
+                return False
+
+        # Write the frame into the next ring slot and enqueue only the index.
+        slots = self._shm_slots[camera_id]
+        counter = self._shm_slot_counter[camera_id]
+        slot_idx = counter % self._shm_ring_size
         try:
+            np.ndarray(frame.shape, dtype=frame.dtype, buffer=slots[slot_idx].buf)[:] = frame
+            inp = TrackerInput(
+                slot_index=slot_idx,
+                shape=frame.shape,
+                dtype_str=frame.dtype.str,
+                frame_capture_time=frame_capture_time,
+                frame_index=frame_index,
+            )
             input_q.put_nowait(inp)
+            # Advance counter only on successful enqueue so the same slot is
+            # retried next frame if the queue was temporarily full.
+            self._shm_slot_counter[camera_id] = counter + 1
             return True
         except queue.Full:
-            # Tracker is behind — drop this frame (graceful degradation)
+            # Tracker is behind — drop this frame.  Do NOT advance the counter;
+            # the slot can be overwritten on the next submit attempt.
+            return False
+        except Exception:
+            logger.exception(f"submit_frame error for {camera_id}")
             return False
 
     def poll_result(self, camera_id: str) -> Optional[TrackerResult]:

@@ -709,8 +709,10 @@ class RecordingManager:
                     writer.write_frame_with_timeout(frame)
                     # Write audio chunks to stay in sync with video
                     if audio_enabled and audio_chunks:
-                        combined_audio = b''.join(audio_chunks)
-                        writer.write_audio(combined_audio)
+                        _audio_buf = bytearray()
+                        for _c in audio_chunks:
+                            _audio_buf.extend(_c)
+                        writer.write_audio(bytes(_audio_buf))
                     self._metrics_buffer.setdefault(camera_id, []).append(f"{vel},{bg_diff},{loudness}\n")
 
                 # Rate-limit to camera FPS. Prevents the loop from writing

@@ -246,8 +246,11 @@ class AVWriterV2:
                 return False
             try:
                 self.audio_file.write(audio_chunk)
-                self.audio_file.flush()
                 self.audio_bytes_written += len(audio_chunk)
+                # Flush every ~16 KB (≈1 second of 16 kHz/mono/s16 audio) instead of
+                # on every write, to avoid hammering the SD card on Raspberry Pi.
+                if self.audio_bytes_written % 16384 < len(audio_chunk):
+                    self.audio_file.flush()
                 return True
             except Exception as e:
                 logger.error(f"Error writing audio chunk: {e}")
@@ -487,16 +490,16 @@ class AVWriterV2:
     
     def _finalize_wav_file(self):
         """Update WAV header with actual file sizes."""
-        if not self.audio_file or not hasattr(self, 'audio_bytes_written'):
-            logger.warning("Cannot finalize WAV file: no audio file or bytes counter")
+        if not self.audio_file:
             return
         
-        if self.audio_bytes_written == 0:
+        # Derive data size from file position (reliable: not affected by flush-counter resets)
+        self.audio_file.seek(0, 2)  # seek to end
+        total_file_size = self.audio_file.tell()
+        if total_file_size <= 44:
             logger.warning(f"No audio data written to {self.audio_file_path}")
             return
-        
-        # Calculate final sizes
-        data_size = self.audio_bytes_written
+        data_size = total_file_size - 44  # subtract 44-byte WAV header
         riff_size = data_size + 36  # 44 byte header - 8 byte RIFF header = 36
         
         
@@ -948,7 +951,13 @@ class AVWriterV3:
         if audio_chunk and len(audio_chunk) > 0:
             try:
                 self.audio_file.write(audio_chunk)
-                self.audio_file.flush()  # Ensure data is written immediately
+                # Track bytes for periodic flush; avoid flushing on every chunk
+                # to reduce SD-card write pressure on Raspberry Pi.
+                # Counter is reset at the threshold to stay bounded.
+                self._audio_flush_bytes = getattr(self, '_audio_flush_bytes', 0) + len(audio_chunk)
+                if self._audio_flush_bytes >= 16384:
+                    self.audio_file.flush()
+                    self._audio_flush_bytes = 0
                 return True
             except Exception as e:
                 logger.error(f"Error writing audio chunk for {self.camera_id}: {e}")
