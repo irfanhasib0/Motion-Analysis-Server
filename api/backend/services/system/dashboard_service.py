@@ -1,3 +1,22 @@
+'''
+minotor_streams
+|-- check_camera_health
+    |-- _get_current_lag_stats
+    |-- _ensure_camera_history
+    |-- _get_lag_values **
+    |-- _recover_producer_video
+    |-- _recover_producer_audio
+    |-- _recover_recording
+    |-- _recover_ai_tracker
+    |-- _save_error_log_snapshot
+    |-- _notify_frozen_stream
+|-- _ai_health_check
+    |-- get_tracker_status **
+
+|-- _check_thread_health
+    |-- is_alive (thread) **
+    |-- is_tracker_alive (AI tracker process) **
+'''
 import logging
 import os
 import threading
@@ -41,6 +60,8 @@ class StreamHealthMonitor:
             'recording': self._recover_recording,
             'ai':        self._recover_ai_tracker,
         }
+
+        self._last_ai_check = 0
         
     def monitor_streams(self):
         """Check stream health and trigger recovery if needed."""
@@ -51,15 +72,21 @@ class StreamHealthMonitor:
         self._last_check = now
         
         try:
-            self._check_thread_health()
-            for camera_id in list(self.camera_service._camera_streams.keys()):
+            cameras_cache = getattr(self.camera_service, '_cameras_cache', {})
+            monitored = [
+                camera_id for camera_id, info in cameras_cache.items()
+                if info.get('keep_online', True)
+            ]
+            for camera_id in monitored:
+                self._check_thread_health(camera_id)
                 self._check_camera_health(camera_id)
+                self._ai_health_check(camera_id)
         except Exception as e:
             logger.error(f"Error in stream health monitoring: {e}")
     
     def _check_camera_health(self, camera_id: str):
         """Check health of a specific camera and trigger recovery if needed."""
-        logger.info(f"🔍 Running health check for camera {camera_id}")
+        logger.debug(f"🔍 Running health check for camera {camera_id}")
         current_lag = self._get_current_lag_stats(camera_id)
         history = self._ensure_camera_history(camera_id, current_lag)
 
@@ -124,9 +151,9 @@ class StreamHealthMonitor:
         """Return per-stream lag values for the recovery loop.
         AI liveness is encoded as 0 (alive) or inf (dead)."""
         return {
-            'video':     current_lag.get('producer_video_lag', {}).get(camera_id, 0),
-            'audio':     current_lag.get('producer_audio_lag', {}).get(camera_id, 0),
-            'recording': current_lag.get('recorder_lag', {}).get(camera_id, 0),
+            'video':     current_lag.get('producer_video_lag', {}).get(camera_id, float('inf')),
+            'audio':     current_lag.get('producer_audio_lag', {}).get(camera_id, float('inf')),
+            'recording': current_lag.get('recorder_lag', {}).get(camera_id, float('inf')),
             'ai':        0.0 if self.camera_service.ai_service.is_tracker_alive(camera_id) else float('inf'),
         }
 
@@ -174,9 +201,21 @@ class StreamHealthMonitor:
             'producer_audio_lag', 'audio_stream', 'audio_stream_lag', lag_stats)
         
         # Summary log for high-level lag overview
-        lag_summary = [f"{k}: {v[camera_id]:.3f}s" for k, v in lag_stats.items() if camera_id in v]
-        if lag_summary:
-            logger.info(f"📊 Lag summary for {camera_id}: {', '.join(lag_summary)}")
+        lag_parts = []
+        label_map = {
+            'producer_video_lag': 'vid',
+            'producer_audio_lag': 'aud',
+            'recorder_lag':       'rec',
+            'video_stream_lag':   'vid-stream',
+            'audio_stream_lag':   'aud-stream',
+        }
+        for k, v in lag_stats.items():
+            if camera_id in v:
+                ms = v[camera_id] * 1000
+                flag = ' ⚠' if ms > 500 else ''
+                lag_parts.append(f"{label_map.get(k, k)}={ms:.0f}ms{flag}")
+        if lag_parts:
+            logger.info(f"📊 [{camera_id}] lag  | {' | '.join(lag_parts)}")
   
         return lag_stats
     
@@ -226,6 +265,9 @@ class StreamHealthMonitor:
             'enable_yolox': getattr(cs, 'enable_yolox', False),
             'yolox_model_size': getattr(cs, 'yolox_model_size', 'nano'),
             'yolox_score_thr': getattr(cs, 'yolox_score_thr', 0.5),
+            'enable_pose': getattr(cs, 'enable_pose', False),
+            'pose_model_size': getattr(cs, 'pose_model_size', 'tiny'),
+            'pose_score_thr': getattr(cs, 'pose_score_thr', 0.3),
         }
         cs.ai_service.stop_tracker(camera_id)
         success = cs.ai_service.start_ai_tracker(camera_id, tracker_kwargs)
@@ -258,33 +300,92 @@ class StreamHealthMonitor:
         logger.warning(f"Stream frozen detected: camera {camera_id}, {stream_type} stream, lag: {lag_seconds:.2f}s")
         # Could extend this to send alerts via webhook, email, etc.
         # For now, just log the frozen stream detection
+
+    def _ai_health_check(self, camera_id: str):
+        """Log AI processing health — proc alive, detector enabled/running/latency."""
+        
+        status = self.camera_service.ai_service.get_tracker_status(camera_id)
+
+        alive      = status.get('alive', False)
+        mode       = status.get('mode', '?')
+        latency_ms = status.get('latency_ms') or 0.0
+        age_s      = status.get('result_age_s')
+        detectors  = status.get('detectors', {})
+
+        proc_age = f" age={age_s:.1f}s" if age_s is not None else ''
+        proc_str = f"proc={'OK' if alive else 'DEAD'} mode={mode} {latency_ms:.0f}ms{proc_age}"
+
+        det_parts = []
+        det_icons = {'yolox': '🔍', 'person': '🧍', 'pose': '🦴'}
+
+        for name in ('yolox', 'person', 'pose'):
+            d = detectors.get(name, {})
+            enabled    = d.get('enabled')
+            running    = d.get('running')
+            lat        = d.get('latency_ms')
+            call_s     = d.get('last_call_s')
+            face_en    = d.get('face_enabled')  # person only
+            body_en    = d.get('body_enabled')  # person only
+
+            if enabled is None:
+                det_parts.append(f"{det_icons.get(name)}:{name}=?")
+                continue
+
+            if not enabled:
+                det_parts.append(f"{det_icons.get(name)}:{name}=OFF")
+                continue
+
+            # Per-detector latency available in inline mode; None in multiprocess.
+            if lat is not None:
+                status_str = f"{lat:.0f}ms"
+            elif running:
+                # Multiprocess — show overall proc latency as proxy
+                status_str = f"{latency_ms:.0f}ms"
+            else:
+                status_str = 'STALL'
+
+            if name == 'person':
+                sub = []
+                if face_en:
+                    sub.append('face')
+                if body_en:
+                    sub.append('body')
+                sub_str = f"[{','.join(sub)}]" if sub else ''
+                det_parts.append(f"{det_icons.get(name)}:{name}{sub_str}={status_str}")
+            else:
+                det_parts.append(f"{det_icons.get(name)}:{name}={status_str}")
+
+        logger.info(f"🤖 [{camera_id}] ai | {proc_str} | {' | '.join(det_parts)}")
             
-    def _check_thread_health(self):
+    def _check_thread_health(self, camera_id: str) -> Dict[str, Optional[bool]]:
         """Check if background threads are alive and log alongside lag status."""
         thread_status = {}
         
-        for camera_id in list(self.camera_service._camera_streams.keys()):
-            rec_info = self.camera_service.recording_manager.active_recordings.get(camera_id)
-            threads = {
-                'video': self.camera_service._video_background_threads.get(camera_id),
-                'audio': self.camera_service._audio_background_threads.get(camera_id),
-                'rec': rec_info.get('thread') if rec_info else None,
-            }
-            
-            alive = {name: t.is_alive() if t else None for name, t in threads.items()}
-            thread_status[camera_id] = alive
-            
-            status_parts = [f"{name}={'✅' if ok else '❌'}" for name, ok in alive.items() if ok is not None]
-            if status_parts:
-                logger.info(f"🧵 Thread status for {camera_id}: {', '.join(status_parts)}")
-            
-            dead = [name for name, t in threads.items() if t and not alive[name]]
-            if dead:
-                logger.error(f"⚠️ Dead threads detected for {camera_id}: {', '.join(dead)} — recovery needed")
+        rec_info = self.camera_service.recording_manager.active_recordings.get(camera_id)
+        threads = {
+            'video': self.camera_service._video_background_threads.get(camera_id),
+            'audio': self.camera_service._audio_background_threads.get(camera_id),
+            'rec': rec_info.get('thread') if rec_info else None,
+        }
+        
+        alive = {name: t.is_alive() if t else None for name, t in threads.items()}
+        thread_status[camera_id] = alive
+        
+        ai_alive = self.camera_service.ai_service.is_tracker_alive(camera_id)
+        alive['ai'] = ai_alive
 
-            # Check AI tracker (process in multiprocess mode, inline object in sequential mode)
-            ai_alive = self.camera_service.ai_service.is_tracker_alive(camera_id)
-            logger.info(f"🤖 AI tracker for {camera_id}: {'✅' if ai_alive else '❌ dead'}")
+        icons = {'video': '🎥', 'audio': '🔊', 'rec': '⏺', 'ai': '🤖'}
+        parts = []
+        for name, ok in alive.items():
+            if ok is None:
+                parts.append(f"{icons.get(name, name)}:{name}=--")
+            else:
+                parts.append(f"{icons.get(name, name)}:{name}={'OK' if ok else 'DEAD'}")
+        logger.info(f"🧵 [{camera_id}] threads | {' | '.join(parts)}")
+
+        dead = [name for name, ok in alive.items() if ok is False]
+        if dead:
+            logger.error(f"⚠️  [{camera_id}] DEAD threads: {', '.join(dead)} — recovery needed")
         
         return thread_status
 
@@ -307,6 +408,120 @@ class StreamHealthMonitor:
         if camera_id:
             return {camera_id: list(self._lag_queues.get(camera_id, []))}
         return {cid: list(q) for cid, q in self._lag_queues.items()}
+
+    # ---------------------------------------------------------------
+    # Dashboard public API
+    # ---------------------------------------------------------------
+
+    def get_thread_status(self) -> Dict:
+        """Return thread alive-status for every active camera.
+
+        Returns::
+
+            {
+                'cam-1': {
+                    'video': True,   # video producer thread alive
+                    'audio': True,   # audio producer thread alive
+                    'rec':   False,  # recording thread not started / stopped
+                    'ai':    True,   # AI tracker alive
+                },
+                ...
+            }
+
+        Values are ``True`` (alive), ``False`` (dead/stopped), or ``None``
+        (thread was never started).
+        """
+        result = {}
+        for camera_id in list(self.camera_service._camera_streams.keys()):
+            rec_info = self.camera_service.recording_manager.active_recordings.get(camera_id)
+            rec_thread = rec_info.get('thread') if rec_info else None
+
+            video_t = self.camera_service._video_background_threads.get(camera_id)
+            audio_t = self.camera_service._audio_background_threads.get(camera_id)
+
+            result[camera_id] = {
+                'video': video_t.is_alive() if video_t else None,
+                'audio': audio_t.is_alive() if audio_t else None,
+                'rec':   rec_thread.is_alive() if rec_thread else None,
+                'ai':    self.camera_service.ai_service.is_tracker_alive(camera_id),
+            }
+        return result
+
+    def get_ai_proc_status(self) -> Dict:
+        """Return AI processing status per camera.
+
+        Returns::
+
+            {
+                'cam-1': {
+                    'alive':        True,
+                    'mode':         'inline',
+                    'latency_ms':   12.4,
+                    'result_age_s': 0.3,
+                    'detectors': {
+                        'yolox':  {'enabled': True,  'running': True,  'model_size': 'tiny', 'score_thr': 0.3},
+                        'person': {'enabled': False, 'running': False, 'face_enabled': False, 'body_enabled': False},
+                        'pose':   {'enabled': False, 'running': False, 'model_size': 'tiny', 'score_thr': 0.3},
+                    },
+                },
+                ...
+            }
+        """
+        result = {}
+        for camera_id in list(self.camera_service._camera_streams.keys()):
+            result[camera_id] = self.camera_service.ai_service.get_tracker_status(camera_id)
+        return result
+
+    def get_lag_summary(self) -> Dict:
+        """Return video / audio / AI / recording lags per camera.
+
+        Returns::
+
+            {
+                'cam-1': {
+                    'video_lag_s': 0.12,
+                    'audio_lag_s': 0.08,
+                    'ai_lag_s':    0.0,   # 0.0 alive, inf = dead
+                    'rec_lag_s':   0.25,
+                },
+                ...
+            }
+        """
+        result = {}
+        for camera_id in list(self.camera_service._camera_streams.keys()):
+            lag = self._get_current_lag_stats(camera_id)
+            ai_alive = self.camera_service.ai_service.is_tracker_alive(camera_id)
+            result[camera_id] = {
+                'video_lag_s': round(lag.get('producer_video_lag', {}).get(camera_id, 0.0), 3),
+                'audio_lag_s': round(lag.get('producer_audio_lag', {}).get(camera_id, 0.0), 3),
+                'ai_lag_s':    0.0 if ai_alive else float('inf'),
+                'rec_lag_s':   round(lag.get('recorder_lag', {}).get(camera_id, 0.0), 3),
+            }
+        return result
+
+    def get_camera_dashboard(self, camera_id: str = None) -> Dict:
+        """Aggregate thread, AI, and lag status into a single dict.
+
+        If *camera_id* is given, returns the sub-dict for that camera only.
+        Otherwise returns a dict keyed by camera_id with all three sections.
+        """
+        threads = self.get_thread_status()
+        ai_proc = self.get_ai_proc_status()
+        lags    = self.get_lag_summary()
+
+        all_ids = set(threads) | set(ai_proc) | set(lags)
+        combined = {
+            cid: {
+                'threads': threads.get(cid, {}),
+                'ai_proc': ai_proc.get(cid, {}),
+                'lags':    lags.get(cid, {}),
+            }
+            for cid in all_ids
+        }
+
+        if camera_id is not None:
+            return combined.get(camera_id, {})
+        return combined
 
 
 class DashboardService:

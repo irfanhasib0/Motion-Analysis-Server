@@ -15,6 +15,7 @@ Usage:
     detections = detector.detect(frame_bgr)
 """
 import os
+import time
 import numpy as np
 import cv2
 
@@ -145,6 +146,8 @@ class YOLOXDetector:
         self.session = onnxruntime.InferenceSession(model_path)
         self.input_name = self.session.get_inputs()[0].name
         self.enabled = True
+        self._last_latency_ms: float | None = None
+        self._last_call_time:  float | None = None
         print(f"YOLOX-{model_size} loaded from {model_path} "
                 f"(input={self.input_shape}, classes={self.target_class_ids})")
         
@@ -159,6 +162,8 @@ class YOLOXDetector:
         if not self.enabled or self.session is None:
             return []
 
+        t0 = time.monotonic()
+        
         img, ratio = _preproc(frame_bgr, self.input_shape)
         ort_inputs = {self.input_name: img[None, :, :, :]}
         output = self.session.run(None, ort_inputs)
@@ -211,6 +216,10 @@ class YOLOXDetector:
                 'score': round(float(final_scores[i]), 4),
             })
 
+        
+        
+        self._last_latency_ms = (time.monotonic() - t0) * 1000
+        self._last_call_time  = time.time()
         return detections
 
     # --- Runtime configuration ---
@@ -231,10 +240,13 @@ class YOLOXDetector:
         self.score_thr = thr
 
     def get_status(self):
+        last_call_s = round(time.time() - self._last_call_time, 1) if self._last_call_time else None
         return {
             'enabled': self.enabled,
             'model_size': self.model_size,
             'input_shape': self.input_shape,
             'score_thr': self.score_thr,
             'target_class_ids': list(self.target_class_ids),
+            'latency_ms': self._last_latency_ms,
+            'last_call_s': last_call_s,
         }

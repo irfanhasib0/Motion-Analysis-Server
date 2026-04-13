@@ -167,14 +167,6 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick, allZones = 
     );
   };
 
-  if (!dayList.length) {
-    return (
-      <div style={{ padding: 16, color: '#78909c', textAlign: 'center', fontSize: 13 }}>
-        No recordings with metadata available for chart.
-      </div>
-    );
-  }
-
   return (
     <div>
       {/* Camera select + Metric checkboxes */}
@@ -216,6 +208,15 @@ const MotionActivityChart = ({ recordings, cameras = [], onDayClick, allZones = 
           </label>
         ))}
       </div>
+
+      {/* Empty state when no data matches current filters */}
+      {!dayList.length && (
+        <div style={{ padding: 16, color: '#78909c', textAlign: 'center', fontSize: 13 }}>
+          {selectedZones.size > 0
+            ? 'No recordings found for the selected zone(s).'
+            : 'No recordings with metadata available for chart.'}
+        </div>
+      )}
 
       {/* One chart per active metric */}
       {METRICS.filter(m => activeMetrics[m.key]).map(metric => {

@@ -424,6 +424,7 @@ class StreamingService:
             self._active_mask_cache[camera_id] = build_active_mask(mask_zones, frame_h, frame_w)
             self._active_zones_cache[camera_id] = active_zones
             self._zone_cache_valid[camera_id] = True
+            logger.info(f"[Zone] Loaded {len(active_zones)} active zone(s) for {camera_id}")
         except Exception:
             logger.exception(f"[Zone] Failed to refresh zone cache for {camera_id}")
             self._active_mask_cache[camera_id] = None
@@ -454,10 +455,18 @@ class StreamingService:
             from services.zone_manager.zone_processor import aggregate_zone_hits, classify_detections
             active_zones = self._get_active_zones(camera_id, frame_h, frame_w)
             if not active_zones:
+                logger.debug(f"[Zone] {camera_id}: no active zones (zone_store={'set' if self._zone_store else 'None'}, cache_valid={self._zone_cache_valid.get(camera_id)})")
+                return []
+            if not flow_pts:
+                logger.debug(f"[Zone] {camera_id}: flow_pts empty, {len(active_zones)} active zones configured")
                 return []
             per_obj = classify_detections(flow_pts, active_zones, frame_w, frame_h)
-            return aggregate_zone_hits(per_obj)
+            hits = aggregate_zone_hits(per_obj)
+            if hits:
+                logger.debug(f"[Zone] {camera_id}: zone_hits={hits}")
+            return hits
         except Exception:
+            logger.exception(f"[Zone] {camera_id}: exception in _classify_zone_hits")
             return []
 
     def _draw_zones_overlay(self, frame: np.ndarray, camera_id: str) -> np.ndarray:
@@ -756,6 +765,9 @@ class StreamingService:
             'enable_yolox': getattr(self, 'enable_yolox', False),
             'yolox_model_size': getattr(self, 'yolox_model_size', 'nano'),
             'yolox_score_thr': getattr(self, 'yolox_score_thr', 0.5),
+            'enable_pose': getattr(self, 'enable_pose', False),
+            'pose_model_size': getattr(self, 'pose_model_size', 'tiny'),
+            'pose_score_thr': getattr(self, 'pose_score_thr', 0.3),
         }
         if not self.ai_service.start_ai_tracker(camera_id, tracker_kwargs):
             logger.warning(f"{Colors.RED}Failed to start tracker for {camera_id}{Colors.RESET}")
@@ -875,7 +887,11 @@ class StreamingService:
 
                         # ── Zone hit classification ────────────────────────────────────
                         _h, _w = stream_frame.shape[:2]
-                        res['zone_hits'] = self._classify_zone_hits(camera_id, flow_pts, _w, _h)
+                        # Fall back to last known tracked objects when this frame has none
+                        # (bg_diff/vel can be non-zero from trajectory memory even when
+                        # MOG2 produces no contours, so flow_pts may be empty)
+                        _zone_flow_pts = flow_pts if flow_pts else self._latest_pts_payload.get(camera_id) or {}
+                        res['zone_hits'] = self._classify_zone_hits(camera_id, _zone_flow_pts, _w, _h)
                         
                         with stream_lock:
                             self._latest_viz[camera_id] = viz_frame

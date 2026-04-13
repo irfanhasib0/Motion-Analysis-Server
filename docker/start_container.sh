@@ -32,7 +32,7 @@ docker run -d --rm --gpus all \
     -p 3001:3001 \
     -p 8001:8001 \
     -p 9001:9001 \
-    -w "$WORKSPACE_DIR/api/backend" \
+    -w "$WORKSPACE_DIR" \
     --name "$CONTAINER_NAME" "$IMAGE_NAME" \
     bash -c "jupyter lab --allow-root --ip=0.0.0.0 --port=8001 --LabApp.token='' --notebook-dir='$WORKSPACE_DIR'"
 

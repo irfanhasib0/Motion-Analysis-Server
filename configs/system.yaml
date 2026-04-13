@@ -23,6 +23,9 @@ system:
       enable_yolox: true
       yolox_model_size: tiny
       yolox_score_thr: 0.3
+      enable_pose: true
+      pose_model_size: tiny
+      pose_score_thr: 0.05
       tracker_multiprocess: true
     low_power:
       live_stream_mode: ws
@@ -44,6 +47,9 @@ system:
       enable_yolox: false
       yolox_model_size: nano
       yolox_score_thr: 0.5
+      enable_pose: false
+      pose_model_size: tiny
+      pose_score_thr: 0.3
       tracker_multiprocess: false
     custom:
       live_stream_mode: ws
@@ -65,4 +71,7 @@ system:
       enable_yolox: true
       yolox_model_size: tiny
       yolox_score_thr: 0.3
+      enable_pose: false
+      pose_model_size: tiny
+      pose_score_thr: 0.3
       tracker_multiprocess: false

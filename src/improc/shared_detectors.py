@@ -1,11 +1,15 @@
 """Process-scoped singleton factory for shared ML detector instances.
 
-Each process gets at most one YOLOXDetector and one PersonDetector.
-ONNX InferenceSession is thread-safe for inference, and Haar cascades
-are read-only after load, so sharing across threads is safe.
+Each process gets at most one YOLOXDetector, one PersonDetector, and one
+RTMPoseDetector.  ONNX InferenceSession is thread-safe for inference, and
+Haar cascades are read-only after load, so sharing across threads is safe.
 
 Usage:
-    from improc.shared_detectors import get_shared_yolox, get_shared_person_detector
+    from improc.shared_detectors import (
+        get_shared_yolox,
+        get_shared_person_detector,
+        get_shared_rtmpose,
+    )
 
     tracker = OpticalFlowTracker(
         yolox_detector=get_shared_yolox(),
@@ -19,6 +23,7 @@ import threading
 _lock = threading.Lock()
 _yolox_instance = None
 _person_instance = None
+_rtmpose_instance = None
 
 # data/ lives at project root (CWD-relative for portability)
 _DATA_DIR = os.path.join('.', 'data')
@@ -46,3 +51,19 @@ def get_shared_person_detector(**kwargs):
                 kwargs.setdefault('data_dir', _DATA_DIR)
                 _person_instance = PersonDetector(**kwargs)
     return _person_instance
+
+
+def get_shared_rtmpose(**kwargs):
+    """Return the process-scoped RTMPoseDetector singleton, creating it on first call.
+
+    Keyword args are forwarded to RTMPoseDetector on first construction only.
+    Subsequent calls ignore kwargs and return the existing instance.
+    """
+    global _rtmpose_instance
+    if _rtmpose_instance is None:
+        with _lock:
+            if _rtmpose_instance is None:
+                from improc.rtmpose_detector import RTMPoseDetector
+                kwargs.setdefault('data_dir', _DATA_DIR)
+                _rtmpose_instance = RTMPoseDetector(**kwargs)
+    return _rtmpose_instance

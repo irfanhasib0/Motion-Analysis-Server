@@ -37,6 +37,7 @@ class CameraBase(BaseModel):
     audio_input_format: Optional[str] = None
     audio_sample_rate: Optional[int] = 16000
     audio_chunk_size: Optional[int] = 512
+    keep_online: bool = True
 
 class CameraCreate(CameraBase):
     pass
@@ -55,6 +56,7 @@ class CameraUpdate(CameraBase):
     audio_input_format: Optional[str] = None
     audio_sample_rate: Optional[int] = None
     audio_chunk_size: Optional[int] = None
+    keep_online: Optional[bool] = None
 
 class Camera(CameraBase):
     id: str

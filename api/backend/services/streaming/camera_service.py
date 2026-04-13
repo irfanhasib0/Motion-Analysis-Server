@@ -596,6 +596,9 @@ class CameraService(StreamingService):
         self.enable_yolox = bool(_sys.get('enable_yolox', False))
         self.yolox_model_size = str(_sys.get('yolox_model_size', 'nano'))
         self.yolox_score_thr = float(_sys.get('yolox_score_thr', 0.5))
+        self.enable_pose = bool(_sys.get('enable_pose', False))
+        self.pose_model_size = str(_sys.get('pose_model_size', 'tiny'))
+        self.pose_score_thr = float(_sys.get('pose_score_thr', 0.3))
         self.ai_service.set_multiprocess(bool(_sys.get('tracker_multiprocess', False)))
         
         # Store ring buffer settings for runtime updates
@@ -629,6 +632,12 @@ class CameraService(StreamingService):
         )
         self.active_recordings = self.recording_manager.active_recordings
         self._load_existing_recordings()
+
+        # Camera registry: camera_id -> {'keep_online': bool}
+        self._cameras_cache: Dict[str, dict] = {
+            cam['id']: {'keep_online': bool(cam.get('keep_online', True))}
+            for cam in self.db.get_all_cameras()
+        }
 
     # ── Wrapper methods for config_manager (settings flow) ──────────────
 
@@ -815,6 +824,7 @@ class CameraService(StreamingService):
             audio_input_format=db_camera.get('audio_input_format'),
             audio_sample_rate=int(db_camera.get('audio_sample_rate', 16000) or 16000),
             audio_chunk_size=int(db_camera.get('audio_chunk_size', 512) or 512),
+            keep_online=bool(db_camera.get('keep_online', True)),
         )
 
     def get_cameras(self) -> List[Camera]:
@@ -839,6 +849,7 @@ class CameraService(StreamingService):
             'audio_input_format': camera_data.audio_input_format,
             'audio_sample_rate': int(camera_data.audio_sample_rate or 16000),
             'audio_chunk_size': int(camera_data.audio_chunk_size or 512),
+            'keep_online': bool(getattr(camera_data, 'keep_online', True)),
         }
         
         # Store in database
@@ -846,6 +857,7 @@ class CameraService(StreamingService):
         
         # Convert to Camera model
         camera = self._db_to_camera(db_camera)
+        self._cameras_cache[camera.id] = {'keep_online': camera.keep_online}
         
         logger.info(f"Added camera: {camera.name} ({camera_id})")
         return camera
@@ -888,6 +900,8 @@ class CameraService(StreamingService):
             update_dict['audio_sample_rate'] = int(update_data['audio_sample_rate'])
         if 'audio_chunk_size' in update_data and update_data['audio_chunk_size'] is not None:
             update_dict['audio_chunk_size'] = int(update_data['audio_chunk_size'])
+        if 'keep_online' in update_data:
+            update_dict['keep_online'] = bool(update_data['keep_online'])
         
         ## Validate source if updated
         #if 'source' in update_dict:
@@ -899,6 +913,7 @@ class CameraService(StreamingService):
             updated_camera = self.db.update_camera(camera_id, update_dict)
             if updated_camera:
                 camera = self._db_to_camera(updated_camera)
+                self._cameras_cache[camera_id] = {'keep_online': camera.keep_online}
                 
                 logger.info(f"Updated camera: {camera.name} ({camera_id})")
                 return camera

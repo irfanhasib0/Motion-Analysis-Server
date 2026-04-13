@@ -285,8 +285,16 @@ class AIService:
         # Per-camera sequential-mode trackers
         self._inline_trackers: Dict[str, Any] = {}
 
+        # Tracker kwargs cached for multiprocess mode introspection
+        self._tracker_kwargs: Dict[str, dict] = {}
+
         # Latest result cache (video thread reads this)
         self._latest_tracker_result: Dict[str, Optional[TrackerResult]] = {}
+
+        # Latency tracking: wall-clock timestamps of last submit and last result
+        self._last_submit_time: Dict[str, float] = {}   # camera_id -> time.time()
+        self._last_result_time: Dict[str, float] = {}   # camera_id -> time.time()
+        self._last_ai_latency:  Dict[str, float] = {}   # camera_id -> seconds
 
     # ── configuration ────────────────────────────────────────────────────
 
@@ -304,6 +312,7 @@ class AIService:
         """Ensure a tracker is running for *camera_id* (multiprocess or sequential)."""
         if self.is_tracker_alive(camera_id):
             return True
+        self._tracker_kwargs[camera_id] = tracker_kwargs
         if self._use_multiprocess:
             return self._start_tracker_process(camera_id, tracker_kwargs)
         return self._start_inline_tracker(camera_id, tracker_kwargs)
@@ -313,11 +322,19 @@ class AIService:
         self._stop_tracker_process(camera_id)
         self._inline_trackers.pop(camera_id, None)
         self._latest_tracker_result.pop(camera_id, None)
+        self._tracker_kwargs.pop(camera_id, None)
 
     def is_tracker_alive(self, camera_id: str) -> bool:
         """Check if a tracker is active for *camera_id* (either mode)."""
         if camera_id in self._inline_trackers:
-            return True
+            # Inline trackers are plain objects — they never crash.  The real
+            # liveness signal is whether the video thread is still calling
+            # submit_frame().  _last_result_time is stamped on every successful
+            # detect() call; if it's stale (> 60 s) the video thread has stopped.
+            last = self._last_result_time.get(camera_id)
+            if last is None:
+                return True  # just started, no frame submitted yet
+            return (time.time() - last) < 60.0
         proc = self._tracker_processes.get(camera_id)
         return proc is not None and proc.is_alive()
 
@@ -436,7 +453,10 @@ class AIService:
         inline_tracker = self._inline_trackers.get(camera_id)
         if inline_tracker is not None:
             try:
+                t0 = time.monotonic()
                 raw = inline_tracker.detect(frame, return_pts=True)
+                self._last_ai_latency[camera_id] = time.monotonic() - t0
+                self._last_result_time[camera_id] = time.time()
                 points_dict, flow_pts = _extract_dicts(raw)
                 self._latest_tracker_result[camera_id] = TrackerResult(
                     points_dict=points_dict,
@@ -504,6 +524,7 @@ class AIService:
             # Advance counter only on successful enqueue so the same slot is
             # retried next frame if the queue was temporarily full.
             self._shm_slot_counter[camera_id] = counter + 1
+            self._last_submit_time[camera_id] = time.time()
             return True
         except queue.Full:
             # Tracker is behind — drop this frame.  Do NOT advance the counter;
@@ -538,6 +559,11 @@ class AIService:
 
         if latest is not None:
             self._latest_tracker_result[camera_id] = latest
+            now = time.time()
+            self._last_result_time[camera_id] = now
+            submit_t = self._last_submit_time.get(camera_id)
+            if submit_t:
+                self._last_ai_latency[camera_id] = now - submit_t
             return latest
 
         # Queue was empty — no new result this poll cycle.
@@ -548,6 +574,106 @@ class AIService:
     def get_cached_result(self, camera_id: str) -> Optional[TrackerResult]:
         """Return the last polled result without touching the queue."""
         return self._latest_tracker_result.get(camera_id)
+
+    def get_tracker_status(self, camera_id: str) -> Dict[str, Any]:
+        """Return AI proc status for *camera_id* suitable for the dashboard.
+
+        Works in both sequential and multiprocess modes.  Detector-level
+        enable/latency info is only available in inline (sequential) mode;
+        multiprocess mode returns config-level enable flags.
+        """
+        now = time.time()
+        alive = self.is_tracker_alive(camera_id)
+        last_result = self._last_result_time.get(camera_id)
+        ai_latency  = round(self._last_ai_latency.get(camera_id, 0.0) * 1000, 1)  # ms
+        # How long ago did we get a result?  None if never.
+        result_age  = round(now - last_result, 2) if last_result else None
+
+        detectors: Dict[str, Any] = {}
+        tracker = self._inline_trackers.get(camera_id)
+        # A detector is considered "running" if it's enabled and was called
+        # recently (within the last 30 s — more than one monitoring cycle).
+        _RUNNING_THRESHOLD_S = 30.0
+
+        def _is_running(enabled: bool, last_call_s) -> bool:
+            return bool(enabled and last_call_s is not None and last_call_s < _RUNNING_THRESHOLD_S)
+
+        if tracker is not None:
+            # ── YOLOX ──
+            ys = tracker.get_yolox_status() if hasattr(tracker, 'get_yolox_status') else {}
+            detectors['yolox'] = {
+                'enabled':    ys.get('enabled', False),
+                'running':    _is_running(ys.get('enabled', False), ys.get('last_call_s')),
+                'model_size': ys.get('model_size', ''),
+                'score_thr':  ys.get('score_thr', 0.0),
+                'latency_ms': ys.get('latency_ms'),
+                'last_call_s': ys.get('last_call_s'),
+            }
+            # ── Person / Face detector ──
+            ps = tracker.get_person_detection_status() if hasattr(tracker, 'get_person_detection_status') else {}
+            detectors['person'] = {
+                'enabled':      ps.get('enabled', False),
+                'running':      _is_running(ps.get('enabled', False), ps.get('last_call_s')),
+                'face_enabled': ps.get('face', False),
+                'body_enabled': ps.get('body', False),
+                'latency_ms':   ps.get('latency_ms'),
+                'last_call_s':  ps.get('last_call_s'),
+            }
+            # ── RTMPose ──
+            pose_s = tracker.get_pose_status() if hasattr(tracker, 'get_pose_status') else {}
+            detectors['pose'] = {
+                'enabled':    pose_s.get('enabled', False),
+                'running':    _is_running(pose_s.get('enabled', False), pose_s.get('last_call_s')),
+                'model_size': pose_s.get('model_size', ''),
+                'score_thr':  pose_s.get('score_thr', 0.0),
+                'latency_ms': pose_s.get('latency_ms'),
+                'last_call_s': pose_s.get('last_call_s'),
+            }
+        else:
+            # Multiprocess mode — subprocess is opaque; derive enabled from the
+            # kwargs used to start the tracker, and running from process liveness
+            # + whether a result arrived recently.
+            kw = self._tracker_kwargs.get(camera_id, {})
+            _RUNNING_THRESHOLD_S = 30.0
+            recently_ran = (last_result is not None and
+                            (now - last_result) < _RUNNING_THRESHOLD_S)
+
+            yolox_en  = bool(kw.get('enable_yolox', False))
+            person_en = bool(kw.get('enable_person_detection', False))
+            pose_en   = bool(kw.get('enable_pose', False))
+
+            detectors['yolox'] = {
+                'enabled':    yolox_en,
+                'running':    yolox_en and alive and recently_ran,
+                'model_size': kw.get('yolox_model_size', ''),
+                'score_thr':  kw.get('yolox_score_thr', 0.0),
+                'latency_ms': None,
+                'last_call_s': None,
+            }
+            detectors['person'] = {
+                'enabled':      person_en,
+                'running':      person_en and alive and recently_ran,
+                'face_enabled': None,   # not determinable from multiprocess
+                'body_enabled': None,
+                'latency_ms':   None,
+                'last_call_s':  None,
+            }
+            detectors['pose'] = {
+                'enabled':    pose_en,
+                'running':    pose_en and alive and recently_ran,
+                'model_size': kw.get('pose_model_size', ''),
+                'score_thr':  kw.get('pose_score_thr', 0.0),
+                'latency_ms': None,
+                'last_call_s': None,
+            }
+
+        return {
+            'alive':       alive,
+            'mode':        'multiprocess' if self._use_multiprocess else 'inline',
+            'latency_ms':  ai_latency,
+            'result_age_s': result_age,
+            'detectors':   detectors,
+        }
 
     # ── config updates (called from API route / camera_service) ──────────
 

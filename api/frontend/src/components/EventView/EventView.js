@@ -61,20 +61,20 @@ const EventView = ({ recordings = [], cameras = [] }) => {
   const [selectedZones, setSelectedZones] = useState(new Set());
 
   useEffect(() => {
+    const camsById = {};
+    (Array.isArray(cameras) ? cameras : []).forEach((c) => { camsById[c.id] = c; });
     zonesApi.getZonesSummary()
       .then(({ data }) => {
         const flat = [];
-        const cameras_by_id = {};
-        validCameras.forEach((c) => { cameras_by_id[c.id] = c; });
         Object.entries(data).forEach(([cam_id, cfg]) => {
-          const cam = cameras_by_id[cam_id];
+          const cam = camsById[cam_id];
           (cfg.zones || [])
             .filter((z) => z.zone_type === 'active_zone' && z.enabled)
             .forEach((z) => flat.push({ ...z, camera_id: cam_id, camera_name: cam?.name || cam_id }));
         });
         setAllZones(flat);
       })
-      .catch(() => {});
+      .catch((err) => console.warn('[EventView] Failed to load zones for filter:', err));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras]);
   // ─────────────────────────────────────────────────────────────────────────
@@ -788,8 +788,20 @@ const EventView = ({ recordings = [], cameras = [] }) => {
 
 
   // ===== Main UI render logic =====
-  // Early return for empty state
-  if (completedRecordings.length === 0) {
+  // Early return for empty state — only when there are truly no completed recordings
+  // (ignoring zone filter, which has its own inline empty state inside the rows)
+  const completedRecordingsNoZoneFilter = validRecordings.filter(
+    (recording) => {
+      if ((recording?.status || '').toLowerCase() !== 'completed') return false;
+      if (removedRecordingIds[recording.id]) return false;
+      if (showLabeledOnly) {
+        const lbl = labelMap[recording.id]?.label || (recording.metadata?.label);
+        if (!lbl) return false;
+      }
+      return true;
+    }
+  );
+  if (completedRecordingsNoZoneFilter.length === 0) {
     return (
       <div className="reels-container">
         <div className="empty-reels-state">
@@ -815,7 +827,11 @@ const EventView = ({ recordings = [], cameras = [] }) => {
             <option value="play">File Playback</option>
             <option value="stream">Legacy Stream (Video only)</option>
           </select>
-          <span className="recordings-count">{completedRecordings.length} videos</span>
+          <span className="recordings-count">
+            {selectedZones.size > 0
+              ? `${completedRecordings.length} / ${completedRecordingsNoZoneFilter.length} videos`
+              : `${completedRecordings.length} videos`}
+          </span>
           <span className="page-indicator">{cameraRows.length} camera rows</span>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 13, userSelect: 'none', color: showLabeledOnly ? '#c62828' : undefined }}>
             <input type="checkbox" checked={showLabeledOnly} onChange={(e) => setShowLabeledOnly(e.target.checked)} style={{ accentColor: '#c62828', cursor: 'pointer' }} />
@@ -833,6 +849,25 @@ const EventView = ({ recordings = [], cameras = [] }) => {
       </div>
 
       <div className="camera-rows">
+        {/* Zone filter empty state */}
+        {selectedZones.size > 0 && cameraRows.length === 0 && (
+          <div style={{ padding: '32px 0', textAlign: 'center', color: '#78909c', fontSize: 13 }}>
+            No recordings found in the selected zone(s).
+            {completedRecordingsNoZoneFilter.length > 0 && (
+              <div style={{ marginTop: 6, fontSize: 12, color: '#90a4ae' }}>
+                {completedRecordingsNoZoneFilter.length} recording(s) exist but don&apos;t have zone tracking data
+                (recorded before zone tracking was configured).
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setSelectedZones(new Set())}
+              style={{ marginTop: 10, display: 'inline-block', padding: '3px 10px', fontSize: 12, borderRadius: 4, border: '1px solid #009688', background: 'transparent', color: '#009688', cursor: 'pointer' }}
+            >
+              Clear zone filter
+            </button>
+          </div>
+        )}
         {/* === Camera Row Rendering === 
             Each row contains chart + video carousel for one camera */}
         {cameraRows.map((row) => {

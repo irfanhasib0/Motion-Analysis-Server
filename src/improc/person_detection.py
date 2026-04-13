@@ -15,6 +15,7 @@ Example Usage:
     boxes = detector.detect(frame)
 """
 import os
+import time
 import cv2
 import numpy as np
 
@@ -82,6 +83,9 @@ class PersonDetector:
             except Exception as e:
                 print(f"Warning: Could not load body cascade: {e}")
                 self.enable_body = False
+
+        self._last_latency_ms: float | None = None
+        self._last_call_time:  float | None = None
     
     def detect(self, frame):
         """
@@ -95,7 +99,9 @@ class PersonDetector:
         """
         if not self.enable_face and not self.enable_body:
             return []
-            
+
+        t0 = time.monotonic()
+        
         detections = []
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
@@ -147,7 +153,12 @@ class PersonDetector:
                 }
                 detections.append(detection)
         
+        self._last_latency_ms = (time.monotonic() - t0) * 1000
+        self._last_call_time  = time.time()
+
         return detections
+        
+            
     
     def set_face_enabled(self, enabled):
         """Enable or disable face detection"""
@@ -164,3 +175,13 @@ class PersonDetector:
     def is_body_enabled(self):
         """Check if body detection is enabled"""  
         return self.enable_body
+
+    def get_status(self):
+        last_call_s = round(time.time() - self._last_call_time, 1) if self._last_call_time else None
+        return {
+            'enabled':      self.enable_face or self.enable_body,
+            'face_enabled': self.enable_face,
+            'body_enabled': self.enable_body,
+            'latency_ms':   self._last_latency_ms,
+            'last_call_s':  last_call_s,
+        }

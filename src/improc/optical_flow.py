@@ -35,7 +35,7 @@ from trackers.trackers import SimpleTracker, ByteTracker
 from improc.memory import FlowMemory, CoresetMemory
 from improc.person_detection import PersonDetector
 from improc.yolox_detector import YOLOXDetector
-from improc.shared_detectors import get_shared_yolox, get_shared_person_detector
+from improc.shared_detectors import get_shared_yolox, get_shared_person_detector, get_shared_rtmpose
 
 
 def _copy_pts(pts: dict) -> dict:
@@ -81,7 +81,10 @@ class OpticalFlowTracker:
                  enable_yolox=False,
                  enable_person_detection=False,
                  yolox_model_size='nano',
-                 yolox_score_thr=0.5):
+                 yolox_score_thr=0.5,
+                 enable_pose=False,
+                 pose_model_size='tiny',
+                 pose_score_thr=0.3):
 
         # --- Frame state ---
         self.prev_gray = None   # Previous grayscale frame for flow computation
@@ -170,6 +173,12 @@ class OpticalFlowTracker:
         self.yolox_detector = yolox
         self.enable_yolox = yolox is not None and yolox.is_enabled()
 
+        # --- Optional RTMPose keypoint estimator ---    
+        pose_detector = get_shared_rtmpose(model_size=pose_model_size, score_thr=pose_score_thr) if enable_pose else None
+        self.pose_detector = pose_detector
+        self.enable_pose = pose_detector is not None and pose_detector.is_enabled()    
+
+        self.curr_frame = None   # Latest BGR frame (used by pose detector)
         self.viz_div_h = None
 
     def restart(self, matcher_mode="hungarian"):
@@ -213,10 +222,33 @@ class OpticalFlowTracker:
     
     def is_yolox_enabled(self):
         return self.enable_yolox
+
+    def set_pose_detection_enabled(self, enabled):
+        """Enable or disable RTMPose keypoint estimation."""
+        if enabled and self.pose_detector is None:
+            try:
+                self.pose_detector = get_shared_rtmpose()
+                self.enable_pose = self.pose_detector.is_enabled()
+            except FileNotFoundError as e:
+                print(f"Warning: RTMPose disabled — {e}")
+                return
+        if self.pose_detector is not None:
+            self.pose_detector.set_enabled(enabled)
+        self.enable_pose = enabled and (self.pose_detector is not None) and self.pose_detector.is_enabled()
+
+    def is_pose_detection_enabled(self):
+        return self.enable_pose
+
+    def get_pose_status(self):
+        if self.pose_detector is None:
+            return {'enabled': False}
+        status = self.pose_detector.get_status()
+        status['enabled'] = self.enable_pose
+        return status
     
     def get_yolox_status(self):
         if self.yolox_detector is None:
-            return {'enabled': False}
+            return {'enabled': False, 'latency_ms': None, 'last_call_s': None}
         status = self.yolox_detector.get_status()
         status['enabled'] = self.enable_yolox
         return status
@@ -224,12 +256,16 @@ class OpticalFlowTracker:
     def get_person_detection_status(self):
         """Get detailed status of person detection features"""
         if self.person_detector is None:
-            return {'enabled': False, 'face': False, 'body': False}
-        
+            return {'enabled': False, 'face': False, 'body': False,
+                    'latency_ms': None, 'last_call_s': None}
+
+        s = self.person_detector.get_status()
         return {
             'enabled': self.enable_person_detection,
-            'face': self.person_detector.is_face_enabled(),
-            'body': self.person_detector.is_body_enabled()
+            'face': s.get('face_enabled', False),
+            'body': s.get('body_enabled', False),
+            'latency_ms': s.get('latency_ms'),
+            'last_call_s': s.get('last_call_s'),
         }
 
     def get_person_stats(self, frame_shape=None):
@@ -521,6 +557,28 @@ class OpticalFlowTracker:
                     pts    = pts[inds][:self.kpt_max_kpts].reshape(-1, 2)
                     scores = scores[inds][:self.kpt_max_kpts].reshape(-1, 1)
 
+            if self.enable_pose:
+                obj_type = results[i].get('type', '')
+                if obj_type in ('person', 'body'):
+                    pose_res = self.pose_detector.detect(self.curr_frame, [bbox])
+                    if pose_res:
+                        kps    = pose_res[0]['keypoints']   # (17, 2)
+                        kp_sc  = pose_res[0]['scores']      # (17,)
+                        results[i]['pose_keypoints'] = kps
+                        results[i]['pose_scores']    = kp_sc
+
+                        # Add high-confidence joints to the tracked point set
+                        valid = kp_sc >= self.pose_detector.score_thr
+                        if valid.any():
+                            pose_pts = kps[valid].astype(np.float32)   # (M, 2)
+                            pose_sc  = kp_sc[valid].reshape(-1, 1).astype(np.float32)
+                            pts    = np.concatenate([pts,    pose_pts], axis=0)
+                            scores = np.concatenate([scores, pose_sc],  axis=0)
+                            # Re-apply top-K limit
+                            inds   = np.argsort(scores[:, 0])[::-1]
+                            pts    = pts[inds][:self.kpt_max_kpts].reshape(-1, 2)
+                            scores = scores[inds][:self.kpt_max_kpts].reshape(-1, 1)
+
             results[i]['keypoints_1'] = pts
             results[i]['keypoints_2'] = pts.copy()
             results[i]['keypoint_scores'] = scores
@@ -679,6 +737,7 @@ class OpticalFlowTracker:
             pts_out:      Copy of per-object tracked point dict (for recording/external use).
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.curr_frame = frame
 
         # Set frame size for ByteTracker scaling (no-op for SimpleTracker)
         if hasattr(self.tracker, 'set_frame_size'):

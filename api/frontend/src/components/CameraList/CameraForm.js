@@ -14,6 +14,7 @@ export const DEFAULT_CAMERA_FORM = {
   audio_input_format: 'pulse',
   audio_sample_rate: 16000,
   audio_chunk_size: 512,
+  keep_online: true,
 };
 
 export const COMPACT_BUTTON_STYLE = { padding: '6px 10px', fontSize: '12px', lineHeight: 1.1 };
@@ -178,6 +179,18 @@ export const CameraForm = ({ initialCamera, onSubmit, onClose, title, submitText
                   style={{ marginRight: '8px' }}
                 />
                 Enabled
+              </label>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">
+                <input
+                  type="checkbox"
+                  checked={form.keep_online ?? true}
+                  onChange={(e) => setForm(p => ({...p, keep_online: e.target.checked}))}
+                  style={{ marginRight: '8px' }}
+                />
+                Keep Online (auto-reconnect on disconnect)
               </label>
             </div>
 

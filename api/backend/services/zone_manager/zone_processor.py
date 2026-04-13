@@ -137,10 +137,10 @@ def classify_detections(
             hit_mode = zone.hit_mode
 
             if hit_mode == ZoneHitMode.CENTROID:
-                if centroid and len(centroid) >= 2:
+                if centroid is not None and len(centroid) >= 2:
                     # centroid is [row, col]
                     px, py = float(centroid[1]), float(centroid[0])
-                elif bbox and len(bbox) == 4:
+                elif bbox is not None and len(bbox) == 4:
                     px = (float(bbox[0]) + float(bbox[2])) / 2
                     py = (float(bbox[1]) + float(bbox[3])) / 2
                 else:
@@ -149,7 +149,7 @@ def classify_detections(
                     hit_zones.add(zone.zone_id)
 
             else:  # BBOX_ANY
-                if not (bbox and len(bbox) == 4):
+                if bbox is None or len(bbox) != 4:
                     continue
                 x1, y1, x2, y2 = (float(bbox[0]), float(bbox[1]),
                                    float(bbox[2]), float(bbox[3]))
