@@ -21,7 +21,3 @@ def get_live_stream_mode():
 def set_live_stream_mode(mode):
     global _live_stream_mode
     _live_stream_mode = mode
-
-
-# Async broadcast function — set by start_server.py after app creation
-broadcast_message = None

@@ -23,7 +23,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
-from typing import Deque, Dict, Optional
+from typing import Deque, Dict, List, Optional
 
 import psutil
 
@@ -45,6 +45,7 @@ class StreamHealthMonitor:
         self._check_interval = 30  # Check every 30 seconds
         self.enable_slow_recovery_threshold = 3  # After 3 recoveries, enable slow recovery mode
         self.slow_recovery_interval = 5  # In slow recovery mode, recover every 5th failure
+        self.video_recovery_start_timeout = 20.0  # Give cameras longer to boot after power interruptions
 
         # Lag history queue for 24-hour plotting
         self._lag_queue_maxlen = (24 * 3600) // self._check_interval  # 2880 samples at 30s interval
@@ -71,19 +72,17 @@ class StreamHealthMonitor:
             
         self._last_check = now
         
-        try:
-            cameras_cache = getattr(self.camera_service, '_cameras_cache', {})
-            monitored = [
-                camera_id for camera_id, info in cameras_cache.items()
-                if info.get('keep_online', True)
-            ]
-            for camera_id in monitored:
-                self._check_thread_health(camera_id)
-                self._check_camera_health(camera_id)
-                self._ai_health_check(camera_id)
-        except Exception as e:
-            logger.error(f"Error in stream health monitoring: {e}")
-    
+        cameras_cache = getattr(self.camera_service, '_cameras_cache', {})
+        monitored = [
+            camera_id for camera_id, info in cameras_cache.items()
+            if info.get('keep_online', True)
+        ]
+        logger.info(f"Monitoring streams. {len(monitored)} cameras online.")
+        for camera_id in monitored:
+            self._check_thread_health(camera_id)
+            self._check_camera_health(camera_id)
+            self._ai_health_check(camera_id)
+        
     def _check_camera_health(self, camera_id: str):
         """Check health of a specific camera and trigger recovery if needed."""
         logger.debug(f"🔍 Running health check for camera {camera_id}")
@@ -224,11 +223,11 @@ class StreamHealthMonitor:
         logger.warning(f"Recovering video producer thread for camera {camera_id}")
         self.camera_service.stop_video_stream(camera_id, stop_recording=False)
         time.sleep(2)  # Allow clean shutdown
-        success = self.camera_service.start_video_stream(camera_id)
+        success = self.camera_service.start_video(camera_id, timeout=self.video_recovery_start_timeout)
         if success:
             logger.info(f"✅ Successfully recovered video producer thread for camera {camera_id}")
         else:
-            logger.error(f"❌ Failed to recover video producer thread for camera {camera_id}")
+            self._log_recovery_failure(camera_id, 'video')
             time.sleep(15)  # Wait before retrying
 
 
@@ -241,7 +240,7 @@ class StreamHealthMonitor:
         if success:
             logger.info(f"✅ Successfully recovered audio producer thread for camera {camera_id}")
         else:
-            logger.error(f"❌ Failed to recover audio producer thread for camera {camera_id}")
+            self._log_recovery_failure(camera_id, 'audio')
             time.sleep(15)  # Wait before retrying
 
     def _recover_recording(self, camera_id: str):
@@ -253,7 +252,7 @@ class StreamHealthMonitor:
         if recording_id:
             logger.info(f"✅ Successfully recovered recording for camera {camera_id}")
         else:
-            logger.error(f"❌ Failed to recover recording for camera {camera_id}")
+            self._log_recovery_failure(camera_id, 'recording')
             time.sleep(15)  # Wait before retrying
 
     def _recover_ai_tracker(self, camera_id: str):
@@ -274,10 +273,67 @@ class StreamHealthMonitor:
         if success:
             logger.info(f"✅ Successfully recovered AI tracker for camera {camera_id}")
         else:
-            logger.error(f"❌ Failed to recover AI tracker for camera {camera_id}")
+            self._log_recovery_failure(camera_id, 'ai')
             time.sleep(15)  # Wait before retrying
 
-    def _save_error_log_snapshot(self, camera_id: str):
+    def _build_failure_context_lines(self, camera_id: str, stream_name: str, include_log_hint: bool = True) -> List[str]:
+        db_camera = self.camera_service.db.get_camera(camera_id) or {}
+        diagnostic = {}
+        if hasattr(self.camera_service, 'get_start_diagnostic'):
+            diagnostic = self.camera_service.get_start_diagnostic(camera_id) or {}
+
+        current_lag = self._get_current_lag_stats(camera_id)
+        history = self.lag_history.get(camera_id, {}).get('streams', {})
+        rec_info = self.camera_service.recording_manager.active_recordings.get(camera_id)
+        rec_thread = rec_info.get('thread') if rec_info else None
+        video_thread = self.camera_service._video_background_threads.get(camera_id)
+        audio_thread = self.camera_service._audio_background_threads.get(camera_id)
+        thread_status = {
+            'video': video_thread.is_alive() if video_thread else None,
+            'audio': audio_thread.is_alive() if audio_thread else None,
+            'rec': rec_thread.is_alive() if rec_thread else None,
+            'ai': self.camera_service.ai_service.is_tracker_alive(camera_id),
+        }
+        recovery_counts = {name: state.get('count') for name, state in history.items()}
+
+        lines = [
+            f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+            f"camera_id: {camera_id}",
+            f"stream_name: {stream_name}",
+            f"camera_status: {db_camera.get('status')}",
+            f"keep_online: {db_camera.get('keep_online')}",
+            f"source: {db_camera.get('source')}",
+            f"audio_enabled: {db_camera.get('audio_enabled')}",
+            f"thread_status: {thread_status}",
+            f"lag_stats: {current_lag}",
+            f"recovery_counts: {recovery_counts}",
+        ]
+
+        if diagnostic:
+            lines.extend([
+                f"last_start_phase: {diagnostic.get('phase')}",
+                f"last_start_success: {diagnostic.get('success')}",
+                f"last_start_message: {diagnostic.get('message')}",
+                f"last_start_timeout_s: {diagnostic.get('timeout_s')}",
+                f"last_start_probe_code: {diagnostic.get('probe_code')}",
+                f"last_start_process_returncode: {diagnostic.get('process_returncode')}",
+            ])
+            ffmpeg_stderr = diagnostic.get('ffmpeg_stderr')
+            if ffmpeg_stderr:
+                lines.append(f"last_start_ffmpeg_stderr: {ffmpeg_stderr}")
+
+            message = str(diagnostic.get('message') or '').lower()
+            if include_log_hint and any(token in message for token in ('timeout', 'unreachable', 'refused')):
+                lines.append('hint: camera/network may still be booting after a power interruption; auto-recovery ran before the camera finished coming back')
+
+        return lines
+
+    def _log_recovery_failure(self, camera_id: str, stream_name: str):
+        lines = self._build_failure_context_lines(camera_id, stream_name)
+        logger.error(f"❌ Failed to recover {stream_name} for camera {camera_id} | {' | '.join(lines[:6])}")
+        self._save_error_log_snapshot(camera_id, reason=f'{stream_name}_recovery_failed', context_lines=lines)
+
+    def _save_error_log_snapshot(self, camera_id: str, reason: str = 'lag_threshold_exceeded', context_lines: Optional[List[str]] = None):
         """Save last 500 lines of nvr.log when lag exceeds threshold for the first time."""
         try:
             log_path = os.path.join(os.path.dirname(self._error_log_dir), 'nvr.log')
@@ -290,6 +346,12 @@ class StreamHealthMonitor:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             snapshot_path = os.path.join(self._error_log_dir, f'error_{camera_id}_{timestamp}.txt')
             with open(snapshot_path, 'w') as f:
+                f.write(f"reason: {reason}\n")
+                if context_lines:
+                    f.write("context:\n")
+                    for line in context_lines:
+                        f.write(f"- {line}\n")
+                    f.write("\n")
                 f.writelines(tail)
             logger.info(f"📋 Saved error log snapshot ({len(tail)} lines) to {snapshot_path}")
         except Exception as e:

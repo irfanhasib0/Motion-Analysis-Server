@@ -22,7 +22,6 @@ async def create_camera(camera: CameraCreate):
     """Add a new camera"""
     try:
         new_camera = deps.camera_service.add_camera(camera)
-        await deps.broadcast_message({"type": "camera_added", "camera": new_camera.model_dump()})
         return new_camera
     except Exception as e:
         deps.logger.error(f"Failed to add camera: {e}")
@@ -34,7 +33,6 @@ async def update_camera(camera_id: str, camera_update: CameraUpdate):
     """Update camera settings"""
     try:
         updated_camera = deps.camera_service.update_camera(camera_id, camera_update)
-        await deps.broadcast_message({"type": "camera_updated", "camera": updated_camera.model_dump()})
         return updated_camera
     except Exception as e:
         deps.logger.error(f"Failed to update camera: {e}")
@@ -46,7 +44,6 @@ async def delete_camera(camera_id: str):
     """Delete a camera"""
     try:
         deps.camera_service.remove_camera(camera_id)
-        await deps.broadcast_message({"type": "camera_deleted", "camera_id": camera_id})
         return {"message": "Camera deleted successfully"}
     except Exception as e:
         deps.logger.error(f"Failed to delete camera: {e}")
@@ -73,7 +70,6 @@ async def stop_camera(camera_id: str):
     """Stop camera and all associated streams (video, audio, HLS, recordings)"""
     await asyncio.to_thread(deps.camera_service.stop_video_stream, camera_id)
     await asyncio.to_thread(deps.camera_service.stop_audio_stream, camera_id)
-    #await deps.broadcast_message({"type": "camera_stopped", "camera_id": camera_id})
     return {"message": "Camera and all streams stopped successfully"}
 
 
@@ -83,7 +79,6 @@ async def restart_camera(camera_id: str):
     try:
         success = await asyncio.to_thread(deps.camera_service.restart_camera, camera_id)
         if success:
-            #await deps.broadcast_message({"type": "camera_restarted", "camera_id": camera_id})
             return {"message": "Camera restarted successfully"}
         else:
             raise HTTPException(status_code=400, detail="Failed to restart camera")

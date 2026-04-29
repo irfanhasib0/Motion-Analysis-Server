@@ -35,7 +35,6 @@ async def start_recording(camera_id: str, background_tasks: BackgroundTasks):
 async def stop_recording(camera_id: str):
     """Stop recording from a camera"""
     await asyncio.to_thread(deps.camera_service.stop_recording, camera_id)
-    #await deps.broadcast_message({"type": "recording_stopped", "camera_id": camera_id})
     return {"message": "Recording stopped"}
 
 

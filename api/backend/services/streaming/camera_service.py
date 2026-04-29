@@ -69,6 +69,7 @@ class Capture:
         self._audio_pipe_write_fd: Optional[int] = None
         self._audio_pipe_reader = None
         self._audio_chunk_leftover = b""
+        self._last_video_error: str = ""
 
         try:
             source = int(source)
@@ -121,6 +122,7 @@ class Capture:
     def _open_rtsp_av_stream_unified(self) -> bool:
         self._close_unified_audio_pipe()
         self._rtsp_unified_demux_active = False
+        self._last_video_error = ""
 
         
         read_fd, write_fd = os.pipe()
@@ -161,7 +163,7 @@ class Capture:
             self.cap = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=pipe_buffer_size,
                 pass_fds=(write_fd,),
             )
@@ -186,6 +188,7 @@ class Capture:
     def open_video_stream_webcam(self):
         if self.cap:
             self.release_video_stream_webcam()
+        self._last_video_error = ""
 
         webcam_input_format = os.getenv('WEBCAM_INPUT_FORMAT', 'v4l2').strip().lower()
         webcam_source = self.source
@@ -225,7 +228,7 @@ class Capture:
         self.cap = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=pipe_buffer_size,
         )
         
@@ -235,6 +238,7 @@ class Capture:
         """Open a local video file for playback with real-time pacing and looping."""
         if self.cap:
             self.release_video_stream_webcam()
+        self._last_video_error = ""
 
         cmd = [
             "ffmpeg",
@@ -254,7 +258,7 @@ class Capture:
         self.cap = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=pipe_buffer_size,
         )
         return self
@@ -262,6 +266,7 @@ class Capture:
     def open_video_stream_rtsp(self):
         if self.cap:
             self.release_video_stream_rtsp()
+        self._last_video_error = ""
 
         if self._rtsp_unified_demux_enabled and self.cam_type in {'rtsp', 'http'}:
             if self._open_rtsp_av_stream_unified():
@@ -288,7 +293,7 @@ class Capture:
         ]
         
         pipe_buffer_size = self._resolve_pipe_buffer_size()
-        self.cap = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=pipe_buffer_size)
+        self.cap = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=pipe_buffer_size)
         self._rtsp_unified_demux_active = False
         return self
 
@@ -495,11 +500,41 @@ class Capture:
                 self.reconnect_audio_stream()
         return False, b'a'
 
+    def get_video_process_exit_details(self) -> Dict[str, Optional[Union[int, str]]]:
+        """Return stderr context if the video ffmpeg process exited."""
+        if not self.cap:
+            return {'returncode': None, 'stderr': self._last_video_error or None}
+
+        returncode = self.cap.poll()
+        if returncode is None:
+            return {'returncode': None, 'stderr': self._last_video_error or None}
+
+        stderr_output = self._last_video_error
+        if self.cap.stderr is not None:
+            try:
+                raw = self.cap.stderr.read()
+                if raw:
+                    stderr_output = raw.decode('utf-8', errors='replace').strip()
+            except Exception:
+                pass
+
+        self._last_video_error = stderr_output.strip()
+        return {
+            'returncode': returncode,
+            'stderr': self._last_video_error or None,
+        }
+
     def release_video(self):
         if self.cap:
             try:
                 if self.cap.stdout:
                     self.cap.stdout.close()
+            except Exception:
+                pass
+
+            try:
+                if self.cap.stderr:
+                    self.cap.stderr.close()
             except Exception:
                 pass
 
@@ -645,6 +680,29 @@ class CameraService(StreamingService):
             cam['id']: {'keep_online': bool(cam.get('keep_online', True))}
             for cam in self.db.get_all_cameras()
         }
+        self._last_start_diagnostics: Dict[str, Dict[str, Any]] = {}
+
+    def _set_start_diagnostic(
+        self,
+        camera_id: str,
+        phase: str,
+        success: bool,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        diagnostic = {
+            'camera_id': camera_id,
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+            'phase': phase,
+            'success': success,
+            'message': message,
+        }
+        if details:
+            diagnostic.update(details)
+        self._last_start_diagnostics[camera_id] = diagnostic
+
+    def get_start_diagnostic(self, camera_id: str) -> Dict[str, Any]:
+        return dict(self._last_start_diagnostics.get(camera_id, {}))
 
     # ── Wrapper methods for config_manager (settings flow) ──────────────
 
@@ -1043,6 +1101,22 @@ class CameraService(StreamingService):
         """Start video capture. True=success, False=retryable failure, None=fatal (don't retry)."""
         db_camera = self.db.get_camera(camera_id)
         source = (db_camera or {}).get('source', '')
+        source_type = 'rtsp' if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')) else type(source).__name__
+        common_diagnostic_kwargs = {
+            'camera_id': camera_id,
+        }
+        failure_diagnostic_kwargs = {
+            **common_diagnostic_kwargs,
+            'success': False,
+        }
+        success_diagnostic_kwargs = {
+            **common_diagnostic_kwargs,
+            'success': True,
+        }
+        common_detail_payload = {
+            'timeout_s': timeout,
+            'source_type': source_type,
+        }
 
         # TCP pre-check for RTSP/RTMP — fast-fail for bad host/port without spawning ffmpeg
         if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
@@ -1050,13 +1124,27 @@ class CameraService(StreamingService):
             if reachable:
                 logger.info(f"{Colors.GREEN}TCP check OK for {camera_id} ({tcp_reason}){Colors.RESET}")
             else:
-                logger.error(f"{Colors.RED}TCP check FAILED for {camera_id}: {tcp_reason}{Colors.RESET}")
+                error_msg = f"TCP check FAILED for {camera_id}: {tcp_reason}"
+                logger.error(f"{Colors.RED}{error_msg}{Colors.RESET}")
+                self._set_start_diagnostic(
+                    **failure_diagnostic_kwargs,
+                    phase='tcp_precheck',
+                    message=error_msg,
+                    details=common_detail_payload,
+                )
                 self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
                 return None  # Fatal — bad host/port/URL, caller should not retry
 
         cap = self.video_capture(camera_id)
         if cap is None:
-            logger.warning(f"{Colors.RED}Failed to create capture for {camera_id}{Colors.RESET}")
+            error_msg = f"Failed to create capture for {camera_id}"
+            logger.error(f"{Colors.RED}{error_msg}{Colors.RESET}")
+            self._set_start_diagnostic(
+                **failure_diagnostic_kwargs,
+                phase='capture_create',
+                message=error_msg,
+                details=common_detail_payload,
+            )
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             return False
 
@@ -1071,26 +1159,57 @@ class CameraService(StreamingService):
             time.sleep(0.05)
 
         if not cap.is_video_stream_opened():
+            process_details = cap.get_video_process_exit_details()
+            failure_detail_payload = {
+                **common_detail_payload,
+                'process_returncode': process_details.get('returncode'),
+                'ffmpeg_stderr': process_details.get('stderr'),
+            }
             cap.release_video()
             self.db.update_camera(camera_id, {'status': CameraStatus.OFFLINE.value})
             if isinstance(source, str) and source.startswith(('rtsp://', 'rtmp://')):
                 probe_code, probe_msg = self._probe_rtsp_stream(source)
+                detail_payload = {
+                    **failure_detail_payload,
+                    'probe_code': probe_code,
+                }
                 if probe_code == 'unauthorized':
                     logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} — credential error: {probe_msg}{Colors.RESET}")
+                    self._set_start_diagnostic(**failure_diagnostic_kwargs, phase='stream_probe', message=probe_msg, details=detail_payload)
                     return None  # fatal — wrong credentials, no point retrying
                 elif probe_code == 'not_found':
                     logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} — stream path error: {probe_msg}{Colors.RESET}")
+                    self._set_start_diagnostic(**failure_diagnostic_kwargs, phase='stream_probe', message=probe_msg, details=detail_payload)
                     return None  # fatal — wrong path/suffix, no point retrying
                 elif probe_code == 'ok':
                     logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} — ffmpeg failed but ffprobe succeeded; possible codec/format issue{Colors.RESET}")
+                    self._set_start_diagnostic(
+                        **failure_diagnostic_kwargs,
+                        phase='stream_open',
+                        message='ffmpeg failed but ffprobe succeeded; possible codec/format issue',
+                        details=detail_payload,
+                    )
                 elif probe_code == 'unavailable':
                     elapsed = time.time() - ffmpeg_start
                     hint = "check credentials or stream path" if elapsed < 4.0 else "check network/rw_timeout"
                     logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id} ({hint}) — ffprobe unavailable for details{Colors.RESET}")
+                    self._set_start_diagnostic(
+                        **failure_diagnostic_kwargs,
+                        phase='stream_probe',
+                        message=f'{hint}; ffprobe unavailable for details',
+                        details=detail_payload,
+                    )
                 else:
                     logger.error(f"{Colors.RED}RTSP stream FAILED for {camera_id}: {probe_msg}{Colors.RESET}")
+                    self._set_start_diagnostic(**failure_diagnostic_kwargs, phase='stream_probe', message=probe_msg, details=detail_payload)
             else:
                 logger.error(f"{Colors.RED}Stream FAILED for {camera_id}: ffmpeg process exited or stream not opened{Colors.RESET}")
+                self._set_start_diagnostic(
+                    **failure_diagnostic_kwargs,
+                    phase='stream_open',
+                    message='ffmpeg process exited or stream not opened',
+                    details=failure_detail_payload,
+                )
             return False  # retryable (network flap, transient error)
 
         logger.info(f"{Colors.GREEN}RTSP stream opened OK for {camera_id}{Colors.RESET}")
@@ -1098,6 +1217,12 @@ class CameraService(StreamingService):
         self._camera_streams[camera_id] = cap
         # Initialize ring buffers for SPMC data distribution
         self._ensure_ring_buffers(camera_id)
+        self._set_start_diagnostic(
+            **success_diagnostic_kwargs,
+            phase='stream_open',
+            message='Stream opened successfully',
+            details=common_detail_payload,
+        )
         return True
         
     def stop_video(self, camera_id: str):
@@ -1177,7 +1302,9 @@ class CameraService(StreamingService):
                 logger.info(f"{Colors.GREEN}▶️ Restarted camera successfully:{Colors.RESET} {camera_id}")
                 return True
             else:
-                logger.error(f"{Colors.RED}❌ Failed to restart camera:{Colors.RESET} {camera_id}")
+                diagnostic = self.get_start_diagnostic(camera_id)
+                detail = diagnostic.get('message') or 'unknown start failure'
+                logger.error(f"{Colors.RED}❌ Failed to restart camera:{Colors.RESET} {camera_id} | {detail}")
                 return False
                 
         except Exception as error:
