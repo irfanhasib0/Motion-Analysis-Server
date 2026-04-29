@@ -33,9 +33,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from trackers.trackers import SimpleTracker, ByteTracker
 from improc.memory import FlowMemory, CoresetMemory
-from improc.person_detection import PersonDetector
-from improc.yolox_detector import YOLOXDetector
-from improc.shared_detectors import get_shared_yolox_cpp, get_shared_person_detector, get_shared_rtmpose
+from improc.shared_detectors import get_shared_yolox, get_shared_person_detector, get_shared_rtmpose
 from improc.scene_analyzer import SceneAnalyzer
 
 
@@ -180,7 +178,7 @@ class OpticalFlowTracker:
         self.person_detector = get_shared_person_detector() if enable_person_detection else None
         self.enable_person_detection = self.person_detector is not None
 
-        yolox = get_shared_yolox_cpp(model_size=yolox_model_size, score_thr=yolox_score_thr, backend=yolox_backend) if enable_yolox else None
+        yolox = get_shared_yolox(model_size=yolox_model_size, score_thr=yolox_score_thr, backend=yolox_backend) if enable_yolox else None
         self.yolox_detector = yolox
         self.enable_yolox = yolox is not None and yolox.is_enabled()
 
