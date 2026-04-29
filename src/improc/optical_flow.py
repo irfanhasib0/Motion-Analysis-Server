@@ -178,7 +178,7 @@ class OpticalFlowTracker:
         self.person_detector = get_shared_person_detector() if enable_person_detection else None
         self.enable_person_detection = self.person_detector is not None
 
-        yolox = get_shared_yolox(model_size=yolox_model_size, score_thr=yolox_score_thr, backend=yolox_backend) if enable_yolox else None
+        yolox = get_shared_yolox(model_size=yolox_model_size, score_thr=yolox_score_thr) if enable_yolox else None
         self.yolox_detector = yolox
         self.enable_yolox = yolox is not None and yolox.is_enabled()
 
@@ -252,7 +252,7 @@ class OpticalFlowTracker:
     
     def set_yolox_enabled(self, enabled):
         if enabled and self.yolox_detector is None:
-            self.yolox_detector = get_shared_yolox_cpp()
+            self.yolox_detector = get_shared_yolox()
         self.enable_yolox = enabled and (self.yolox_detector is not None) and self.yolox_detector.is_enabled()
     
     def is_yolox_enabled(self):
