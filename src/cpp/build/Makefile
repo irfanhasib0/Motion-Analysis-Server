@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /projects/Motion-Analysis/src/cpp
+CMAKE_SOURCE_DIR = /root/Motion-Analysis-Server/src/cpp
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /projects/Motion-Analysis/src/cpp/build
+CMAKE_BINARY_DIR = /root/Motion-Analysis-Server/src/cpp/build
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /projects/Motion-Analysis/src/cpp/build/CMakeFiles /projects/Motion-Analysis/src/cpp/build//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /root/Motion-Analysis-Server/src/cpp/build/CMakeFiles /root/Motion-Analysis-Server/src/cpp/build//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /projects/Motion-Analysis/src/cpp/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /root/Motion-Analysis-Server/src/cpp/build/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -117,126 +117,41 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named OpticalFlowViewer
+# Target rules for targets named yolox_detector
 
 # Build rule for target.
-OpticalFlowViewer: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 OpticalFlowViewer
-.PHONY : OpticalFlowViewer
+yolox_detector: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 yolox_detector
+.PHONY : yolox_detector
 
 # fast build rule for target.
-OpticalFlowViewer/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/build
-.PHONY : OpticalFlowViewer/fast
+yolox_detector/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/yolox_detector.dir/build.make CMakeFiles/yolox_detector.dir/build
+.PHONY : yolox_detector/fast
 
-#=============================================================================
-# Target rules for targets named OpticalFlowViewer_autogen
-
-# Build rule for target.
-OpticalFlowViewer_autogen: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 OpticalFlowViewer_autogen
-.PHONY : OpticalFlowViewer_autogen
-
-# fast build rule for target.
-OpticalFlowViewer_autogen/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer_autogen.dir/build.make CMakeFiles/OpticalFlowViewer_autogen.dir/build
-.PHONY : OpticalFlowViewer_autogen/fast
-
-OpticalFlowViewer_autogen/mocs_compilation.o: OpticalFlowViewer_autogen/mocs_compilation.cpp.o
-.PHONY : OpticalFlowViewer_autogen/mocs_compilation.o
+yolox_detector.o: yolox_detector.cpp.o
+.PHONY : yolox_detector.o
 
 # target to build an object file
-OpticalFlowViewer_autogen/mocs_compilation.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/OpticalFlowViewer_autogen/mocs_compilation.cpp.o
-.PHONY : OpticalFlowViewer_autogen/mocs_compilation.cpp.o
+yolox_detector.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/yolox_detector.dir/build.make CMakeFiles/yolox_detector.dir/yolox_detector.cpp.o
+.PHONY : yolox_detector.cpp.o
 
-OpticalFlowViewer_autogen/mocs_compilation.i: OpticalFlowViewer_autogen/mocs_compilation.cpp.i
-.PHONY : OpticalFlowViewer_autogen/mocs_compilation.i
-
-# target to preprocess a source file
-OpticalFlowViewer_autogen/mocs_compilation.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/OpticalFlowViewer_autogen/mocs_compilation.cpp.i
-.PHONY : OpticalFlowViewer_autogen/mocs_compilation.cpp.i
-
-OpticalFlowViewer_autogen/mocs_compilation.s: OpticalFlowViewer_autogen/mocs_compilation.cpp.s
-.PHONY : OpticalFlowViewer_autogen/mocs_compilation.s
-
-# target to generate assembly for a file
-OpticalFlowViewer_autogen/mocs_compilation.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/OpticalFlowViewer_autogen/mocs_compilation.cpp.s
-.PHONY : OpticalFlowViewer_autogen/mocs_compilation.cpp.s
-
-main.o: main.cpp.o
-.PHONY : main.o
-
-# target to build an object file
-main.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/main.cpp.o
-.PHONY : main.cpp.o
-
-main.i: main.cpp.i
-.PHONY : main.i
+yolox_detector.i: yolox_detector.cpp.i
+.PHONY : yolox_detector.i
 
 # target to preprocess a source file
-main.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/main.cpp.i
-.PHONY : main.cpp.i
+yolox_detector.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/yolox_detector.dir/build.make CMakeFiles/yolox_detector.dir/yolox_detector.cpp.i
+.PHONY : yolox_detector.cpp.i
 
-main.s: main.cpp.s
-.PHONY : main.s
-
-# target to generate assembly for a file
-main.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/main.cpp.s
-.PHONY : main.cpp.s
-
-mainwindow.o: mainwindow.cpp.o
-.PHONY : mainwindow.o
-
-# target to build an object file
-mainwindow.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/mainwindow.cpp.o
-.PHONY : mainwindow.cpp.o
-
-mainwindow.i: mainwindow.cpp.i
-.PHONY : mainwindow.i
-
-# target to preprocess a source file
-mainwindow.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/mainwindow.cpp.i
-.PHONY : mainwindow.cpp.i
-
-mainwindow.s: mainwindow.cpp.s
-.PHONY : mainwindow.s
+yolox_detector.s: yolox_detector.cpp.s
+.PHONY : yolox_detector.s
 
 # target to generate assembly for a file
-mainwindow.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/mainwindow.cpp.s
-.PHONY : mainwindow.cpp.s
-
-opticalflow.o: opticalflow.cpp.o
-.PHONY : opticalflow.o
-
-# target to build an object file
-opticalflow.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/opticalflow.cpp.o
-.PHONY : opticalflow.cpp.o
-
-opticalflow.i: opticalflow.cpp.i
-.PHONY : opticalflow.i
-
-# target to preprocess a source file
-opticalflow.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/opticalflow.cpp.i
-.PHONY : opticalflow.cpp.i
-
-opticalflow.s: opticalflow.cpp.s
-.PHONY : opticalflow.s
-
-# target to generate assembly for a file
-opticalflow.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/OpticalFlowViewer.dir/build.make CMakeFiles/OpticalFlowViewer.dir/opticalflow.cpp.s
-.PHONY : opticalflow.cpp.s
+yolox_detector.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/yolox_detector.dir/build.make CMakeFiles/yolox_detector.dir/yolox_detector.cpp.s
+.PHONY : yolox_detector.cpp.s
 
 # Help Target
 help:
@@ -246,20 +161,10 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... OpticalFlowViewer_autogen"
-	@echo "... OpticalFlowViewer"
-	@echo "... OpticalFlowViewer_autogen/mocs_compilation.o"
-	@echo "... OpticalFlowViewer_autogen/mocs_compilation.i"
-	@echo "... OpticalFlowViewer_autogen/mocs_compilation.s"
-	@echo "... main.o"
-	@echo "... main.i"
-	@echo "... main.s"
-	@echo "... mainwindow.o"
-	@echo "... mainwindow.i"
-	@echo "... mainwindow.s"
-	@echo "... opticalflow.o"
-	@echo "... opticalflow.i"
-	@echo "... opticalflow.s"
+	@echo "... yolox_detector"
+	@echo "... yolox_detector.o"
+	@echo "... yolox_detector.i"
+	@echo "... yolox_detector.s"
 .PHONY : help
 
 

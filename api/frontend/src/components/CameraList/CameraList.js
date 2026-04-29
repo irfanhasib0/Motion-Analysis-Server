@@ -13,7 +13,7 @@ import './CameraList.css';
 // Compact icon-only style for camera card control buttons
 const ICON_BTN = { padding: '5px 6px', fontSize: '12px', lineHeight: 1 };
 
-const CameraList = ({ cameras, setCameras }) => {
+const CameraList = ({ cameras, setCameras, streamMode = 'mjpeg' }) => {
   const navigate = useNavigate();
   // -----------------------------
   // Page-level state
@@ -273,7 +273,7 @@ const CameraList = ({ cameras, setCameras }) => {
         <div className="camera-video" style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
           <div className="camera-column primary-column">
             <div className="camera-frame">
-              <CameraVideoPanel camera={camera} variant="primary" />
+              <CameraVideoPanel camera={camera} variant="primary" streamMode={streamMode} />
             </div>
 
             <div className="camera-controls-card">
@@ -397,7 +397,7 @@ const CameraList = ({ cameras, setCameras }) => {
           {!globalCompactMode && (
           <div className="camera-column support-column">
             <div className="camera-frame">
-              <CameraVideoPanel camera={camera} variant="support" />
+              <CameraVideoPanel camera={camera} variant="support" streamMode={streamMode} />
             </div>
 
             <div className="view-controls-card">

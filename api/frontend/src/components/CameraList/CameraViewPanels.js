@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import Hls from 'hls.js';
 import { api } from '../../api';
 
 export const AUDIO_TOGGLE_STYLE = {
@@ -101,8 +102,54 @@ export const CameraAudioPanel = ({ camera }) => {
   );
 };
 
-export const CameraVideoPanel = ({ camera, variant = 'primary' }) => {
+export const CameraVideoPanel = ({ camera, variant = 'primary', streamMode = 'mjpeg' }) => {
   const isOnline = camera.status === 'online' || camera.status === 'recording';
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const hlsRef = useRef(null);
+  const wsRef = useRef(null);
+
+  // HLS setup / teardown
+  useEffect(() => {
+    if (variant !== 'primary' || streamMode !== 'hls' || !isOnline) return;
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+
+    const manifestUrl = api.getCameraHlsManifestUrl(camera.id);
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ liveSyncDurationCount: 1, liveMaxLatencyDurationCount: 3 });
+      hlsRef.current = hls;
+      hls.loadSource(manifestUrl);
+      hls.attachMedia(videoEl);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(() => {}));
+      return () => { hls.destroy(); hlsRef.current = null; };
+    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS (Safari)
+      videoEl.src = manifestUrl;
+      videoEl.play().catch(() => {});
+    }
+  }, [streamMode, isOnline, camera.id, variant]);
+
+  // WebSocket setup / teardown
+  useEffect(() => {
+    if (variant !== 'primary' || streamMode !== 'ws' || !isOnline) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    const ws = new WebSocket(api.getWsStreamUrl(camera.id));
+    wsRef.current = ws;
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (evt) => {
+      const blob = new Blob([evt.data], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); URL.revokeObjectURL(url); };
+      img.src = url;
+    };
+    return () => { ws.close(); wsRef.current = null; };
+  }, [streamMode, isOnline, camera.id, variant]);
 
   const mediaStyle = {
     width: '100%',
@@ -123,15 +170,52 @@ export const CameraVideoPanel = ({ camera, variant = 'primary' }) => {
     );
   }
 
-  const streamUrl = variant === 'support'
-    ? api.appendQueryParams(api.getProcessingStreamUrl(camera.id), { view: 'support' })
-    : api.getCameraVideoStreamUrl(camera.id, 'mjpeg');
+  // Support view always uses processing stream (MJPEG)
+  if (variant === 'support') {
+    return (
+      <img
+        key={`${camera.id}:support`}
+        src={api.appendQueryParams(api.getProcessingStreamUrl(camera.id), { view: 'support' })}
+        alt={`Support view for ${camera.name}`}
+        className="camera-stream"
+        style={mediaStyle}
+      />
+    );
+  }
 
+  if (streamMode === 'hls') {
+    return (
+      <video
+        ref={videoRef}
+        key={`${camera.id}:hls`}
+        className="camera-stream"
+        style={mediaStyle}
+        muted
+        autoPlay
+        playsInline
+      />
+    );
+  }
+
+  if (streamMode === 'ws') {
+    return (
+      <canvas
+        ref={canvasRef}
+        key={`${camera.id}:ws`}
+        className="camera-stream"
+        style={mediaStyle}
+        width={640}
+        height={360}
+      />
+    );
+  }
+
+  // Default: MJPEG
   return (
     <img
-      key={`${camera.id}:${variant}:mjpeg`}
-      src={streamUrl}
-      alt={variant === 'support' ? `Support view for ${camera.name}` : `Camera ${camera.name}`}
+      key={`${camera.id}:mjpeg`}
+      src={api.getCameraVideoStreamUrl(camera.id, 'mjpeg')}
+      alt={`Camera ${camera.name}`}
       className="camera-stream"
       style={mediaStyle}
     />

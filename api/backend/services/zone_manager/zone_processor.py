@@ -193,25 +193,8 @@ def draw_zones_overlay(
     if not zones:
         return frame
 
-    result = frame.copy()
-    overlay = frame.copy()
     h, w = frame.shape[:2]
-
-    # Pass 1 — fills only (blended at low alpha for transparency)
-    for zone in zones:
-        if not zone.enabled:
-            continue
-        color = _hex_to_bgr(zone.color)
-
-        for polygon in zone.polygons:
-            if len(polygon) < 3:
-                continue
-            pts = _norm_to_px(polygon, w, h)
-            cv2.fillPoly(overlay, [pts], color)
-
-    cv2.addWeighted(overlay, alpha, result, 1 - alpha, 0, result)
-
-    # Pass 2 — dark shadow border first, then colored border on top so the
+    # dark shadow border first, then colored border on top so the
     # boundary stands out against both bright and dark backgrounds.
     for zone in zones:
         if not zone.enabled:
@@ -223,28 +206,8 @@ def draw_zones_overlay(
                 continue
             pts = _norm_to_px(polygon, w, h)
             # Dark halo (wider, drawn first)
-            cv2.polylines(result, [pts], isClosed=True, color=(0, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+            cv2.polylines(frame, [pts], isClosed=True, color=(0, 0, 0), thickness=1, lineType=cv2.LINE_AA)
             # Colored border on top
-            cv2.polylines(result, [pts], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
+            cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=1, lineType=cv2.LINE_AA)
 
-    # Draw zone name labels (second pass so labels are on top of fills)
-    for zone in zones:
-        if not zone.enabled:
-            continue
-        color = _hex_to_bgr(zone.color)
-        type_tag = "[M]" if zone.zone_type == ZoneType.ACTIVE_MASK else "[Z]"
-        label = f"{type_tag} {zone.name}"
-
-        for polygon in zone.polygons:
-            if len(polygon) >= 3:
-                pts_arr = np.array(polygon)
-                cx = int(np.mean(pts_arr[:, 0]) * w)
-                cy = int(np.mean(pts_arr[:, 1]) * h)
-                # Shadow for readability on bright backgrounds
-                cv2.putText(result, label, (cx - 20, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(result, label, (cx - 20, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-                break  # label once per zone using first polygon
-
-    return result
+    return frame

@@ -599,7 +599,14 @@ class CameraService(StreamingService):
         self.enable_pose = bool(_sys.get('enable_pose', False))
         self.pose_model_size = str(_sys.get('pose_model_size', 'tiny'))
         self.pose_score_thr = float(_sys.get('pose_score_thr', 0.3))
+        self.enable_sub_blob = bool(_sys.get('enable_sub_blob', True))
         self.ai_service.set_multiprocess(bool(_sys.get('tracker_multiprocess', False)))
+
+        # Scene analysis configuration (not preset-scoped)
+        self.scene_analysis_config = self.db.get_scene_analysis_config()
+        self.enable_scene_analysis = bool(self.scene_analysis_config.get('enabled', False))
+        # Expand YOLOX target classes for scene analysis (backpack, knife, etc.)
+        self.yolox_extra_classes = [int(c) for c in self.scene_analysis_config.get('yolox_extra_classes', [])]
         
         # Store ring buffer settings for runtime updates
         self.frame_rbf_len = frame_rbf_len
@@ -811,12 +818,12 @@ class CameraService(StreamingService):
         return Camera(
             id=db_camera['id'],
             name=db_camera['name'],
-            source=db_camera['source'],
+            source=db_camera.get('source') or '',
             camera_type=CameraType(db_camera.get('camera_type', 'webcam')),
-            fps=db_camera['fps'],
-            resolution=db_camera['resolution'],
-            status=CameraStatus(db_camera['status']),
-            created_at=datetime.fromisoformat(db_camera['created_at']),
+            fps=db_camera.get('fps', 30),
+            resolution=db_camera.get('resolution', '1280x720'),
+            status=CameraStatus(db_camera.get('status', 'offline')),
+            created_at=datetime.fromisoformat(db_camera.get('created_at', datetime.now().isoformat())),
             processing_active=db_camera.get('processing_active', False),
             processing_type=db_camera.get('processing_type'),
             audio_enabled=bool(db_camera.get('audio_enabled', False)),
@@ -1002,15 +1009,15 @@ class CameraService(StreamingService):
 
     def video_capture(self, camera_id: str):
         db_camera = self.db.get_camera(camera_id)
-        source = db_camera['source']
+        source = db_camera.get('source') or ''
         
         try:
             source = int(source)
         except (TypeError, ValueError):
             source = str(source)
         
-        resolution = [int(res) for res in db_camera['resolution'].split('x')]
-        fps = db_camera['fps']
+        resolution = [int(res) for res in (db_camera.get('resolution') or '1280x720').split('x')]
+        fps = db_camera.get('fps', 30)
         audio_enabled = bool(db_camera.get('audio_enabled', False))
         audio_sample_rate = int(db_camera.get('audio_sample_rate') or 16000)
         audio_chunk_size = int(db_camera.get('audio_chunk_size') or 512)
@@ -1180,7 +1187,7 @@ class CameraService(StreamingService):
     def audio_capture(self, camera_id: str):
         """Create an audio-only Capture for this camera (mirrors video_capture)."""
         db_camera = self.db.get_camera(camera_id)
-        source = db_camera['source']
+        source = db_camera.get('source') or ''
 
         try:
             source = int(source)

@@ -18,7 +18,7 @@ import threading
 import time
 
 from services.streaming.camera_service import CameraService
-from services.system.dashboard_service import DashboardService
+from services.system.dashboard_service import SystemService
 
 
 # =====================================================================
@@ -48,13 +48,18 @@ _arg_parser.add_argument(
     '--prd', action='store_true',
     help='Production mode: auto-start stream and recording for all RTSP cameras at startup'
 )
+_arg_parser.add_argument(
+    '--nginx', action='store_true',
+    help='Nginx mode: bind to 127.0.0.1 and skip built-in static/frontend serving (nginx handles it)'
+)
 _cli_args, _ = _arg_parser.parse_known_args()
 PRODUCTION_MODE: bool = _cli_args.prd
+NGINX_MODE: bool = _cli_args.nginx
 
 # Initialize services
 camera_service = CameraService(configs=configs)
-dashboard_service = DashboardService(camera_service=camera_service)
-    
+system_service = SystemService(camera_service=camera_service)
+
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
 AUTH_PASSWORD = os.getenv("API_PASSWORD", "admin123")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "86400"))
@@ -80,7 +85,7 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 from routes import deps
 deps.camera_service = camera_service
-deps.dashboard_service = dashboard_service
+deps.system_service = system_service
 deps.logger = logger
 deps.set_live_stream_mode(LIVE_STREAM_MODE)
 
@@ -102,10 +107,12 @@ def _graceful_shutdown():
             pass
     logger.info("🛑 Graceful shutdown complete.")
 
-# Mount static files for React app only if build directory exists
+# Mount static files for React app only if build directory exists and not behind nginx
 frontend_build_path = "frontend/build"
 frontend_static_path = "frontend/build/static"
-if os.path.exists(frontend_static_path):
+if NGINX_MODE:
+    logger.info("Nginx mode: skipping static file mounting (nginx serves /static/ directly)")
+elif os.path.exists(frontend_static_path):
     app.mount("/static", StaticFiles(directory=frontend_static_path), name="static")
     logger.info("Frontend static files mounted")
 else:
@@ -390,36 +397,42 @@ deps.broadcast_message = broadcast_message
 # =====================================================================
 # FRONTEND SERVING ENDPOINTS
 # =====================================================================
-@app.get("/")
-async def serve_react_app():
-    if os.path.exists("./api/frontend/build/index.html"):
-        return FileResponse("./api/frontend/build/index.html")
-    else:
-        return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
+if not NGINX_MODE:
+    @app.get("/")
+    async def serve_react_app():
+        if os.path.exists("./api/frontend/build/index.html"):
+            return FileResponse("./api/frontend/build/index.html")
+        else:
+            return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
 
-@app.get("/{path:path}")
-async def serve_react_routes(path: str):
-    if path.startswith("api/"):
-        raise HTTPException(status_code=404, detail="API endpoint not found")
+    @app.get("/{path:path}")
+    async def serve_react_routes(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint not found")
 
-    file_path = f"./api/frontend/build/{path}"
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        return FileResponse(file_path)
-    elif os.path.exists("./api/frontend/build/index.html"):
-        return FileResponse("./api/frontend/build/index.html")
-    else:
-        return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
+        file_path = f"./api/frontend/build/{path}"
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        elif os.path.exists("./api/frontend/build/index.html"):
+            return FileResponse("./api/frontend/build/index.html")
+        else:
+            return {"message": "NVR Server API is running. Frontend not built. Access the API at /docs"}
 
 # =====================================================================
 # APPLICATION STARTUP
 # =====================================================================
 if __name__ == "__main__":
     import uvicorn
+    system_service.start()
+    _host = "127.0.0.1" if NGINX_MODE else "0.0.0.0"
+    if NGINX_MODE:
+        logger.info("Nginx mode: binding to 127.0.0.1:9001")
     uvicorn.run(
         app, 
-        host="0.0.0.0", 
+        host=_host, 
         port=9001, 
         reload=bool(UVICORN_RELOAD),
         ws_ping_interval=None,  # Disable keepalive pings — prevents concurrent drain AssertionError
         ws_ping_timeout=None,
+        ws_per_message_deflate=False,  # JPEGs are already compressed; deflating wastes CPU for ~0% size reduction
     )

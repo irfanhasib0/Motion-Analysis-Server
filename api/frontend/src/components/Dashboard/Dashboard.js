@@ -29,14 +29,9 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
 
   const normalizedProcessUsage = systemInfo.process_usage || systemInfo.process || {};
   const normalizedAverages = systemInfo.averages_5m || {};
+  const normalizedAiUsage = systemInfo.ai_process_usage || {};
   const normalizedDiskSize = systemInfo.disk_size || {};
   const processPidLabel = normalizedProcessUsage.pid ?? 'N/A';
-  const normalizedCpuUsage = systemInfo.cpu_usage ?? systemInfo.cpu_percent ?? 0;
-  const normalizedMemoryUsage = systemInfo.memory_usage ?? systemInfo.memory_percent ?? 0;
-  const normalizedDiskIOReadRate = systemInfo.disk_usage?.io_read_mb_s ?? 0;
-  const normalizedDiskIOWriteRate = systemInfo.disk_usage?.io_write_mb_s ?? 0;
-  const normalizedProcessDiskIOReadRate = normalizedProcessUsage.disk_io_read_mb_s ?? 0;
-  const normalizedProcessDiskIOWriteRate = normalizedProcessUsage.disk_io_write_mb_s ?? 0;
 
   const formatBytes = (bytes) => {
     if (!bytes) return '0 B';
@@ -65,10 +60,10 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
     return new Date(dateString).toLocaleString();
   };
 
-  const formatPercent = (value) => {
+  const formatPercent3 = (value) => {
     const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return '0.0%';
-    return `${numeric.toFixed(1)}%`;
+    if (!Number.isFinite(numeric)) return '0.000%';
+    return `${numeric.toFixed(3)}%`;
   };
 
   const formatMB = (value) => {
@@ -90,10 +85,6 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return '0.00 MB/s';
     return `${numeric.toFixed(2)} MB/s`;
-  };
-
-  const currentAvgText = (current, average, formatter) => {
-    return `${formatter(current)} (${formatter(average)})`;
   };
 
   return (
@@ -194,22 +185,18 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
             <div className="camera-metadata">
               <div className="metadata-item">
                 <span className="metadata-label">CPU Usage:</span>
-                <span className="metadata-value">{currentAvgText(normalizedCpuUsage, normalizedAverages.cpu_usage, formatPercent)}</span>
+                <span className="metadata-value">{formatPercent3(normalizedAverages.cpu_usage)}</span>
               </div>
               <div className="metadata-item">
                 <span className="metadata-label">RAM Usage:</span>
-                <span className="metadata-value">{currentAvgText(normalizedMemoryUsage, normalizedAverages.memory_usage, formatPercent)}</span>
+                <span className="metadata-value">{formatPercent3(normalizedAverages.memory_usage)}</span>
               </div>
               <div className="metadata-item">
-                <span className="metadata-label">Disk IO Read:</span>
-                <span className="metadata-value">{currentAvgText(normalizedDiskIOReadRate, normalizedAverages.disk_io_read_mb_s, formatRate)}</span>
+                <span className="metadata-label">Disk IO:</span>
+                <span className="metadata-value">R {formatRate(normalizedAverages.disk_io_read_mb_s)} / W {formatRate(normalizedAverages.disk_io_write_mb_s)}</span>
               </div>
               <div className="metadata-item">
-                <span className="metadata-label">Disk IO Write:</span>
-                <span className="metadata-value">{currentAvgText(normalizedDiskIOWriteRate, normalizedAverages.disk_io_write_mb_s, formatRate)}</span>
-              </div>
-              <div className="metadata-item">
-                <span className="metadata-label">Disk Size (Overall):</span>
+                <span className="metadata-label">Disk Size:</span>
                 <span className="metadata-value">{formatIO(normalizedDiskSize.overall_used_gb * 1024)} / {formatIO(normalizedDiskSize.overall_total_gb * 1024)}</span>
               </div>
             </div>
@@ -218,29 +205,55 @@ const Dashboard = ({ cameras, recordings, systemInfo }) => {
           <div className="camera-info-card">
             <div className="camera-info-header">
               <div className="camera-details">
-                <div className="camera-name">start_server Process ({processPidLabel})</div>
+                <div className="camera-name">Server ({processPidLabel})</div>
               </div>
             </div>
             <div className="camera-metadata">
               <div className="metadata-item">
                 <span className="metadata-label">CPU Usage:</span>
-                <span className="metadata-value">{currentAvgText(normalizedProcessUsage.cpu_percent, normalizedAverages.process_cpu_percent, formatPercent)}</span>
+                <span className="metadata-value">{formatPercent3(normalizedAverages.process_cpu_percent)}</span>
               </div>
               <div className="metadata-item">
                 <span className="metadata-label">RAM Usage:</span>
-                <span className="metadata-value">{currentAvgText(normalizedProcessUsage.memory_percent, normalizedAverages.process_memory_percent, formatPercent)} ({formatMB(normalizedProcessUsage.memory_mb)})</span>
+                <span className="metadata-value">{formatPercent3(normalizedAverages.process_memory_percent)} ({formatMB(normalizedProcessUsage.memory_mb)})</span>
               </div>
               <div className="metadata-item">
-                <span className="metadata-label">Disk IO Read:</span>
-                <span className="metadata-value">{currentAvgText(normalizedProcessDiskIOReadRate, normalizedAverages.process_disk_io_read_mb_s, formatRate)}</span>
+                <span className="metadata-label">Disk IO:</span>
+                <span className="metadata-value">R {formatRate(normalizedAverages.process_disk_io_read_mb_s)} / W {formatRate(normalizedAverages.process_disk_io_write_mb_s)}</span>
               </div>
               <div className="metadata-item">
-                <span className="metadata-label">Disk IO Write:</span>
-                <span className="metadata-value">{currentAvgText(normalizedProcessDiskIOWriteRate, normalizedAverages.process_disk_io_write_mb_s, formatRate)}</span>
-              </div>
-              <div className="metadata-item">
-                <span className="metadata-label">Disk Size (Recording Dir):</span>
+                <span className="metadata-label">Disk Size (Rec Dir):</span>
                 <span className="metadata-value">{formatIO((normalizedDiskSize.recording_dir_size_gb) * 1024)}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="camera-info-card">
+            <div className="camera-info-header">
+              <div className="camera-details">
+                <div className="camera-name">AI Tracker ({normalizedAiUsage.mode ?? 'N/A'})</div>
+              </div>
+            </div>
+            <div className="camera-metadata">
+              <div className="metadata-item">
+                <span className="metadata-label">CPU Usage:</span>
+                <span className="metadata-value">{formatPercent3(normalizedAverages.ai_cpu_percent)}</span>
+              </div>
+              <div className="metadata-item">
+                <span className="metadata-label">RAM Usage:</span>
+                <span className="metadata-value">{formatPercent3(normalizedAverages.ai_memory_percent)} ({formatMB(normalizedAiUsage.memory_mb ?? 0)})</span>
+              </div>
+              <div className="metadata-item">
+                <span className="metadata-label">PIDs:</span>
+                <span className="metadata-value">
+                  {(normalizedAiUsage.tracker_count ?? 0) > 0
+                    ? normalizedAiUsage.tracker_pids.join(', ')
+                    : 'N/A'}
+                </span>
+              </div>
+              <div className="metadata-item">
+                <span className="metadata-label">Trackers:</span>
+                <span className="metadata-value">{normalizedAiUsage.tracker_count ?? 0}</span>
               </div>
             </div>
           </div>

@@ -1,8 +1,8 @@
 from .config_manager import ConfigManager
-from .dashboard_service import DashboardService, StreamHealthMonitor
+from .dashboard_service import SystemService, StreamHealthMonitor
 
 __all__ = [
     "ConfigManager",
-    "DashboardService",
+    "SystemService",
     "StreamHealthMonitor",
 ]

@@ -91,15 +91,13 @@ class TrackerConfigUpdate:
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _extract_dicts(detect_output) -> tuple:
-    """Extract (points_dict, flow_pts) from tracker.detect() output,
-    discarding the visualization frame to minimize pickle overhead."""
+    """Extract (points_dict, flow_pts) from tracker.detect() output."""
     if not isinstance(detect_output, tuple) or len(detect_output) == 0:
         return {}, {}
 
     points_dict = {}
     pts_payload = {}
-    # detect_output[0] is the viz frame — skip it
-    for item in detect_output[1:]:
+    for item in detect_output:
         if isinstance(item, dict):
             if not points_dict and any(
                 isinstance(v, dict) and ('vel' in v or 'mean_vel' in v)
@@ -702,6 +700,14 @@ class AIService:
             return False
 
     # ── cleanup ──────────────────────────────────────────────────────────
+
+    def get_tracker_pids(self) -> list:
+        """Return list of PIDs for all running multiprocess tracker subprocesses."""
+        return [
+            proc.pid
+            for proc in self._tracker_processes.values()
+            if proc is not None and proc.is_alive()
+        ]
 
     def stop_all(self) -> None:
         """Stop all trackers (e.g. on server shutdown)."""

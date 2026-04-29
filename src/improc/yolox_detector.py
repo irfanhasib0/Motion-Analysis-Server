@@ -1,27 +1,39 @@
 """
-YOLOX ONNX Detector
+YOLOX Detector — ONNX backend
 
-Wraps YOLOX-Nano / YOLOX-Tiny ONNX models for object detection.
+Wraps YOLOX-Nano / YOLOX-Tiny models for object detection.
 Returns detection boxes in the same dict format as PersonDetector,
 so they integrate directly into the optical flow tracker pipeline.
 
-Requires: onnxruntime (optional dependency — disables gracefully if missing)
+Class hierarchy:
+    _YOLOXBase          — shared pre/postprocessing, detect(), runtime config
+    YOLOXDetectorONNX   — onnxruntime backend  (requires: onnxruntime)
+    YOLOXDetector(...)  — factory: returns YOLOXDetectorONNX
+
+Model files expected in data_dir:
+    ONNX:  yn.onnx / yt.onnx
 
 COCO class IDs (default targets):
     0 = person, 2 = car
 
 Usage:
-    detector = YOLOXDetector(model_path="yolox_nano.onnx")
-    detections = detector.detect(frame_bgr)
+    det = YOLOXDetector(model_size='nano')
+    detections = det.detect(frame_bgr)
 """
 import os
 import time
+from abc import ABC, abstractmethod
 import numpy as np
 import cv2
 
-import onnxruntime
+try:
+    import onnxruntime as _ort
+except ImportError:
+    _ort = None
 
-# --- Inlined YOLOX utilities (avoids heavy import chain from yolox repo) ---
+# ---------------------------------------------------------------------------
+# Inlined YOLOX utilities (avoids heavy import chain from yolox repo)
+# ---------------------------------------------------------------------------
 
 COCO_CLASSES = (
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
@@ -102,7 +114,17 @@ def _multiclass_nms(boxes, scores, nms_thr, score_thr):
     return np.concatenate([v_boxes[keep], v_scores[keep, None], v_cls[keep, None]], 1)
 
 
-class YOLOXDetector:
+# ---------------------------------------------------------------------------
+# Base class — shared state, detect(), and runtime configuration
+# ---------------------------------------------------------------------------
+
+class _YOLOXBase(ABC):
+    """Abstract base for YOLOX detectors.
+
+    Subclasses implement _run_inference(img_chw) → np.ndarray of shape (N, 85).
+    All pre/postprocessing, NMS, and the public API live here.
+    """
+
     # Default input shapes per model variant
     MODEL_CONFIGS = {
         "nano": (416, 416),
@@ -110,69 +132,58 @@ class YOLOXDetector:
     }
 
     def __init__(self,
-                 model_size="nano",
+                 model_size: str = "nano",
                  input_shape=None,
-                 score_thr=0.5,
-                 nms_thr=0.45,
-                 target_class_ids=None,
-                 data_dir=None):
-        """
-        Args:
-            model_size: 'nano' or 'tiny' — sets default input shape & model filename.
-            input_shape: Override (H, W) input size. Defaults per model_size.
-            score_thr: Confidence threshold for detections.
-            nms_thr: IoU threshold for NMS.
-            target_class_ids: Set of COCO class IDs to keep. Default {0, 2} (person, car).
-        """
-        self.enabled = False
-        self.session = None
+                 score_thr: float = 0.5,
+                 nms_thr: float = 0.45,
+                 target_class_ids=None):
         self.model_size = model_size
         self.score_thr = score_thr
         self.nms_thr = nms_thr
-        self.target_class_ids = target_class_ids if target_class_ids is not None else {0, 2}
+        self.target_class_ids = set(target_class_ids) if target_class_ids is not None else {0, 2}
+        self.enabled = False
+        self._last_latency_ms: float | None = None
+        self._last_call_time:  float | None = None
 
         if input_shape is not None:
             self.input_shape = tuple(input_shape)
         else:
             self.input_shape = self.MODEL_CONFIGS.get(model_size, (416, 416))
 
-        if data_dir is None:
-            data_dir = os.path.join('.', 'data')
-        model_path = os.path.join(data_dir, f"y{model_size[0]}.onnx")
+    @property
+    @abstractmethod
+    def backend(self) -> str:
+        """Return the backend name string, e.g. 'onnx' or 'ncnn'."""
 
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(f"Warning: YOLOX model not found at {model_path} — detector disabled.")
+    @abstractmethod
+    def _run_inference(self, img_chw: np.ndarray) -> np.ndarray:
+        """Run model inference.
 
-        self.session = onnxruntime.InferenceSession(model_path)
-        self.input_name = self.session.get_inputs()[0].name
-        self.enabled = True
-        self._last_latency_ms: float | None = None
-        self._last_call_time:  float | None = None
-        print(f"YOLOX-{model_size} loaded from {model_path} "
-                f"(input={self.input_shape}, classes={self.target_class_ids})")
-        
-    def detect(self, frame_bgr):
-        """
-        Run YOLOX inference on a BGR frame.
+        Args:
+            img_chw: Preprocessed float32 CHW array, shape (3, H, W).
 
         Returns:
-            List of detection dicts compatible with optical flow tracker:
-            [{'bbox', 'bbox_xywh', 'centroid', 'mask', 'type'}, ...]
+            np.ndarray of shape (N, 85) — raw YOLOX predictions before grid decode.
         """
-        if not self.enabled or self.session is None:
+
+    def detect(self, frame_bgr: np.ndarray) -> list:
+        """Run YOLOX on a BGR frame.
+
+        Returns:
+            List of detection dicts: [{'bbox', 'centroid', 'mask', 'type', 'score'}, ...]
+        """
+        if not self.enabled:
             return []
 
         t0 = time.monotonic()
-        
+
         img, ratio = _preproc(frame_bgr, self.input_shape)
-        ort_inputs = {self.input_name: img[None, :, :, :]}
-        output = self.session.run(None, ort_inputs)
-        predictions = _demo_postprocess(output[0], self.input_shape)[0]
+        raw_preds = self._run_inference(img)                       # (N, 85)
+        predictions = _demo_postprocess(raw_preds[None], self.input_shape)[0]
 
         boxes = predictions[:, :4]
         scores = predictions[:, 4:5] * predictions[:, 5:]
 
-        # Convert cx,cy,w,h to x1,y1,x2,y2
         boxes_xyxy = np.empty_like(boxes)
         boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2] / 2.0
         boxes_xyxy[:, 1] = boxes[:, 1] - boxes[:, 3] / 2.0
@@ -182,10 +193,12 @@ class YOLOXDetector:
 
         dets = _multiclass_nms(boxes_xyxy, scores, nms_thr=self.nms_thr, score_thr=self.score_thr)
         if dets is None:
+            self._last_latency_ms = (time.monotonic() - t0) * 1000
+            self._last_call_time  = time.time()
             return []
 
-        final_boxes = dets[:, :4]
-        final_scores = dets[:, 4]
+        final_boxes    = dets[:, :4]
+        final_scores   = dets[:, 4]
         final_cls_inds = dets[:, 5].astype(int)
 
         h, w = frame_bgr.shape[:2]
@@ -194,7 +207,6 @@ class YOLOXDetector:
             cls_id = int(final_cls_inds[i])
             if cls_id not in self.target_class_ids:
                 continue
-
             x1 = max(0, int(final_boxes[i, 0]))
             y1 = max(0, int(final_boxes[i, 1]))
             x2 = min(w, int(final_boxes[i, 2]))
@@ -202,32 +214,27 @@ class YOLOXDetector:
             bw, bh = x2 - x1, y2 - y1
             if bw <= 0 or bh <= 0:
                 continue
-
             mask = np.zeros((h, w), dtype=np.uint8)
             mask[y1:y2, x1:x2] = 255
-
             cls_name = COCO_CLASSES[cls_id] if cls_id < len(COCO_CLASSES) else str(cls_id)
             detections.append({
                 'bbox': [x1, y1, x2, y2],
-                'bbox_xywh': [int(x1 + bw / 2), int(y1 + bh / 2), int(bw), int(bh)],
                 'centroid': [y1 + bh / 2, x1 + bw / 2],
                 'mask': mask,
-                'type': f'{cls_name}',
+                'type': cls_name,
                 'score': round(float(final_scores[i]), 4),
             })
 
-        
-        
         self._last_latency_ms = (time.monotonic() - t0) * 1000
         self._last_call_time  = time.time()
         return detections
 
     # --- Runtime configuration ---
 
-    def set_enabled(self, enabled):
-        self.enabled = enabled and (self.session is not None)
+    def set_enabled(self, enabled: bool):
+        self.enabled = bool(enabled)
 
-    def is_enabled(self):
+    def is_enabled(self) -> bool:
         return self.enabled
 
     def set_target_classes(self, class_ids):
@@ -236,17 +243,77 @@ class YOLOXDetector:
     def get_target_classes(self):
         return self.target_class_ids
 
-    def set_score_threshold(self, thr):
+    def set_score_threshold(self, thr: float):
         self.score_thr = thr
 
-    def get_status(self):
+    def get_status(self) -> dict:
         last_call_s = round(time.time() - self._last_call_time, 1) if self._last_call_time else None
         return {
-            'enabled': self.enabled,
-            'model_size': self.model_size,
-            'input_shape': self.input_shape,
-            'score_thr': self.score_thr,
+            'enabled':          self.enabled,
+            'backend':          self.backend,
+            'model_size':       self.model_size,
+            'input_shape':      self.input_shape,
+            'score_thr':        self.score_thr,
             'target_class_ids': list(self.target_class_ids),
-            'latency_ms': self._last_latency_ms,
-            'last_call_s': last_call_s,
+            'latency_ms':       self._last_latency_ms,
+            'last_call_s':      last_call_s,
         }
+
+
+# ---------------------------------------------------------------------------
+# ONNX backend
+# ---------------------------------------------------------------------------
+
+class YOLOXDetectorONNX(_YOLOXBase):
+    """YOLOX detector using onnxruntime. Requires: pip install onnxruntime."""
+
+    @property
+    def backend(self) -> str:
+        return 'onnx'
+
+    def __init__(self, model_size="nano", input_shape=None, score_thr=0.5,
+                 nms_thr=0.45, target_class_ids=None, data_dir=None):
+        super().__init__(model_size, input_shape, score_thr, nms_thr, target_class_ids)
+
+        if _ort is None:
+            raise ImportError("onnxruntime is not installed.")
+
+        if data_dir is None:
+            data_dir = os.path.join('.', 'data')
+
+        model_path = os.path.join(data_dir, f"y{model_size[0]}.onnx")
+        if not os.path.isfile(model_path):
+            raise FileNotFoundError(f"YOLOX ONNX model not found: {model_path}")
+
+        available = _ort.get_available_providers()
+        if 'XNNPACKExecutionProvider' in available:
+            print("YOLOX: XNNPACKExecutionProvider detected — using XNNPACK")
+        providers = (['XNNPACKExecutionProvider'] if 'XNNPACKExecutionProvider' in available else []) \
+                    + ['CPUExecutionProvider']
+        self._session = _ort.InferenceSession(model_path, providers=providers)
+        self._input_name = self._session.get_inputs()[0].name
+        self.enabled = True
+        active_ep = self._session.get_providers()[0]
+        print(f"YOLOX-{model_size} [onnx] loaded from {model_path} "
+              f"(input={self.input_shape}, ep={active_ep}, classes={self.target_class_ids})")
+
+    def _run_inference(self, img_chw: np.ndarray) -> np.ndarray:
+        output = self._session.run(None, {self._input_name: img_chw[None]})
+        return output[0][0]   # (N, 85)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def YOLOXDetector(model_size="nano", input_shape=None, score_thr=0.5,
+                  nms_thr=0.45, target_class_ids=None, data_dir=None,
+                  **kwargs) -> _YOLOXBase:
+    """Return a YOLOXDetectorONNX instance."""
+    return YOLOXDetectorONNX(
+        model_size=model_size, input_shape=input_shape,
+        score_thr=score_thr, nms_thr=nms_thr,
+        target_class_ids=target_class_ids, data_dir=data_dir,
+        **kwargs,
+    )
+

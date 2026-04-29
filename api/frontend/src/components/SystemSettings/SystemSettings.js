@@ -107,7 +107,7 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
         const data = response?.data || {};
         setSettings((prev) => ({
           ...prev,
-          live_stream_mode: data.live_stream_mode === 'hls' ? 'hls' : 'mjpeg',
+          live_stream_mode: ['hls', 'ws', 'mjpeg'].includes(data.live_stream_mode) ? data.live_stream_mode : 'mjpeg',
           sensitivity: Number(data.sensitivity ?? prev.sensitivity),
           jpeg_quality: Number(data.jpeg_quality ?? prev.jpeg_quality),
           pipe_buffer_size: Number(data.pipe_buffer_size ?? prev.pipe_buffer_size),
@@ -212,7 +212,7 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
       const data = response?.data || {};
       setSettings((prev) => ({
         ...prev,
-        live_stream_mode: data.live_stream_mode === 'hls' ? 'hls' : 'mjpeg',
+        live_stream_mode: ['hls', 'ws', 'mjpeg'].includes(data.live_stream_mode) ? data.live_stream_mode : 'mjpeg',
         sensitivity: Number(data.sensitivity ?? prev.sensitivity),
         jpeg_quality: Number(data.jpeg_quality ?? prev.jpeg_quality),
         pipe_buffer_size: Number(data.pipe_buffer_size ?? prev.pipe_buffer_size),
@@ -474,6 +474,14 @@ const SystemSettings = ({ systemInfo, cameras = [], setCameras }) => {
                 disabled={performanceProfile !== 'custom'}
               >
                 HLS
+              </button>
+              <button 
+                type="button" 
+                className={settings.live_stream_mode === 'ws' ? 'btn btn-primary' : 'btn btn-secondary'} 
+                onClick={() => handleCustomPerformanceValue('live_stream_mode', 'ws')}
+                disabled={performanceProfile !== 'custom'}
+              >
+                WS
               </button>
             </div>
           </div>

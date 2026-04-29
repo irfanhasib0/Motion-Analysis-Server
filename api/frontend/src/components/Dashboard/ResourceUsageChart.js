@@ -8,10 +8,12 @@ import api from '../../api';
 const CHART_HEIGHT = 196;
 
 const SERIES = [
-  { key: 'cpu',      label: 'System CPU %',     color: '#e6194b', dash: undefined },
-  { key: 'mem',      label: 'System RAM %',      color: '#4363d8', dash: undefined },
-  { key: 'proc_cpu', label: 'Process CPU %',     color: '#f58231', dash: '5 5' },
-  { key: 'proc_mem', label: 'Process RAM %',     color: '#911eb4', dash: '5 5' },
+  { key: 'cpu',      label: 'System CPU %',  color: '#e6194b', dash: undefined },
+  { key: 'mem',      label: 'System RAM %',  color: '#4363d8', dash: undefined },
+  { key: 'proc_cpu', label: 'Server CPU %',  color: '#f58231', dash: '5 5' },
+  { key: 'proc_mem', label: 'Server RAM %',  color: '#911eb4', dash: '5 5' },
+  { key: 'ai_cpu',   label: 'AI CPU %',      color: '#3cb44b', dash: '3 3' },
+  { key: 'ai_mem',   label: 'AI RAM %',      color: '#42d4f4', dash: '3 3' },
 ];
 
 const formatTime = (ts) => {
@@ -41,7 +43,7 @@ const CustomTooltip = ({ active, payload, label }) => {
 
 const ResourceUsageChart = () => {
   const [chartData, setChartData] = useState([]);
-  const [visible, setVisible] = useState({ cpu: true, mem: true, proc_cpu: true, proc_mem: false });
+  const [visible, setVisible] = useState({ cpu: false, mem: false, proc_cpu: true, proc_mem: true, ai_cpu: true, ai_mem: true });
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -106,6 +108,9 @@ const ResourceUsageChart = () => {
           No resource data yet. Data will appear after ~30 seconds of uptime.
         </div>
       )}
+      <div style={{ fontSize: 11, color: '#aaa', marginTop: 6, textAlign: 'right' }}>
+        Sample rate: 30 s &nbsp;·&nbsp; Metrics averages window: 30 s
+      </div>
     </div>
   );
 };

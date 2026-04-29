@@ -9,7 +9,7 @@ import numpy as np
 import asyncio
 import threading
 import time
-from typing import Generator, Dict, Optional, Any, Union, List
+from typing import AsyncGenerator, Generator, Dict, Optional, Any, Union, List
 import logging
 from services.streaming.hls_streaming import HLSManager
 from services.streaming.ws_streaming import WSStreamingManager
@@ -351,16 +351,14 @@ class StreamingService:
         self,
         detect_output: Any,
     ) -> tuple[Dict[str, Any], Dict[Any, Dict[str, Any]]]:
-        """Extract points_dict and pts_payload from tracker.detect() output.
-        The visualized frame from detect() is discarded — stream_frame is used directly."""
+        """Extract points_dict and pts_payload from tracker.detect() output."""
         if not isinstance(detect_output, tuple) or len(detect_output) == 0:
             return {}, {}
 
         points_dict: Dict[str, Any] = {}
         pts_payload: Dict[Any, Dict[str, Any]] = {}
 
-        # Skip detect_output[0] (the visualized frame — unused)
-        for item in detect_output[1:]:
+        for item in detect_output:
             if isinstance(item, dict):
                 if not points_dict and any(
                     isinstance(value, dict) and ('vel' in value or 'mean_vel' in value)
@@ -765,9 +763,13 @@ class StreamingService:
             'enable_yolox': getattr(self, 'enable_yolox', False),
             'yolox_model_size': getattr(self, 'yolox_model_size', 'nano'),
             'yolox_score_thr': getattr(self, 'yolox_score_thr', 0.5),
+            'yolox_bg_diff_threshold': getattr(self, 'max_bg_diff', 1000),
+            'yolox_max_vel_threshold': getattr(self, 'max_velocity', 1.5),
             'enable_pose': getattr(self, 'enable_pose', False),
             'pose_model_size': getattr(self, 'pose_model_size', 'tiny'),
             'pose_score_thr': getattr(self, 'pose_score_thr', 0.3),
+            'enable_sub_blob': getattr(self, 'enable_sub_blob', True),
+            'scene_analysis_config': getattr(self, 'scene_analysis_config', None),
         }
         if not self.ai_service.start_ai_tracker(camera_id, tracker_kwargs):
             logger.warning(f"{Colors.RED}Failed to start tracker for {camera_id}{Colors.RESET}")
@@ -885,6 +887,14 @@ class StreamingService:
                         res['avg_person_conf'] = self._latest_person_stats.get(camera_id, {}).get('avg_person_conf', 0.0)
                         res['thumbnail_bboxes'] = self._latest_person_stats.get(camera_id, {}).get('thumbnail_bboxes', [])
 
+                        # ── Scene analysis scores (fight / burglary) ───────────────────
+                        _scene = self._latest_person_stats.get(camera_id, {}).get('scene_analysis')
+                        if _scene:
+                            res['fight_score'] = _scene.get('fight_score', 0.0)
+                            res['burglary_score'] = _scene.get('burglary_score', 0.0)
+                            res['fight_alert'] = _scene.get('fight_alert', False)
+                            res['burglary_alert'] = _scene.get('burglary_alert', False)
+
                         # ── Zone hit classification ────────────────────────────────────
                         _h, _w = stream_frame.shape[:2]
                         # Fall back to last known tracked objects when this frame has none
@@ -914,18 +924,21 @@ class StreamingService:
                     _det_ts = res.get('det_ts')
                     if _det_ts and (time.time() - _det_ts) > self.no_motion_slow_down_thr_sec:
                         time.sleep(self.no_motion_slow_down_delay_sec)
-                    # Primary video stream: clean frame with FPS and optical flow overlays
+                    # Track FPS unconditionally (used by dashboard metrics).
                     frame_fps = self._update_loop_fps(f"{camera_id}:primary")
-                    _tracker_fps = self._fps_stats.get(f"{camera_id}:tracker", {}).get("fps", 0.0)
-                    _person_stats = self._latest_person_stats.get(camera_id, {})
-                    primary_frame = self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps, person_stats=_person_stats)
-                    primary_frame = self._draw_optical_flow_overlay(primary_frame, camera_id, flow_pts)
-                    primary_frame = self._draw_zones_overlay(primary_frame, camera_id)
-                    # Encode only when at least one client is connected to the overlay
-                    # stream. Skips ~2-4ms JPEG compression per frame when no viewer.
+                    # Skip drawing and JPEG encoding when no client is connected —
+                    # saves overlay rendering (~1-3ms) + JPEG compression (~2-4ms)
+                    # on every frame, which matters a lot on constrained hardware.
                     _overlay_rbf = self._overlay_frame_ring_buffers[camera_id]
                     if _overlay_rbf.has_consumers():
-                        frame_bytes = self.frame_to_bytes(primary_frame)
+                        _tracker_fps = self._fps_stats.get(f"{camera_id}:tracker", {}).get("fps", 0.0)
+                        _person_stats = self._latest_person_stats.get(camera_id, {})
+                        # stream_frame is always a new array from _resize_frame_for_streaming;
+                        # drawing functions mutate it in-place — no extra copy needed.
+                        self._drawing.draw_fps_overlay(stream_frame, frame_fps, tracker_fps=_tracker_fps, person_stats=_person_stats)
+                        self._draw_optical_flow_overlay(stream_frame, camera_id, flow_pts)
+                        self._draw_zones_overlay(stream_frame, camera_id)
+                        frame_bytes = self.frame_to_bytes(stream_frame)
                         _overlay_rbf.put_with_timestamp(frame_bytes, frame_capture_time)
                         # Store for fallback path (thread-safe)
                         with video_lock:
@@ -994,7 +1007,7 @@ class StreamingService:
     # STREAM ENDPOINT GENERATORS
     # =====================================================================
     
-    def generate_audio_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
+    async def generate_audio_stream_endpoint(self, camera_id: str) -> AsyncGenerator[bytes, None]:
         """Generate audio stream by reading from background thread data."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
@@ -1015,6 +1028,7 @@ class StreamingService:
         
         # Yield WAV header first
         yield self._make_wav_header(audio_sample_rate, audio_channels)
+        await asyncio.sleep(0)
         
         # Background thread should already be running from /start endpoint
         if camera_id not in self._audio_background_threads:
@@ -1031,10 +1045,11 @@ class StreamingService:
             
             if current_chunk and len(current_chunk) > 0:
                 yield current_chunk
+                await asyncio.sleep(0)
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
-                time.sleep(0.1)  # 100ms wait between checks
+                await asyncio.sleep(0.1)  # 100ms wait between checks
                 # Keep audio stream alive indefinitely - don't terminate on silence
                 # Audio streams naturally have gaps during silence
         
@@ -1043,11 +1058,12 @@ class StreamingService:
             self.active_audio_streams.pop(camera_id, None)
 
 
-    def generate_video_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
+    async def generate_video_stream_endpoint(self, camera_id: str) -> AsyncGenerator[bytes, None]:
         """Generate video stream by reading from background thread data."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
-            return self.generate_failure_frame(f"Camera {camera_id} Not Found")
+            yield self.generate_failure_frame(f"Camera {camera_id} Not Found")
+            return
         
         # Create stream token and use pre-registered consumer
         stream_token = f"{time.time_ns()}:{threading.get_ident()}"
@@ -1061,8 +1077,6 @@ class StreamingService:
             logger.warning(f"{Colors.RED}No video thread for {camera_id} - start camera first{Colors.RESET}")
             yield self.generate_failure_frame("Camera not started yet")
             return
-            # Give the thread a moment to start producing frames
-            time.sleep(0.5)
         
         consecutive_empty = 0
         max_empty = 300  # 30 seconds timeout (300 * 0.1s)
@@ -1077,26 +1091,27 @@ class StreamingService:
             
             if current_frame_bytes is not None:
                 yield current_frame_bytes
+                await asyncio.sleep(0)
                 last_yielded_frame = current_frame_bytes
                 consecutive_empty = 0
             
             elif last_yielded_frame is not None:
                 # Re-yield last frame to keep stream alive
                 yield last_yielded_frame
+                await asyncio.sleep(0)
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
                 if consecutive_empty >= max_empty:
                     break
-                # Yield placeholder to keep connection alive
-                time.sleep(0.1)  # Short wait before checking for next frame
+                await asyncio.sleep(0.1)  # Short wait before checking for next frame
                 
         
         # Cleanup token (consumer stays registered for other streams)
         if self.active_streams.get(camera_id) == stream_token:
             self.active_streams.pop(camera_id, None)
     
-    def generate_processing_stream_endpoint(self, camera_id: str) -> Generator[bytes, None, None]:
+    async def generate_processing_stream_endpoint(self, camera_id: str) -> AsyncGenerator[bytes, None]:
         """Generate processed video stream from camera (visualization overlay)."""
         db_camera = self.db.get_camera(camera_id)
         if not db_camera:
@@ -1118,40 +1133,43 @@ class StreamingService:
         max_empty = 300  # 30 seconds timeout (300 * 0.1s)
         last_processed_frame = None
         
-        while self.active_processing_streams.get(camera_id) == stream_token and camera_id in self._video_background_threads:
-            # Use SPMC ring buffer access
-            processed_frame = self._get_spmc_data(camera_id, consumer_id, 'viz')
-            
-            if processed_frame is not None:
-                results = self._get_spmc_data(camera_id, consumer_id, 'results')
-                res = results.get('video', {'vel': 0, 'bg_diff': 0, 'detected_vel': False, 'detection_bg_diff': False}) if results else {'vel': 0, 'bg_diff': 0, 'detected_vel': False, 'detection_bg_diff': False}
-                consecutive_empty = 0
-                output_frame = processed_frame.copy()
-                processing_fps = self._update_loop_fps(f"{camera_id}:processing")
-                output_frame = self._draw_stream_status_overlay(output_frame, camera_id, processing_fps, res=res)
+        try:
+            while self.active_processing_streams.get(camera_id) == stream_token and camera_id in self._video_background_threads:
+                # Use SPMC ring buffer access
+                processed_frame = self._get_spmc_data(camera_id, consumer_id, 'viz')
                 
-                buffer = self.frame_to_bytes(output_frame)
-                yield buffer
-                last_processed_frame = buffer
-                
-            elif last_processed_frame is not None:
-                # Re-yield last frame to keep stream alive
-                yield last_processed_frame
-                consecutive_empty = 0
-            else:
-                consecutive_empty += 1
-                if consecutive_empty >= max_empty:
-                    logger.warning(f"{Colors.RED}No processed frames for {camera_id}, ending stream{Colors.RESET}")
-                    break
-                # Keep connection alive with small delay
-                time.sleep(0.1)
-
-        # Cleanup token (consumer stays registered for other streams)
-        if self.active_processing_streams.get(camera_id) == stream_token:
-            self.active_processing_streams.pop(camera_id, None)
+                if processed_frame is not None:
+                    results = self._get_spmc_data(camera_id, consumer_id, 'results')
+                    res = results.get('video', {'vel': 0, 'bg_diff': 0, 'detected_vel': False, 'detection_bg_diff': False}) if results else {'vel': 0, 'bg_diff': 0, 'detected_vel': False, 'detection_bg_diff': False}
+                    consecutive_empty = 0
+                    output_frame = processed_frame.copy()
+                    processing_fps = self._update_loop_fps(f"{camera_id}:processing")
+                    output_frame = self._draw_stream_status_overlay(output_frame, camera_id, processing_fps, res=res)
+                    
+                    buffer = self.frame_to_bytes(output_frame)
+                    yield buffer
+                    await asyncio.sleep(0)
+                    last_processed_frame = buffer
+                    
+                elif last_processed_frame is not None:
+                    # Re-yield last frame to keep stream alive
+                    yield last_processed_frame
+                    await asyncio.sleep(0.1)
+                    consecutive_empty = 0
+                else:
+                    consecutive_empty += 1
+                    if consecutive_empty >= max_empty:
+                        logger.warning(f"{Colors.RED}No processed frames for {camera_id}, ending stream{Colors.RESET}")
+                        break
+                    # Keep connection alive with small delay
+                    await asyncio.sleep(0.1)
+        finally:
+            # Always clean up so the video thread stops drawing viz overlays
+            if self.active_processing_streams.get(camera_id) == stream_token:
+                self.active_processing_streams.pop(camera_id, None)
             
             
-    def generate_recorded_video_stream(self, recording_id: str) -> Generator[bytes, None, None]:
+    async def generate_recorded_video_stream(self, recording_id: str) -> AsyncGenerator[bytes, None]:
         """Generate video stream from recorded file."""
         # Get recording from database
         db_recording = self.db.get_recording(recording_id)
@@ -1168,7 +1186,7 @@ class StreamingService:
             cap = cv2.VideoCapture(abs_path)
             if cap.isOpened():
                 break
-            time.sleep(0.2)
+            await asyncio.sleep(0.2)
         
         if not cap or not cap.isOpened():
             raise ValueError(f"Failed to open recording file: {abs_path}")
@@ -1179,6 +1197,7 @@ class StreamingService:
                 if not ret:
                     # End of video, loop back to start
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    await asyncio.sleep(0)
                     continue
                 
                 # Resize frame if needed
@@ -1187,6 +1206,7 @@ class StreamingService:
                 # Encode frame as JPEG
                 ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 if not ret:
+                    await asyncio.sleep(0)
                     continue
                 
                 frame_bytes = buffer.tobytes()
@@ -1195,7 +1215,7 @@ class StreamingService:
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 
                 # Control playback speed
-                time.sleep(1.0 / 30)  # 30 FPS
+                await asyncio.sleep(1.0 / 30)  # 30 FPS
                 
         except Exception as e:
             logger.error(f"Error streaming recording {recording_id}: {e}")
@@ -1207,18 +1227,19 @@ class StreamingService:
         height, width = frame.shape[:2]
         
         if width > max_width:
-            # Calculate new height to maintain aspect ratio
             ratio = max_width / width
             new_width = max_width
             new_height = int(height * ratio)
-            frame = cv2.resize(frame, (new_width, new_height))
-        
-        return frame
+            return cv2.resize(frame, (new_width, new_height))
+        # Return a copy so the caller can draw on it without mutating
+        # the original capture buffer stored in _latest_frames.
+        return frame.copy()
     
-    def generate_result_json_stream(self, camera_id: str) -> Generator[Dict[str, Union[int, float]], None, None]:
+    async def generate_result_json_stream(self, camera_id: str) -> AsyncGenerator[str, None]:
         """Generate JSON stream of processing results for a camera"""
         while self.ai_service.is_tracker_alive(camera_id):
             res = getattr(self, '_latest_res_video', {}).get(camera_id, None)
             if res is not None:
                 yield json.dumps(res)
-            time.sleep(1.0)  # Update every second
+                await asyncio.sleep(0)
+            await asyncio.sleep(1.0)  # Update every second

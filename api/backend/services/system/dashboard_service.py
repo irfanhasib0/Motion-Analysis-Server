@@ -524,8 +524,8 @@ class StreamHealthMonitor:
         return combined
 
 
-class DashboardService:
-    def __init__(self, camera_service, window_seconds: int = 300, sample_interval_seconds: int = 5):
+class SystemService:
+    def __init__(self, camera_service, window_seconds: int = 30, sample_interval_seconds: int = 5):
         self.camera_service = camera_service
         self.window_seconds = window_seconds
         self.sample_interval_seconds = sample_interval_seconds
@@ -549,6 +549,16 @@ class DashboardService:
         # Initialize stream health monitor
         self.stream_monitor = StreamHealthMonitor(camera_service)
 
+        # Cached recordings directory size — refreshed every 60s in _sample_loop.
+        self._recording_dir_size_bytes: int = 0
+        self._last_dir_size_refresh: float = 0.0
+        self._dir_size_refresh_interval: int = 60
+
+        # psutil.Process cache for AI tracker subprocesses (multiprocess mode).
+        # Keyed by OS pid; evicted when the process is no longer alive.
+        self._ai_proc_cache: Dict[int, psutil.Process] = {}
+    
+    def start(self):
         self._sampler_thread = threading.Thread(target=self._sample_loop, daemon=True)
         self._sampler_thread.start()
 
@@ -573,6 +583,12 @@ class DashboardService:
                 self._collect_sample()
                 self._check_ram_threshold()
                 self.stream_monitor.monitor_streams()  # Add stream health monitoring
+                now = time.time()
+                if now - self._last_dir_size_refresh >= self._dir_size_refresh_interval:
+                    self._recording_dir_size_bytes = self._get_directory_size_bytes(
+                        self.camera_service.recordings_dir
+                    )
+                    self._last_dir_size_refresh = now
             except Exception:
                 logger.exception("⚠️ _sample_loop iteration failed — monitoring continues")
             time.sleep(self.sample_interval_seconds)
@@ -583,7 +599,8 @@ class DashboardService:
         disk_counters = psutil.disk_io_counters()
 
         process = self._find_start_server_process()
-        process_cpu = process.cpu_percent(interval=0.05)
+        _cpu_count = psutil.cpu_count() or 1
+        process_cpu = process.cpu_percent(interval=0.05) / _cpu_count
         process_memory_percent = process.memory_percent()
         process_memory_mb = process.memory_info().rss / (1024 ** 2)
 
@@ -639,6 +656,42 @@ class DashboardService:
             'process_disk_io_write_mb_total': process_write_mb_total,
         }
 
+        # Aggregate CPU + memory across all AI tracker subprocesses.
+        ai_cpu_total = 0.0
+        ai_memory_mb_total = 0.0
+        ai_memory_pct_total = 0.0
+        ai_tracker_pids: list = []
+        try:
+            ai_service = getattr(self.camera_service, 'ai_service', None)
+            if ai_service and self.camera_service.ai_service.use_multiprocess:
+                ai_tracker_pids = ai_service.get_tracker_pids()
+                live_pids = set(ai_tracker_pids)
+                # Evict stale cached Process objects
+                for dead in [p for p in self._ai_proc_cache if p not in live_pids]:
+                    self._ai_proc_cache.pop(dead, None)
+                for pid in ai_tracker_pids:
+                    new_entry = pid not in self._ai_proc_cache
+                    if new_entry:
+                        self._ai_proc_cache[pid] = psutil.Process(pid)
+                        # Prime the cpu_percent baseline; first call always returns 0.0
+                        self._ai_proc_cache[pid].cpu_percent(interval=None)
+                    try:
+                        p = self._ai_proc_cache[pid]
+                        if not new_entry:
+                            # Normalize to 0–100% regardless of core count
+                            ai_cpu_total += p.cpu_percent(interval=None) / _cpu_count
+                        ai_memory_mb_total += p.memory_info().rss / (1024 ** 2)
+                        ai_memory_pct_total += p.memory_percent()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        self._ai_proc_cache.pop(pid, None)
+        except Exception:
+            pass
+
+        sample['ai_tracker_pids'] = ai_tracker_pids
+        sample['ai_cpu_percent'] = ai_cpu_total
+        sample['ai_memory_mb'] = ai_memory_mb_total
+        sample['ai_memory_percent'] = ai_memory_pct_total
+
         with self._lock:
             self._samples.append(sample)
             cutoff = now - self.window_seconds
@@ -653,6 +706,8 @@ class DashboardService:
                 'mem': sample.get('memory_usage', 0.0),
                 'proc_cpu': sample.get('process_cpu_percent', 0.0),
                 'proc_mem': sample.get('process_memory_percent', 0.0),
+                'ai_cpu': sample.get('ai_cpu_percent', 0.0),
+                'ai_mem': sample.get('ai_memory_percent', 0.0),
             })
             self._last_resource_sample = now
 
@@ -690,7 +745,7 @@ class DashboardService:
 
         recording_disk = psutil.disk_usage(self.camera_service.recordings_dir)
         overall_disk = psutil.disk_usage(os.path.abspath(os.sep))
-        recording_dir_size_bytes = self._get_directory_size_bytes(self.camera_service.recordings_dir)
+        recording_dir_size_bytes = self._recording_dir_size_bytes
         uptime_delta = datetime.now() - self.camera_service.start_time
         total_uptime_seconds = max(0, int(uptime_delta.total_seconds()))
 
@@ -737,6 +792,14 @@ class DashboardService:
                 'disk_io_read_mb_s': latest.get('process_disk_io_read_mb_s', 0.0),
                 'disk_io_write_mb_s': latest.get('process_disk_io_write_mb_s', 0.0),
             },
+            'ai_process_usage': {
+                'mode': 'multiprocess' if getattr(getattr(self.camera_service, 'ai_service', None), 'use_multiprocess', False) else 'inline',
+                'tracker_pids': latest.get('ai_tracker_pids', []),
+                'tracker_count': len(latest.get('ai_tracker_pids', [])),
+                'cpu_percent': latest.get('ai_cpu_percent', 0.0),
+                'memory_mb': latest.get('ai_memory_mb', 0.0),
+                'memory_percent': latest.get('ai_memory_percent', 0.0),
+            },
             'averages_5m': {
                 'window_seconds': self.window_seconds,
                 'sample_count': len(samples),
@@ -748,6 +811,8 @@ class DashboardService:
                 'process_memory_percent': self._average(samples, 'process_memory_percent'),
                 'process_disk_io_read_mb_s': self._average(samples, 'process_disk_io_read_mb_s'),
                 'process_disk_io_write_mb_s': self._average(samples, 'process_disk_io_write_mb_s'),
+                'ai_cpu_percent': self._average(samples, 'ai_cpu_percent'),
+                'ai_memory_percent': self._average(samples, 'ai_memory_percent'),
             },
             'processing_active': processing_active,
             'active_recordings': len(self.camera_service.active_recordings),

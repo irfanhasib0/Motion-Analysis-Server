@@ -14,18 +14,19 @@ system:
       motion_check_interval: 10
       min_free_storage_gb: 1
       rtsp_unified_demux_enabled: false
-      frame_rbf_len: 10
-      audio_rbf_len: 10
-      results_rbf_len: 10
+      frame_rbf_len: 3
+      audio_rbf_len: 5
+      results_rbf_len: 5
       mux_realtime: false
       auto_archive_days: 7
       enable_person_detection: false
       enable_yolox: true
       yolox_model_size: tiny
       yolox_score_thr: 0.3
-      enable_pose: true
+      enable_pose: false
       pose_model_size: tiny
       pose_score_thr: 0.05
+      enable_sub_blob: true
       tracker_multiprocess: true
     low_power:
       live_stream_mode: ws
@@ -50,6 +51,7 @@ system:
       enable_pose: false
       pose_model_size: tiny
       pose_score_thr: 0.3
+      enable_sub_blob: true
       tracker_multiprocess: false
     custom:
       live_stream_mode: ws
@@ -62,11 +64,11 @@ system:
       motion_check_interval: 10
       min_free_storage_gb: 1
       rtsp_unified_demux_enabled: false
-      frame_rbf_len: 10
-      audio_rbf_len: 10
-      results_rbf_len: 10
+      frame_rbf_len: 3
+      audio_rbf_len: 5
+      results_rbf_len: 5
       mux_realtime: false
-      auto_archive_days: 5
+      auto_archive_days: 7
       enable_person_detection: false
       enable_yolox: true
       yolox_model_size: tiny
@@ -74,4 +76,42 @@ system:
       enable_pose: false
       pose_model_size: tiny
       pose_score_thr: 0.3
+      enable_sub_blob: true
       tracker_multiprocess: false
+  scene_analysis:
+    enabled: true
+    fight_threshold: 0.6
+    burglary_threshold: 0.5
+    cooldown_frames: 150
+    min_persons_for_fight: 2
+    proximity_distance_ratio: 2.0
+    proximity_min_frames: 15
+    trajectory_window: 30
+    fight_weights:
+      oscillation: 0.25
+      entropy: 0.2
+      approach_rate: 0.25
+      proximity: 0.2
+      bbox_variance: 0.1
+    burglary_weights:
+      loiter: 0.3
+      zone_dwell: 0.3
+      carried_object: 0.25
+      threat_object: 0.15
+    threat_classes:
+    - knife
+    - scissors
+    - baseball bat
+    carry_classes:
+    - backpack
+    - handbag
+    - suitcase
+    - bottle
+    yolox_extra_classes:
+    - 24
+    - 26
+    - 28
+    - 34
+    - 39
+    - 43
+    - 76

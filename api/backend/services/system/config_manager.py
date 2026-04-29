@@ -53,6 +53,9 @@ class ConfigManager:
         self.recordings_path = os.path.join(configs_dir, "recordings.yaml")
         self.system_path = os.path.join(os.path.dirname(configs_dir), "system.yaml")
 
+        # mtime-based read cache: {path: (mtime, parsed_dict)}
+        self._yaml_cache: Dict[str, tuple] = {}
+
         # Ensure files exist with base structure
         if not os.path.exists(self.cameras_path):
             self._write_yaml(self.cameras_path, {"cameras": []})
@@ -69,6 +72,8 @@ class ConfigManager:
         
         # Load into memory
         self.cameras: List[Dict[str, Any]] = self._read_yaml(self.cameras_path).get("cameras", [])
+        # Backfill missing fields on existing records (schema migration)
+        self.cameras = [self._ensure_camera_defaults(c) for c in self.cameras]
         self.recordings: List[Dict[str, Any]] = self._load_recordings()
 
     # Helpers
@@ -76,13 +81,28 @@ class ConfigManager:
         return datetime.utcnow().isoformat()
 
     def _read_yaml(self, path: str) -> Dict[str, Any]:
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            mtime = None
+        cached = self._yaml_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
         with open(path, "r") as f:
             data = yaml.safe_load(f) or {}
+        if mtime is not None:
+            self._yaml_cache[path] = (mtime, data)
         return data
 
     def _write_yaml(self, path: str, data: Dict[str, Any]) -> None:
-        with open(path, "w") as f:
+        # Atomic write: write to a temp file next to the target, then rename.
+        # Prevents partial/empty files if the process is killed mid-write.
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             yaml.safe_dump(data, f, sort_keys=False)
+        os.replace(tmp, path)
+        # Invalidate cache so the next read reflects the new content.
+        self._yaml_cache.pop(path, None)
 
     def _save_cameras(self) -> None:
         self._write_yaml(self.cameras_path, {"cameras": self.cameras})
@@ -249,7 +269,13 @@ class ConfigManager:
         
         return self.get_system_settings()
 
+    def get_scene_analysis_config(self) -> Dict[str, Any]:
+        """Return the scene_analysis section from system.yaml (not preset-scoped)."""
+        data = self._read_yaml(self.system_path)
+        return data.get('system', {}).get('scene_analysis', {})
+
     def _ensure_camera_defaults(self, cam: Dict[str, Any]) -> Dict[str, Any]:
+        cam.setdefault("source", "")
         cam.setdefault("camera_type", "webcam")
         cam.setdefault("fps", 30)
         cam.setdefault("resolution", "640x480")
@@ -264,6 +290,7 @@ class ConfigManager:
         cam.setdefault("audio_input_format", None)
         cam.setdefault("audio_sample_rate", 16000)
         cam.setdefault("audio_chunk_size", 512)
+        cam.setdefault("keep_online", True)
         return cam
 
     def _ensure_recording_defaults(self, rec: Dict[str, Any]) -> Dict[str, Any]:

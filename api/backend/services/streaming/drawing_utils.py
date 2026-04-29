@@ -79,8 +79,9 @@ class StreamDrawingHelper:
     }
     BBOX_YOLOX_DEFAULT_COLOR = (0, 200, 200)  # Teal — other YOLOX classes
     BBOX_DEFAULT_COLOR = (0, 255, 0)           # Green fallback
-    
-    
+    SCENE_FIGHT_COLOR    = (80,  130, 255)  # red-blue — fight
+    SCENE_BURGLARY_COLOR = (60,  220, 200)  # teal — burglary
+
     @classmethod
     def bbox_color_for_type(cls, det_type: str) -> tuple:
         """Return BGR color tuple for a detection type string."""
@@ -137,9 +138,6 @@ class StreamDrawingHelper:
         if frame is None:
             return frame
 
-        if not frame.flags.writeable or not frame.flags.c_contiguous:
-            frame = np.ascontiguousarray(frame).copy()
-
         res = res or {}
         texts = [f"FPS: {fps_value:.1f} | Tracker: {tracker_fps:.1f}"]
         if len(res):
@@ -181,16 +179,17 @@ class StreamDrawingHelper:
 
         num_traj_viz = self.NUM_TRAJ_VIZ
 
-        # Fixed layout: 2 audio rows (0-1) + num_traj_viz velocity rows (2-6) = 7 total, always
-        total_rows = 2 + num_traj_viz
+        # Fixed layout: 1 audio row (0) + 1 shared velocity row (1) + 1 shared scene row (2) = 3 total
+        total_rows = 3
         row_h = max(8, usable_h // total_rows)
 
         scale = max(0.65, min(1.6, h / 720.0))
         baseline_thickness = max(1, int(round(1.2 * scale)))
         curve_thickness = max(1, int(round(2.0 * scale)))
-        left_pad = max(8, int(round(10 * scale)))
-        graph_x0 = max(left_pad + 4, int(round(w * 0.18)))
-        max_pts = max(1, w - graph_x0 - left_pad)
+        left_pad = max(4, int(round(5 * scale)))
+        right_label_pad = max(35, int(round(w * 0.18)))
+        graph_x0 = left_pad
+        max_pts = max(1, w - graph_x0 - right_label_pad)
 
         points_items = list((k, v) for k, v in points_dict.items() if k != '_stats')
         
@@ -223,50 +222,70 @@ class StreamDrawingHelper:
 
         loudness_vals = _extract_series_values(analysis.get('loudness_series') or [])
         peak_freq_vals = _extract_series_values(analysis.get('peak_frequency_mean_series') or [])
-        
-        # Fixed audio row defs — always at rows 0 and 1 (empty axes shown if no data)
-        audio_row_defs = [
-            ("A-Amp", loudness_vals,  self.AUDIO_LOUDNESS_COLOR, self.AUDIO_SERIES_GAIN),
-            ("A-Fq",  peak_freq_vals/20000, self.AUDIO_PEAKFREQ_COLOR, self.AUDIO_SERIES_GAIN),
-        ]
 
-        def _draw_row(row_idx: int, label: str, vals: np.ndarray, color, gain: float):
-            center_y = top_margin + row_idx * row_h + (row_h // 2)
-            cv2.line(plot_array, (0, center_y), (w, center_y), (150, 150, 150), baseline_thickness, cv2.LINE_AA)
-            if label:
-                row_label_scale = max(0.32, 0.38 * scale)
-                row_label_thickness = max(1, int(round(1.2 * scale)))
-                label_y = max(8, min(h - 4, center_y - 3))
-                cv2.putText(plot_array, label, (4, label_y), cv2.FONT_HERSHEY_SIMPLEX,
-                            row_label_scale, color, row_label_thickness, cv2.LINE_AA)
+        row_label_scale = max(0.28, 0.34 * scale)
+        row_label_thickness = max(1, int(round(1.1 * scale)))
+
+        def _draw_label_right(label: str, center_y: int, color, y_offset: int = 0):
+            """Draw a label in the right margin, vertically centered at center_y + y_offset."""
+            (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, row_label_scale, row_label_thickness)
+            lx = w - right_label_pad + 4
+            ly = max(lh + 2, min(h - 4, center_y + y_offset + lh // 2))
+            cv2.putText(plot_array, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                        row_label_scale, color, row_label_thickness, cv2.LINE_AA)
+
+        def _draw_curve(center_y: int, vals: np.ndarray, color, gain: float):
             if vals.size < 2:
                 return
             clipped = vals[-max_pts:]
-            amp = 1.0 #max(float(np.max(np.abs(clipped))), 1e-6)
             y_amp = max(3.0, row_h * gain)
             xs = (5 * np.arange(clipped.size, dtype=np.float32)) + graph_x0
-            ys = center_y - (clipped / amp) * y_amp
+            ys = center_y - clipped * y_amp
             pts = np.stack([xs, ys], axis=1).astype(np.int32).reshape((-1, 1, 2))
             cv2.polylines(plot_array, [pts], False, color, curve_thickness, cv2.LINE_AA)
 
-        # Draw audio rows — always rows 0 and 1
-        for row_idx, (label, vals, color, gain) in enumerate(audio_row_defs):
-            _draw_row(row_idx, label, vals, color, gain)
+        # --- Shared audio row (row 0) — amplitude and frequency overlaid ---
+        audio_center_y = top_margin + 0 * row_h + (row_h // 2)
+        cv2.line(plot_array, (0, audio_center_y), (w, audio_center_y), (150, 150, 150), baseline_thickness, cv2.LINE_AA)
+        _draw_curve(audio_center_y, loudness_vals,          self.AUDIO_LOUDNESS_COLOR, self.AUDIO_SERIES_GAIN)
+        _draw_curve(audio_center_y, peak_freq_vals / 20000, self.AUDIO_PEAKFREQ_COLOR, self.AUDIO_SERIES_GAIN)
+        audio_half_gap = max(6, row_h // 4)
+        _draw_label_right('Amp',  audio_center_y, self.AUDIO_LOUDNESS_COLOR, y_offset=-audio_half_gap)
+        _draw_label_right('Freq', audio_center_y, self.AUDIO_PEAKFREQ_COLOR, y_offset=+audio_half_gap)
 
-        # Draw velocity rows — always rows 2 .. 2+num_traj_viz-1 (empty axis if no camera data)
-        empty_vel = np.array([], dtype=np.float32)
+        # --- Shared velocity row (row 1) — all trajectories overlaid on one axis ---
+        vel_center_y = top_margin + 1 * row_h + (row_h // 2)
+        cv2.line(plot_array, (0, vel_center_y), (w, vel_center_y), (150, 150, 150), baseline_thickness, cv2.LINE_AA)
+
         res = {}
+        n_active = max(1, min(len(points_items), num_traj_viz))
         for idx in range(num_traj_viz):
-            row_idx = 2 + idx
             if idx < len(points_items):
                 _id, payload = points_items[idx]
                 color = colors[idx % n_colors]
                 vel = np.asarray(payload.get('vel', []), dtype=np.float32).reshape(-1)
                 mean_vel = float(payload.get('mean_vel', 0.0))
-                _draw_row(row_idx, f"V-{_id}", vel, color, self.VELOCITY_ROW_GAIN)
+                _draw_curve(vel_center_y, vel, color, self.VELOCITY_ROW_GAIN)
                 res[_id] = {'vel': round(mean_vel, 2), 'bg_diff': bg_diff_int}
-            else:
-                _draw_row(row_idx, "", empty_vel, colors[idx % n_colors], self.VELOCITY_ROW_GAIN)
+                # Stack labels evenly across the row height
+                y_step = max(1, row_h // n_active)
+                y_off = -row_h // 2 + y_step // 2 + idx * y_step
+                _draw_label_right(f"V-{_id}", vel_center_y, color, y_offset=y_off)
+
+        # --- Scene score row (shared axis, row 2) — series owned by SceneAnalyzer ---
+        stats = points_dict.get('_stats') or {}
+        scene = stats.get('scene_analysis') or {}
+
+        fight_vals = _extract_series_values(scene.get('fight_series') or [])
+        burg_vals  = _extract_series_values(scene.get('burglary_series') or [])
+
+        scene_center_y = top_margin + 2 * row_h + (row_h // 2)
+        cv2.line(plot_array, (0, scene_center_y), (w, scene_center_y), (150, 150, 150), baseline_thickness, cv2.LINE_AA)
+        _draw_curve(scene_center_y, fight_vals, self.SCENE_FIGHT_COLOR,    1.0)
+        _draw_curve(scene_center_y, burg_vals,  self.SCENE_BURGLARY_COLOR, 1.0)
+        label_half_gap = max(6, row_h // 4)
+        _draw_label_right('Fight',   scene_center_y, self.SCENE_FIGHT_COLOR,    y_offset=-label_half_gap)
+        _draw_label_right('Burglary', scene_center_y, self.SCENE_BURGLARY_COLOR, y_offset=+label_half_gap)
 
         return plot_array, res
 
@@ -323,14 +342,14 @@ class StreamDrawingHelper:
         pts_payload: Optional[Dict[Any, Dict[str, Any]]],
         draw_mask: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        viz_frame = frame.copy()
-        if draw_mask is None or draw_mask.shape[:2] != viz_frame.shape[:2]:
-            draw_mask = np.zeros_like(viz_frame)
+        if draw_mask is None or draw_mask.shape[:2] != frame.shape[:2]:
+            draw_mask = np.zeros_like(frame)
         else:
-            draw_mask = (0.99 * draw_mask).astype(np.uint8)
+            # cv2.convertScaleAbs fades in one C-level pass with no float intermediate.
+            cv2.convertScaleAbs(draw_mask, draw_mask, alpha=0.999)
 
         if not pts_payload:
-            return viz_frame, draw_mask
+            return frame, draw_mask
 
         colors = self.OVERLAY_COLORS
         n_colors = max(1, len(colors))
@@ -347,7 +366,7 @@ class StreamDrawingHelper:
                 color = colors[idx % n_colors]
                 try:
                     draw_mask = cv2.line(draw_mask, (a, b), (c, d), color, 2)
-                    viz_frame = cv2.circle(viz_frame, (a, b), 3, color, -1)
+                    cv2.circle(frame, (a, b), 5, color, 1)
                 except Exception:
                     continue
 
@@ -357,10 +376,10 @@ class StreamDrawingHelper:
                     x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
                     det_type = track_data.get('type', 'motion')
                     bbox_color = self.bbox_color_for_type(det_type)
-                    cv2.rectangle(viz_frame, (x1, y1), (x2, y2), bbox_color, 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), bbox_color, 2)
                     label = f'ID:{track_id} {det_type}'
                     cv2.putText(
-                        viz_frame,
+                        frame,
                         label,
                         (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX,
@@ -372,8 +391,8 @@ class StreamDrawingHelper:
                     pass
 
         try:
-            viz_frame = cv2.add(viz_frame, draw_mask)
+            cv2.add(frame, draw_mask, frame)
         except Exception:
             pass
 
-        return viz_frame, draw_mask
+        return frame, draw_mask

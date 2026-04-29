@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api", tags=["system"])
 async def get_system_info():
     """Get overall system and start_server process metrics for dashboard."""
     try:
-        info = deps.dashboard_service.get_system_info()
+        info = deps.system_service.get_system_info()
         mode = deps.get_live_stream_mode()
         info['settings'] = {
             'live_stream_mode': mode if mode in {"mjpeg", "hls", "ws"} else "mjpeg",
@@ -187,7 +187,7 @@ async def get_camera_stream_health(camera_id: str):
         if not camera:
             raise HTTPException(status_code=404, detail="Camera not found")
         
-        health_status = deps.dashboard_service.stream_monitor.get_health_status(camera_id)
+        health_status = deps.system_service.stream_monitor.get_health_status(camera_id)
         return health_status
         
     except HTTPException:
@@ -204,14 +204,14 @@ async def get_all_cameras_stream_health():
     
     for camera in cameras:
         if camera.id in deps.camera_service._camera_streams:
-            health_statuses[camera.id] = deps.dashboard_service.stream_monitor.get_health_status(camera.id)
+            health_statuses[camera.id] = deps.system_service.stream_monitor.get_health_status(camera.id)
     
     return {
         'cameras': health_statuses,
         'monitoring_config': {
-            'lag_threshold': deps.dashboard_service.stream_monitor.lag_threshold,
-            'slow_recovery_interval': deps.dashboard_service.stream_monitor.slow_recovery_interval,
-            'enable_slow_recovery_threshold': deps.dashboard_service.stream_monitor.enable_slow_recovery_threshold,
+            'lag_threshold': deps.system_service.stream_monitor.lag_threshold,
+            'slow_recovery_interval': deps.system_service.stream_monitor.slow_recovery_interval,
+            'enable_slow_recovery_threshold': deps.system_service.stream_monitor.enable_slow_recovery_threshold,
         }
     }
 
@@ -220,7 +220,7 @@ async def get_all_cameras_stream_health():
 async def get_all_lag_history():
     """Get 24h lag history for all cameras for dashboard plotting."""
     try:
-        return deps.dashboard_service.stream_monitor.get_lag_history()
+        return deps.system_service.stream_monitor.get_lag_history()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get lag history: {str(e)}")
 
@@ -229,7 +229,7 @@ async def get_all_lag_history():
 async def get_resource_history():
     """Get 24h CPU and memory usage history for dashboard plotting."""
     try:
-        return deps.dashboard_service.get_resource_history()
+        return deps.system_service.get_resource_history()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get resource history: {str(e)}")
 
@@ -241,7 +241,7 @@ async def get_camera_lag_history(camera_id: str):
         camera = deps.camera_service.get_camera(camera_id)
         if not camera:
             raise HTTPException(status_code=404, detail="Camera not found")
-        return deps.dashboard_service.stream_monitor.get_lag_history(camera_id)
+        return deps.system_service.stream_monitor.get_lag_history(camera_id)
     except HTTPException:
         raise
     except Exception as e:

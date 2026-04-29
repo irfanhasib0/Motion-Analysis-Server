@@ -240,6 +240,7 @@ function App() {
                 <CameraList 
                   cameras={cameras}
                   setCameras={setCameras}
+                  streamMode={systemInfo?.settings?.live_stream_mode ?? 'mjpeg'}
                 />
               } 
             />

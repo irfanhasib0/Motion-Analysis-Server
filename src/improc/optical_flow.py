@@ -18,7 +18,7 @@ Example Usage:
     tracker.set_detection_method('fast')
     
     # Process frame
-    viz_frame, pts, viz_mem1, viz_mem2 = tracker.detect(frame)
+    points_dict = tracker.detect(frame)
     
     # Switch to accurate mode
     tracker.set_detection_method('accurate')
@@ -35,7 +35,8 @@ from trackers.trackers import SimpleTracker, ByteTracker
 from improc.memory import FlowMemory, CoresetMemory
 from improc.person_detection import PersonDetector
 from improc.yolox_detector import YOLOXDetector
-from improc.shared_detectors import get_shared_yolox, get_shared_person_detector, get_shared_rtmpose
+from improc.shared_detectors import get_shared_yolox_cpp, get_shared_person_detector, get_shared_rtmpose
+from improc.scene_analyzer import SceneAnalyzer
 
 
 def _copy_pts(pts: dict) -> dict:
@@ -82,9 +83,14 @@ class OpticalFlowTracker:
                  enable_person_detection=False,
                  yolox_model_size='nano',
                  yolox_score_thr=0.5,
+                 yolox_backend='ncnn',
+                 yolox_bg_diff_threshold=1000,
+                 yolox_max_vel_threshold=1.5,
                  enable_pose=False,
                  pose_model_size='tiny',
-                 pose_score_thr=0.3):
+                 pose_score_thr=0.3,
+                 enable_sub_blob=True,
+                 scene_analysis_config=None):
 
         # --- Frame state ---
         self.prev_gray = None   # Previous grayscale frame for flow computation
@@ -108,6 +114,11 @@ class OpticalFlowTracker:
         self.bg_mask_dilate_ksize = (3, 3)       # Morphology kernel size for mask cleanup
         self.bf_detect_shadow = bg_detect_shadow
         self.bg_shadow_pixel_value = 127         # MOG2 shadow pixel marker value
+        # LUT that maps shadow pixels (127) → 0 while preserving foreground (255).
+        # Used by _detect_foreground_boxes to strip shadows without a temporary bool array.
+        _lut = np.zeros(256, dtype=np.uint8)
+        _lut[255] = 255
+        self._shadow_lut = _lut
 
         # --- Matching parameters ---
         self.mtc_max_cost_thr = 50               # Max L2² distance for keypoint assignment
@@ -169,9 +180,30 @@ class OpticalFlowTracker:
         self.person_detector = get_shared_person_detector() if enable_person_detection else None
         self.enable_person_detection = self.person_detector is not None
 
-        yolox = get_shared_yolox(model_size=yolox_model_size, score_thr=yolox_score_thr) if enable_yolox else None
+        yolox = get_shared_yolox_cpp(model_size=yolox_model_size, score_thr=yolox_score_thr, backend=yolox_backend) if enable_yolox else None
         self.yolox_detector = yolox
         self.enable_yolox = yolox is not None and yolox.is_enabled()
+
+        # Expand YOLOX target classes for scene analysis (backpack, knife, etc.)
+        if self.enable_yolox and scene_analysis_config:
+            extra_ids = scene_analysis_config.get('yolox_extra_classes', [])
+            if extra_ids:
+                self.yolox_detector.target_class_ids = self.yolox_detector.target_class_ids | set(int(c) for c in extra_ids)
+
+        # Motion-gating for YOLOX: skip inference when scene is idle.
+        # Thresholds sourced from system.yaml (same values used by the recording motion gate).
+        self._yolox_bg_diff_threshold = yolox_bg_diff_threshold
+        self._yolox_max_vel_threshold = yolox_max_vel_threshold
+        self._yolox_cooldown_frames = 30    # frames to keep inferring after motion stops
+        self._yolox_idle_frames = 0         # frames elapsed since last motion above threshold
+        self._last_max_vel = 0.0            # max mean_vel observed in previous frame
+        # Temporal skip: run full YOLOX inference every N active frames.
+        # Between detections ByteTracker + CamShift propagates existing boxes.
+        self._yolox_det_interval = 3        # run inference every 3rd motion-active frame
+        self._yolox_det_counter = 0         # counts frames since last inference
+        self._last_yolox_dets = []          # cached detections replayed on skipped frames
+        self._sub_blob_area_ratio = 0.20    # contour area < this × det area → sub-blob candidate
+        self.enable_sub_blob = enable_sub_blob  # Enable sub-blob tagging via contour_in_dets
 
         # --- Optional RTMPose keypoint estimator ---    
         pose_detector = get_shared_rtmpose(model_size=pose_model_size, score_thr=pose_score_thr) if enable_pose else None
@@ -180,6 +212,11 @@ class OpticalFlowTracker:
 
         self.curr_frame = None   # Latest BGR frame (used by pose detector)
         self.viz_div_h = None
+
+        # --- Scene trajectory analyzer (fight / burglary detection) ---
+        self.scene_analyzer = None
+        if scene_analysis_config and scene_analysis_config.get('enabled', False):
+            self.scene_analyzer = SceneAnalyzer(config=scene_analysis_config)
 
     def restart(self, matcher_mode="hungarian"):
         self.__init__(matcher_mode=matcher_mode)
@@ -217,7 +254,7 @@ class OpticalFlowTracker:
     
     def set_yolox_enabled(self, enabled):
         if enabled and self.yolox_detector is None:
-            self.yolox_detector = get_shared_yolox()
+            self.yolox_detector = get_shared_yolox_cpp()
         self.enable_yolox = enabled and (self.yolox_detector is not None) and self.yolox_detector.is_enabled()
     
     def is_yolox_enabled(self):
@@ -401,22 +438,78 @@ class OpticalFlowTracker:
         hsv[..., 2] = 255                               # Full value
         return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     
-    def contour_in_dets(self, cnt_box, dets):
-        """Return True if cnt_box overlaps any detection bbox above the IoU threshold."""
+    def contour_in_dets(self, cnt_box, det_id, dets):
+        """Check cnt_box overlap against all items in dets.
+
+        cnt_box is a YOLOX det bbox; dets is the current results list.
+
+        Returns True  — cnt_box overlaps a non-motion item (Haar/existing DL box):
+                        caller should suppress adding the YOLOX det.
+        Returns False — either no overlap, or the overlapping motion box was
+                        removed from dets so the YOLOX box replaces it cleanly.
+
+        Side-effects when det_id is not None:
+          - Partial-overlap motion boxes (0 < IoU < threshold, area < ratio) are
+            recorded in self._sub_blob_iou_map keyed by id(motion_dict) so that
+            _tag_sub_blobs can assign them without recomputing IoU.
+        """
         x1, y1, x2, y2 = cnt_box
-        cnt_area = (x2 - x1) * (y2 - y1)
-        for det in dets:
+        cnt_area = max((x2 - x1) * (y2 - y1), 1)
+        best_iou = 0.0
+        best_idx = -1
+        
+        for i, det in enumerate(dets):
+            if not det.get('type') == 'motion':
+                continue  # Motion boxes are allowed to overlap and be replaced by YOLOX detections.
             dx1, dy1, dx2, dy2 = det['bbox']
             inter_w = min(x2, dx2) - max(x1, dx1)
             inter_h = min(y2, dy2) - max(y1, dy1)
-            if inter_w <= 0 or inter_h <= 0:
-                continue
+            #if inter_w <= 0 or inter_h <= 0:
+            #    continue
             inter = inter_w * inter_h
-            iou = inter / (cnt_area + (dx2 - dx1) * (dy2 - dy1) - inter)
-            if iou >= self.iou_threshold:
-                return True
-        return False
-    
+            det_area = (dx2 - dx1) * (dy2 - dy1)
+            iou = inter / (cnt_area + det_area - inter)
+            if det_id is not None:
+                # Record partial-overlap motion boxes for _tag_sub_blobs (no recomputation needed)
+                if (0 < iou < self.iou_threshold): # det_area < self._sub_blob_area_ratio * cnt_area
+                    if iou > det.get('_sub_blob_iou', 0.0):
+                        det['_sub_blob_det_id'] = det_id
+                        det['_sub_blob_iou'] = iou
+                        det.pop('_sub_blob_dist', None)  # Remove any existing distance record since IoU is higher
+                # motion box with no intersection → record normalized distance for potential sub-blob tagging
+                elif iou <= 0.0 and '_sub_blob_iou' not in det:
+                    norm_dist = np.sqrt((max(x1, dx1) - min(x2, dx2)) ** 2 + (max(y1, dy1) - min(y2, dy2)) ** 2)/cnt_area
+                    if det.get('_sub_blob_dist', float('inf')) > norm_dist:
+                        det['_sub_blob_det_id'] = det_id
+                        det['_sub_blob_dist'] = norm_dist
+
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = i
+
+        if best_iou >= self.iou_threshold and best_idx >= 0:
+            if dets[best_idx].get('type') == 'motion':
+                # Remove the motion box; caller adds the YOLOX box directly.
+                dets.pop(best_idx)
+            # Overlaps a Haar or existing DL box — suppress the YOLOX det.
+            
+    def _tag_sub_blobs(self, results):
+        """Tag motion boxes as sub-blobs using IoU data stored by contour_in_dets.
+
+        contour_in_dets writes '_sub_blob_det_id' and '_sub_blob_iou' directly
+        onto each qualifying motion box dict, so no separate map or recomputation
+        is needed here.
+        """
+        for res in results:
+            if res.get('type') != 'motion':
+                continue
+            det_id = res.get('_sub_blob_det_id')
+            if det_id is None:
+                continue
+            res['type'] = f'kpt_{det_id}'
+            res['_parent_det_id'] = det_id
+            # _sub_blob_iou already present on the dict
+
     def _detect_foreground_boxes(self, gray):
         """Detect motion regions via MOG2 background subtraction.
 
@@ -435,17 +528,21 @@ class OpticalFlowTracker:
         prev_fg_mask = self.fg_mask.copy() if isinstance(self.fg_mask, np.ndarray) else self.fg_mask
         bg_mask = self.bgsub.apply(gray)
         if self.bf_detect_shadow:
-            bg_mask[bg_mask == self.bg_shadow_pixel_value] = 0
+            cv2.LUT(bg_mask, self._shadow_lut, dst=bg_mask)
 
         # Temporal blend: 50% previous + 50% current for smoother transitions
-        self.fg_mask = np.uint8(0.5 * self.fg_mask) + np.uint8(0.5 * bg_mask)
+        # On the very first frame fg_mask is still int(0) — initialize it so dst= works in-place.
+        if not isinstance(self.fg_mask, np.ndarray):
+            self.fg_mask = bg_mask.copy()
+        else:
+            cv2.addWeighted(self.fg_mask, 0.5, bg_mask, 0.5, 0, dst=self.fg_mask)
 
         # Compute background change metric (used in velocity visualization)
         if isinstance(prev_fg_mask, int):
             prev_fg_mask = self.fg_mask.copy()  # First frame — no previous mask
-        diff_mask = np.abs(self.fg_mask - prev_fg_mask)
-        nonzero = diff_mask[diff_mask > 0]
-        self.bg_diff = np.mean(nonzero) if len(nonzero) > 0 else 0
+        diff_mask = cv2.absdiff(self.fg_mask, prev_fg_mask)
+        count = cv2.countNonZero(diff_mask)
+        self.bg_diff = cv2.sumElems(diff_mask)[0] / count if count > 0 else 0
 
         # --- 2. Morphological cleanup ---
         if self.bg_mask_dilate_ksize[0] > 1:
@@ -454,7 +551,7 @@ class OpticalFlowTracker:
             self.fg_mask = cv2.dilate(self.fg_mask, kernel, iterations=1)
 
         # Binary threshold: pixels above threshold become foreground (255)
-        self.fg_mask[self.fg_mask > self.bg_min_pix_thr] = 255
+        #self.fg_mask[self.fg_mask > self.bg_min_pix_thr] = 255
         contours, _ = cv2.findContours(self.fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # --- 3. Collect detection boxes from all sources ---
@@ -469,18 +566,9 @@ class OpticalFlowTracker:
             person_detections = self.person_detector.detect(frame_bgr)
             results.extend(person_detections)
 
-        # 3b. YOLOX detector (skip boxes that overlap existing person detections)
-        if self.enable_yolox and self.yolox_detector is not None:
-            if frame_bgr is None:
-                frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            dets = self.yolox_detector.detect(frame_bgr)
-            for det in dets:
-                if not self.contour_in_dets(det['bbox'], results):
-                    yolox_detections.append(det)
-            #print(f"YOLOX detections: {len(yolox_detections)}, Person detections: {len(person_detections)}, Contours: {len(contours)}"  )
-            results.extend(yolox_detections)
-
-        # 3c. MOG2 contour boxes — sorted by area (largest first), skip overlapping DL detections
+        # 3b. MOG2 contour boxes — sorted by area (largest first).
+        #     Added before YOLOX so that YOLOX can promote them instead of adding duplicate boxes.
+        #     Only skip contours that overlap Haar person detections (already correctly typed).
         areas = np.array([cv2.contourArea(cnt) for cnt in contours])
         indx  = np.argsort(areas)[::-1].astype(np.int32)
         areas = areas[indx]
@@ -488,27 +576,110 @@ class OpticalFlowTracker:
         for cnt, area in zip(contours, areas):
             if area > self.bg_min_bbox_area:
                 x, y, w, h = cv2.boundingRect(cnt)
-                if self.contour_in_dets([x, y, x + w, y + h], yolox_detections + person_detections):
-                    continue  # Skip if this contour overlaps with a prior detection
                 _mask = np.zeros_like(self.fg_mask)
                 _mask[y:y+h, x:x+w] = self.fg_mask[y:y+h, x:x+w]
-                
                 results.append({'bbox': [x, y, x + w, y + h],
-                                'bbox_xywh': [int(x + w/2), int(y + h/2), int(w), int(h)],
                                 'centroid': [y + h / 2, x + w / 2],
                                 'mask': _mask,
-                                #'score': (h*w)  / (gray.shape[0] * gray.shape[1]),  # Relative area as confidence score
                                 'type': 'motion'})
+
+        # 3c. YOLOX detector — runs after contours so contour_in_dets() can promote the
+        #     best-matching motion box in one IoU pass instead of adding a duplicate DL box.
+        #     Motion-gated: only runs when bg_diff or velocity indicates activity.
+        #     Temporal skip: within active windows, only infers every N frames.
+        if self.enable_yolox and self.yolox_detector is not None:
+            motion_detected = (self.bg_diff >= self._yolox_bg_diff_threshold
+                               or self._last_max_vel > self._yolox_max_vel_threshold)
+            if motion_detected:
+                self._yolox_idle_frames = 0
+                self._yolox_det_counter = self._yolox_det_interval
+            else:
+                self._yolox_idle_frames += 1
+
+            if self._yolox_idle_frames < self._yolox_cooldown_frames:
+                # Temporal skip: only call the model every N frames
+                self._yolox_det_counter += 1
+                if self._yolox_det_counter >= self._yolox_det_interval:
+                    self._yolox_det_counter = 0
+                    if frame_bgr is None:
+                        frame_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                    dets = self.yolox_detector.detect(frame_bgr)
+                    # Assign temporary per-frame IDs so sub-blobs can reference their parent det
+                    for idx, det in enumerate(dets):
+                        det['_det_id'] = idx if self.enable_sub_blob else None
+                    self._last_yolox_dets = []
+                    for det in dets:
+                        # If det overlaps a motion box → remove motion box, add YOLOX det.
+                        # If det overlaps a Haar box → skip (already correctly typed).
+                        # If no overlap → add as a new DL detection.
+                        self.contour_in_dets(det['bbox'], det['_det_id'], results)
+                        yolox_detections.append(det)
+                    # Tag remaining motion boxes that partially overlap a YOLOX det
+                    if self.enable_sub_blob:
+                        self._tag_sub_blobs(results)
+                    self._last_yolox_dets = list(yolox_detections)  # cache for skipped frames
+                    results.extend(yolox_detections)
+                else:
+                    # Skipped frame: replay cached YOLOX dets.
+                    for det in self._last_yolox_dets:
+                        self.contour_in_dets(det['bbox'], det['_det_id'], results)
+                        results.append(det)
+                    if self.enable_sub_blob:
+                        self._tag_sub_blobs(results)
+            else:
+                # Scene went idle — reset counter and clear cache
+                self._yolox_det_counter = 0
+                self._last_yolox_dets = []
 
         # --- 4. Assign persistent IDs + CamShift bbox refinement ---
         results = self.tracker.update(results)
         for i in results.keys():
+            bbox = results[i]['bbox']
+            x1 = int(bbox[0]);  y1 = int(bbox[1])
+            bw  = int(bbox[2] - bbox[0]);  bh = int(bbox[3] - bbox[1])
+            # cv2.CamShift expects (x_topleft, y_topleft, w, h) — NOT center format.
+            # Passing (cx, cy, w, h) started the search in the bottom-right quadrant,
+            # causing the window to drift downward especially for rectangular YOLOX masks.
             ret, track_window = cv2.CamShift(
-                results[i]['mask'], results[i]['bbox_xywh'],
+                results[i]['mask'], (x1, y1, bw, bh),
                 (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 1))
-            results[i]['bbox_xywh'] = track_window
-            x, y, w, h = track_window
-            results[i]['bbox'] = np.array([x, y, x + w, y + h])
+            tx, ty, tw, th = track_window
+            results[i]['bbox'] = np.array([tx, ty, tx + tw, ty + th])
+
+        # --- 5. Sub-blob post-processing ---
+        # ByteTracker preserves all dict fields (via copy), so '_det_id' on YOLOX tracks
+        # and 'type'='kpt_{det_id}' on sub-blob tracks both survive the update.
+        # Build det_id → tracker pid mapping for YOLOX-type parent tracks.
+        det_id_to_pid = {}
+        for pid, data in results.items():
+            if '_det_id' in data:
+                det_id_to_pid[data['_det_id']] = pid
+
+        # Attach each tracked sub-blob's centroid to its parent as sub_keypoints.
+        sub_blob_pids = []
+        for pid, data in list(results.items()):
+            ptype = data.get('type', '')
+            if not ptype.startswith('kpt_'):
+                continue
+            parent_det_id = int(ptype.split('_', 1)[1])
+            parent_pid = det_id_to_pid.get(parent_det_id)
+            if parent_pid is not None and parent_pid in results:
+                bbox = data['bbox']
+                cx = float((bbox[0] + bbox[2]) / 2)
+                cy = float((bbox[1] + bbox[3]) / 2)
+                if 'sub_keypoints' not in results[parent_pid]:
+                    results[parent_pid]['sub_keypoints'] = []
+                results[parent_pid]['sub_keypoints'].append({'centroid': [cx, cy], 'blob_pid': pid})
+            sub_blob_pids.append(pid)
+
+        # In fast mode there is no LK flow to propagate sub-blob positions, so a sub-blob
+        # track was only kept alive through ByteTracker.  Now that centroids are attached
+        # to the parent, remove sub-blob tracks from the top-level result so they are not
+        # emitted as independent objects.  In accurate mode we keep them so
+        # _detect_keypoints_in_boxes can run SIFT/GFTT on them too.
+        if self.det_method == 'fast':
+            for pid in sub_blob_pids:
+                results.pop(pid, None)
 
         return results
     
@@ -578,6 +749,20 @@ class OpticalFlowTracker:
                             inds   = np.argsort(scores[:, 0])[::-1]
                             pts    = pts[inds][:self.kpt_max_kpts].reshape(-1, 2)
                             scores = scores[inds][:self.kpt_max_kpts].reshape(-1, 1)
+
+            # Inject sub-blob centroids as low-confidence keypoints (accurate mode only).
+            # Sub-blobs are small MOG2 contours with partial overlap against this YOLOX det —
+            # they act as a cheap pose hint when RTMPose is disabled.
+            sub_kpts = results[i].get('sub_keypoints')
+            if sub_kpts:
+                sub_pts = np.array([[sk['centroid'][0], sk['centroid'][1]] for sk in sub_kpts],
+                                   dtype=np.float32)
+                sub_sc  = np.full((len(sub_kpts), 1), 0.3, dtype=np.float32)
+                pts    = np.concatenate([pts, sub_pts], axis=0)
+                scores = np.concatenate([scores, sub_sc], axis=0)
+                inds   = np.argsort(scores[:, 0])[::-1]
+                pts    = pts[inds][:self.kpt_max_kpts].reshape(-1, 2)
+                scores = scores[inds][:self.kpt_max_kpts].reshape(-1, 1)
 
             results[i]['keypoints_1'] = pts
             results[i]['keypoints_2'] = pts.copy()
@@ -729,10 +914,9 @@ class OpticalFlowTracker:
         """Run full detection + tracking pipeline on one BGR frame.
 
         Returns:
-            If return_pts=False: (viz_frame, points_dict)
-            If return_pts=True:  (viz_frame, points_dict, pts_out)
+            If return_pts=False: (points_dict,)
+            If return_pts=True:  (points_dict, pts_out)
 
-            viz_frame:    Frame with flow trails and bounding boxes drawn.
             points_dict:  {traj_id: {vel, mean_vel, channel, bg_diff}} for top trajectories.
             pts_out:      Copy of per-object tracked point dict (for recording/external use).
         """
@@ -752,8 +936,8 @@ class OpticalFlowTracker:
             self.viz_div_h = int(gray.shape[0] // (self.num_traj_viz + 1))
             self.viz_div_w = int(gray.shape[1])
             if return_pts:
-                return frame, {}, _copy_pts(self.prev_pts)
-            return frame, {}
+                return {}, _copy_pts(self.prev_pts)
+            return ({},)
 
         self.prev_gray = gray
         self.memory._viz_pos = None
@@ -779,21 +963,41 @@ class OpticalFlowTracker:
                     'type': self.memory.classify_pid(pid),
                 }
 
+        # Update max velocity from this frame's trajectories (used by YOLOX motion gate next frame)
+        if points_dict:
+            self._last_max_vel = max(
+                (v['mean_vel'] for v in points_dict.values() if isinstance(v, dict) and 'mean_vel' in v),
+                default=0.0
+            )
+
         # --- Person count & density ---
         person_stats = self.get_person_stats(frame_shape=gray.shape)
+
+        # --- Scene trajectory analysis (fight / burglary scoring) ---
+        if self.scene_analyzer is not None and self.prev_pts:
+            h, w = gray.shape[:2]
+            self.scene_analyzer.set_frame_size(w, h)
+            current_pids = list(self.prev_pts.keys())
+            scene_result = self.scene_analyzer.update(
+                tracked_results=self.prev_pts,
+                flow_memory=self.memory,
+                current_pids=current_pids,
+                detections=self._last_yolox_dets,
+            )
+            person_stats['scene_analysis'] = scene_result
+
         points_dict['_stats'] = person_stats
 
-        viz_frame = self._draw_pts_flow(frame, self.prev_pts)
         pts_out = _copy_pts(self.prev_pts)
 
         # --- Fast mode: centroid-only detection (no optical flow) ---
         if self.det_method == 'fast':
             results = self._detect_foreground_boxes(gray)
             self.prev_pts = self._detect_keypoints_in_boxes(gray, results, det_feat_pts=False)
-            
+
             if return_pts:
-                return viz_frame, points_dict, pts_out
-            return viz_frame, points_dict
+                return points_dict, pts_out
+            return (points_dict,)
 
         # --- Accurate mode: sparse optical flow + keypoint re-detection ---
         self._compute_sparse_flow(gray)
@@ -802,8 +1006,8 @@ class OpticalFlowTracker:
         self.count += 1
 
         if return_pts:
-            return viz_frame, points_dict, pts_out
-        return viz_frame, points_dict
+            return points_dict, pts_out
+        return (points_dict,)
     
     def plot_velocities(self, plot_array, points_dict):
         """Draw per-trajectory velocity waveforms on plot_array.

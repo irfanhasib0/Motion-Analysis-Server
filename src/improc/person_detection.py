@@ -122,7 +122,6 @@ class PersonDetector:
                 
                 detection = {
                     'bbox': [x, y, x + w, y + h],
-                    'bbox_xywh': [int(x + w/2), int(y + h/2), int(w), int(h)],
                     'centroid': [y + h / 2, x + w / 2],
                     'mask': mask,
                     'type': 'face'
@@ -146,7 +145,6 @@ class PersonDetector:
                 
                 detection = {
                     'bbox': [x, y, x + w, y + h],
-                    'bbox_xywh': [int(x + w/2), int(y + h/2), int(w), int(h)],
                     'centroid': [y + h / 2, x + w / 2],
                     'mask': mask,
                     'type': 'body'

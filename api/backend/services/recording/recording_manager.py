@@ -607,6 +607,11 @@ class RecordingManager:
                     self.clip_vel[camera_id] = self.clip_vel.get(camera_id, 0.0) + vel
                     self.clip_bg_diff[camera_id] = self.clip_bg_diff.get(camera_id, 0) + bg_diff
                     self.clip_motion_frame_count[camera_id] += 1
+
+                # Scene analysis alerts also trigger recording
+                if res.get('fight_alert') or res.get('burglary_alert'):
+                    recent_motion_detected = True
+                    self.clip_motion_detected[camera_id] = True
                 else:
                     self.clip_no_motion_frame_count[camera_id] += 1
 
@@ -1043,7 +1048,8 @@ class RecordingManager:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                viz_frame, _pts = tracker.detect(frame)
+                _pts_dict, pts_out = tracker.detect(frame, return_pts=True)
+                viz_frame = tracker._draw_pts_flow(frame, pts_out)
                 writer.write(viz_frame)
                 frame_idx += 1
                 if frame_idx % 10 == 0 or frame_idx == total_frames:
